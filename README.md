@@ -17,7 +17,7 @@ See [SECURITY.md](SECURITY.md) and [THREAT_MODEL.md](THREAT_MODEL.md) for residu
 ## Quick start
 
 ```bash
-git clone https://github.com/your-org/naroom.git
+git clone https://github.com/naroomer/naroom.git
 cd naroom
 cp .env.example .env
 # Edit .env — set SERVER_SALT, WALLET_ENC_KEY, BTC_XPUB, LTC_XPUB at minimum
