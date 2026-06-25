@@ -49,7 +49,7 @@ Store both values in a password manager or hardware-backed secret store. Keep of
 ## Build and Run
 
 ```bash
-git clone https://github.com/naroom/naroom
+git clone https://github.com/naroomer/naroom
 cd naroom
 go build -o naroom ./cmd/naroom
 
