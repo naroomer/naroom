@@ -60,7 +60,7 @@ POST /wallet/register
   Body: { wallet_address, currency, role, signature, challenge_nonce }
   |
   +--> Verify BTC/LTC signature (internal/crypto/verify.go)
-  +--> HMAC-SHA256(SERVER_SALT, address) => wallet_hash
+  +--> HMAC-SHA256(HASH_KEY, address) => wallet_hash
   +--> AES-256-GCM encrypt address => wallet_address_enc
   +--> Upsert wallet_sessions row (wallet_hash, wallet_address_enc, role, ...)
   +--> Generate 32-byte random token; store SHA-256(token) in sessions table

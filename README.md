@@ -6,7 +6,7 @@ NA Room is an anonymous peer support platform for addiction recovery. Clients po
 
 - Chat messages are end-to-end encrypted (X25519 + XSalsa20-Poly1305 via TweetNaCl). The server stores only nonce + ciphertext and cannot decrypt anything.
 - Messages are permanently deleted when the session closes (also TTL-cleaned at 24 hours).
-- Wallet identity in listings, responses, and chat rooms is stored only as an HMAC-SHA256 hash. Without the server's `SERVER_SALT` key the database cannot be linked to real wallet addresses.
+- Wallet identity in listings, responses, and chat rooms is stored only as an HMAC-SHA256 hash (keyed by `HASH_KEY`). Without the server's `HASH_KEY` the database cannot be linked to real wallet addresses.
 - IP addresses are not logged. Rate limiting uses a hashed /24 subnet, never persisted.
 - No accounts, no email, no phone numbers, no usernames.
 - Session tokens: only the SHA-256 hash is stored in the database.
@@ -20,7 +20,7 @@ See [SECURITY.md](SECURITY.md) and [THREAT_MODEL.md](THREAT_MODEL.md) for residu
 git clone https://github.com/naroomer/naroom.git
 cd naroom
 cp .env.example .env
-# Edit .env — set SERVER_SALT, WALLET_ENC_KEY, BTC_XPUB, LTC_XPUB at minimum
+# Edit .env — set SERVER_SALT, HASH_KEY, WALLET_ENC_KEY, BTC_XPUB, LTC_XPUB at minimum
 go run ./cmd/naroom/main.go
 ```
 

@@ -22,16 +22,18 @@
 Every reference to a wallet in persistent tables (listings, responses, chat rooms, sessions, reputation, invoices) uses a keyed hash:
 
 ```
-wallet_hash = HMAC-SHA256(SERVER_SALT, "naroom:v1:" + normalize(wallet_address))
+wallet_hash = HMAC-SHA256(HASH_KEY, "naroom:v1:" + normalize(wallet_address))
 ```
+
+`HASH_KEY` is a dedicated environment variable for wallet hashing. If `HASH_KEY` is not set, the server falls back to `SERVER_SALT` for compatibility — but using a separate `HASH_KEY` in production is strongly recommended so that compromising one secret does not expose the other.
 
 **Why this provides unlinkability without the key:**
 
-HMAC-SHA256 is a one-way function keyed by `SERVER_SALT`. An attacker who obtains the database but not `SERVER_SALT` cannot reverse a hash to recover the wallet address, and cannot link two hashes to the same wallet even if they know the address. Without the key the hash values are opaque identifiers.
+HMAC-SHA256 is a one-way function keyed by `HASH_KEY`. An attacker who obtains the database but not `HASH_KEY` cannot reverse a hash to recover the wallet address, and cannot link two hashes to the same wallet even if they know the address. Without the key the hash values are opaque identifiers.
 
-**With `SERVER_SALT`:**
+**With `HASH_KEY`:**
 
-An attacker who has both the database and `SERVER_SALT` can reverse hashes by computing `HMAC(key, candidate)` for any candidate address and comparing. This allows linking wallet addresses to listing and chat history. This is documented as the primary residual risk when the key is compromised alongside the database.
+An attacker who has both the database and `HASH_KEY` can reverse hashes by computing `HMAC(key, candidate)` for any candidate address and comparing. This allows linking wallet addresses to listing and chat history. This is documented as the primary residual risk when the key is compromised alongside the database.
 
 **Address normalization:** addresses are lowercased and trimmed before hashing to ensure `1AbC...` and `1abc...` produce the same hash.
 
@@ -110,7 +112,7 @@ For WebSocket authentication, the token is passed in the `Sec-WebSocket-Protocol
 
 ## Database Attacker Scenarios
 
-### Scenario A: Database stolen, `SERVER_SALT` and `WALLET_ENC_KEY` unknown
+### Scenario A: Database stolen, `HASH_KEY` and `WALLET_ENC_KEY` unknown
 
 | What the attacker has | What they can recover |
 |----------------------|----------------------|
@@ -124,11 +126,11 @@ For WebSocket authentication, the token is passed in the `Sec-WebSocket-Protocol
 
 **Result:** Listing metadata and Telegram subscriptions are exposed. Wallet identity and chat content are protected.
 
-### Scenario B: Database stolen + `SERVER_SALT` known
+### Scenario B: Database stolen + `HASH_KEY` known
 
 | What changes |
 |-------------|
-| Wallet hashes in `listings`, `responses`, `chat_rooms`, `sessions`, `reputation` can be reversed by computing `HMAC(SERVER_SALT, candidate)` for any candidate address. |
+| Wallet hashes in `listings`, `responses`, `chat_rooms`, `sessions`, `reputation` can be reversed by computing `HMAC(HASH_KEY, candidate)` for any candidate address. |
 | An attacker can determine which listings and chat sessions are linked to a known wallet. |
 | Chat message content is still E2E encrypted and cannot be read. |
 | `wallet_address_enc` remains protected unless `WALLET_ENC_KEY` is also known. |
