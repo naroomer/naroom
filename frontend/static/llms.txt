@@ -1,0 +1,61 @@
+# NA Room
+
+> Anonymous peer-to-peer support platform for people dealing with addiction.
+
+NA Room connects people who need help (clients) with peers who have lived experience with addiction and want to support others. No professional credentials required — this is peer support, not medical care.
+
+## What it is
+
+- Anonymous by design: no accounts, no email, no phone number
+- End-to-end encrypted chat
+- Crypto wallet used only for identity verification (no funds collected from users beyond listing/chat fees)
+- Works on Tor (.onion address available)
+- Open source: github.com/naroom
+
+## What it is not
+
+- Not a medical service
+- Not a crisis hotline
+- Not therapy or treatment
+- Not a substitute for emergency services
+
+## How it works
+
+**For clients (people seeking help):**
+1. Verify a BTC or LTC wallet with $150+ balance (no funds moved — balance check only)
+2. Post an anonymous listing for $5 — visible for 6 hours
+3. Browse responses from peers
+4. Accept one peer — a $15 invoice is created for the peer to pay
+5. Once peer pays, an end-to-end encrypted chat opens (up to 24 hours)
+6. All messages permanently deleted when session closes
+
+**For peers (people who want to help):**
+1. Verify a BTC or LTC wallet with $1,000+ balance
+   - $1,000 = 2 active response slots; each additional $1,000 adds 2 more
+2. Browse the board anonymously — no account needed
+3. Respond to listings for free
+4. If accepted, pay $15 to open the chat
+5. Build anonymous reputation through client ratings (👍 / 👎)
+
+## Fees
+
+- Client: $5 to post a listing (6 hours), $5 to renew (adds 6 hours, up to 30-day window)
+- Peer: $15 to open a chat after being accepted
+
+## Languages
+
+English, Russian, Spanish, Georgian
+
+## Cities
+
+Tbilisi, Batumi, Almaty, Yerevan, Moscow, Nha Trang, Da Nang
+
+## Pages
+
+- /how-it-works — full guide with role switcher (client / peer) and FAQ
+- /new — post a listing
+- /board/{city} — browse listings by city
+
+## Emergency
+
+NA Room is not an emergency service. For immediate danger: Georgia/Russia: 112 · Vietnam: 113/115 · Argentina/Brazil: 112

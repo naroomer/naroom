@@ -1,0 +1,12 @@
+{
+  "name": "naroom-e2e",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "node run-all.js"
+  },
+  "dependencies": {
+    "tweetnacl": "^1.0.3",
+    "ws": "^8.18.2"
+  }
+}

@@ -1,0 +1,36 @@
+# Database files (contain user data — never commit)
+*.db
+*.db-shm
+*.db-wal
+
+# Environment / secrets
+.env
+.env.local
+.env.production
+
+# Compiled binaries
+/naroom
+/naroom_bin
+/naroom_linux
+naroom_*
+
+# Frontend build artifacts
+frontend/node_modules/
+frontend/build/
+frontend/.svelte-kit/
+frontend/.env
+
+# Go build cache (not needed in repo)
+vendor/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# E2E dependencies
+e2e/node_modules/
+
+# Local diagnostics
+e2e/diagnose_*.js

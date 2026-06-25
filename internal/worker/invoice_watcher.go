@@ -1,0 +1,501 @@
+package worker
+
+import (
+	"context"
+	"database/sql"
+	"log"
+	"math"
+	"strconv"
+	"time"
+
+	ncrypto "naroom/internal/crypto"
+	"naroom/internal/telegram"
+)
+
+// InvoiceWatcher checks pending invoices for incoming payments.
+type InvoiceWatcher struct {
+	DB      *sql.DB
+	HashKey []byte // HMAC key for WalletHash — matches handler.HashKey
+	Mempool     *ncrypto.MempoolClient
+	Blockcypher *ncrypto.BlockcypherClient
+	Prices      PriceFetcher // implemented by *ncrypto.PriceCache; interface for testability
+	Interval    time.Duration
+	DevMode     bool
+	ListingTTL  int
+	ChatTTL     int
+
+	// Telegram support — set when bot tokens are configured.
+	// When RequireTelegram is true, listings only activate after BOTH payment
+	// AND Telegram binding are confirmed. When false, payment alone activates
+	// (dev mode and deployments without Telegram configured).
+	RequireTelegram bool
+	TelegramSender  telegram.Sender
+	PublicBaseURL   string
+}
+
+func (iw *InvoiceWatcher) Run(ctx context.Context) {
+	log.Printf("invoice_watcher started (interval %s)", iw.Interval)
+	ticker := time.NewTicker(iw.Interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("invoice_watcher stopped")
+			return
+		case <-ticker.C:
+			iw.watch(ctx)
+		}
+	}
+}
+
+func (iw *InvoiceWatcher) watch(ctx context.Context) {
+	rows, err := iw.DB.Query(`
+		SELECT id, type, address, amount_crypto, currency, listing_id, response_id, client_pubkey, payer_address, created_at, payment_detected_at, price_at_creation
+		FROM invoices
+		WHERE status = 'pending'
+	`)
+	if err != nil {
+		log.Printf("invoice_watcher query error: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	type invoice struct {
+		id                string
+		typ               string
+		address           string
+		amountCrypto      string
+		currency          string
+		listingID         sql.NullString
+		responseID        sql.NullString
+		clientPubkey      sql.NullString
+		payerAddress      sql.NullString
+		createdAt         int64
+		paymentDetectedAt sql.NullInt64
+		priceAtCreation   sql.NullFloat64
+	}
+
+	var invoices []invoice
+	for rows.Next() {
+		var inv invoice
+		if err := rows.Scan(&inv.id, &inv.typ, &inv.address, &inv.amountCrypto,
+			&inv.currency, &inv.listingID, &inv.responseID, &inv.clientPubkey, &inv.payerAddress,
+			&inv.createdAt, &inv.paymentDetectedAt, &inv.priceAtCreation); err != nil {
+			continue
+		}
+		invoices = append(invoices, inv)
+	}
+	rows.Close()
+
+	now := time.Now().Unix()
+
+	for _, inv := range invoices {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		time.Sleep(200 * time.Millisecond) // rate limit
+
+		// Expiry logic:
+		//   Normal: expire after 1 hour if no payment detected.
+		//   Bounded grace: if a payment was detected but balance/price API is down,
+		//   give an extra 24h from detection time before expiring.
+		//   This prevents punishing valid payments during a temporary API outage.
+		expiryDeadline := inv.createdAt + 3600
+		if inv.paymentDetectedAt.Valid {
+			grace := inv.paymentDetectedAt.Int64 + 86400
+			if grace > expiryDeadline {
+				expiryDeadline = grace
+			}
+		}
+		if now > expiryDeadline {
+			iw.DB.Exec(`UPDATE invoices SET status = 'expired' WHERE id = ?`, inv.id)
+			log.Printf("invoice_watcher: expired invoice %s (type=%s)", inv.id, inv.typ)
+			continue
+		}
+
+		// Dev mode: автоматически подтверждаем все pending invoices
+		if iw.DevMode {
+			iw.confirmInvoice(inv.id, inv.typ, "dev_txid_"+inv.id, 1000000,
+				inv.listingID.String, inv.responseID.String, inv.clientPubkey.String)
+			continue
+		}
+
+		// Check for confirmed payment
+		if inv.currency == "BTC" {
+			tx, amount, senders, err := iw.Mempool.FindPayment(inv.address, 0)
+			if err != nil {
+				log.Printf("invoice_watcher: BTC check error for %s: %v", inv.id, err)
+				continue
+			}
+			if tx != nil {
+				// Payment found on-chain — record detection time for bounded grace period.
+				// This ensures API outages don't expire valid payments within 24h of detection.
+				if !inv.paymentDetectedAt.Valid {
+					iw.DB.Exec(`UPDATE invoices SET payment_detected_at = ? WHERE id = ? AND payment_detected_at IS NULL`, now, inv.id)
+				}
+				if !iw.verifySenderAndBalance(inv.id, inv.typ, inv.currency, inv.payerAddress.String, senders, inv.priceAtCreation.Float64) {
+					continue
+				}
+				iw.confirmInvoice(inv.id, inv.typ, tx.TxID, amount,
+					inv.listingID.String, inv.responseID.String, inv.clientPubkey.String)
+			}
+		} else {
+			tx, amount, senders, err := iw.Blockcypher.FindPayment(inv.address, 0)
+			if err != nil {
+				log.Printf("invoice_watcher: LTC check error for %s: %v", inv.id, err)
+				continue
+			}
+			if tx != nil {
+				// Payment found on-chain — record detection time for bounded grace period.
+				if !inv.paymentDetectedAt.Valid {
+					iw.DB.Exec(`UPDATE invoices SET payment_detected_at = ? WHERE id = ? AND payment_detected_at IS NULL`, now, inv.id)
+				}
+				if !iw.verifySenderAndBalance(inv.id, inv.typ, inv.currency, inv.payerAddress.String, senders, inv.priceAtCreation.Float64) {
+					continue
+				}
+				iw.confirmInvoice(inv.id, inv.typ, tx.Hash, amount,
+					inv.listingID.String, inv.responseID.String, inv.clientPubkey.String)
+			}
+		}
+	}
+}
+
+// satoshisFromCryptoStr converts a human-readable crypto amount string (e.g. "0.00045678")
+// to satoshis/litoshis (integer, 8 decimal places).
+func satoshisFromCryptoStr(s string) int64 {
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0
+	}
+	return int64(math.Round(f * 1e8))
+}
+
+func (iw *InvoiceWatcher) confirmInvoice(invoiceID, typ, txid string, amount int64,
+	listingID, responseID, clientPubkey string) {
+
+	// Fetch expected amount and currency before confirming.
+	var amountCrypto, currency string
+	err := iw.DB.QueryRow(`SELECT amount_crypto, currency FROM invoices WHERE id = ?`, invoiceID).
+		Scan(&amountCrypto, &currency)
+	if err != nil {
+		log.Printf("invoice_watcher: cannot fetch invoice %s for amount check: %v", invoiceID, err)
+		return
+	}
+
+	// In dev mode we skip the amount check (mocked payments send dummy amounts).
+	if !iw.DevMode {
+		expected := satoshisFromCryptoStr(amountCrypto)
+		// Allow up to 1% underpayment (mempool fee fluctuation).
+		minAccepted := int64(math.Round(float64(expected) * 0.99))
+		if amount < minAccepted {
+			log.Printf("invoice_watcher: dust payment for invoice %s: got %d satoshis, need %d (expected %s %s)",
+				invoiceID, amount, expected, amountCrypto, currency)
+			return
+		}
+	}
+
+	log.Printf("invoice_watcher: confirmed %s (type=%s, txid=%s, amount=%d sat)", invoiceID, typ, txid, amount)
+
+	tx, err := iw.DB.Begin()
+	if err != nil {
+		log.Printf("invoice_watcher: begin tx for invoice %s: %v", invoiceID, err)
+		return
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	res, err := tx.Exec(`UPDATE invoices SET status = 'confirmed', txid = ? WHERE id = ? AND status = 'pending'`,
+		txid, invoiceID)
+	if err != nil {
+		log.Printf("invoice_watcher: mark confirmed invoice %s: %v", invoiceID, err)
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// Invoice was already confirmed/expired by a concurrent worker — skip all side effects.
+		log.Printf("invoice_watcher: invoice %s already processed, skipping", invoiceID)
+		return
+	}
+
+	now := time.Now().Unix()
+
+	var notifyListingID string // set when a listing is activated/renewed; notified after commit
+
+	switch typ {
+	case "listing":
+		if listingID == "" {
+			log.Printf("invoice_watcher: listing invoice %s has no listing_id", invoiceID)
+			return
+		}
+		if iw.RequireTelegram {
+			// Two-gate activation: both confirmed invoice AND Telegram binding required.
+			// ActivateListingIfReady checks both within the same transaction.
+			activated, err := telegram.ActivateListingIfReady(tx, listingID, iw.ListingTTL, true)
+			if err != nil {
+				log.Printf("invoice_watcher: activate listing %s: %v", listingID, err)
+				return
+			}
+			if activated {
+				log.Printf("invoice_watcher: listing %s activated (payment+telegram)", listingID)
+				notifyListingID = listingID
+			} else {
+				log.Printf("invoice_watcher: listing %s payment confirmed, awaiting telegram binding", listingID)
+			}
+		} else {
+			// Dev mode or no Telegram configured: activate on payment alone.
+			ttl := int64(iw.ListingTTL)
+			if ttl == 0 {
+				ttl = 21600
+			}
+			res, err := tx.Exec(`
+				UPDATE listings
+				SET status = 'active', visible_until = ?, payment_txid = ?,
+				    first_activated_at = COALESCE(first_activated_at, ?)
+				WHERE id = ? AND status = 'pending'
+			`, now+ttl, txid, now, listingID)
+			if err != nil {
+				log.Printf("invoice_watcher: activate listing %s: %v", listingID, err)
+				return
+			}
+			if n, _ := res.RowsAffected(); n > 0 {
+				log.Printf("invoice_watcher: listing %s activated (6h)", listingID)
+				notifyListingID = listingID
+			}
+		}
+
+	case "listing_renew":
+		if listingID == "" {
+			log.Printf("invoice_watcher: renew invoice %s has no listing_id", invoiceID)
+			return
+		}
+		if iw.RequireTelegram {
+			renewed, err := telegram.RenewListingIfReady(tx, listingID, iw.ListingTTL, true)
+			if err != nil {
+				log.Printf("invoice_watcher: renew listing %s: %v", listingID, err)
+				return
+			}
+			if renewed {
+				log.Printf("invoice_watcher: listing %s renewed (payment+telegram)", listingID)
+				notifyListingID = listingID
+			} else {
+				log.Printf("invoice_watcher: listing %s renewal payment confirmed, awaiting fresh telegram binding", listingID)
+			}
+		} else {
+			ttl := int64(iw.ListingTTL)
+			if ttl == 0 {
+				ttl = 21600
+			}
+			res, err := tx.Exec(`
+				UPDATE listings
+				SET status = 'active',
+				    visible_until = ? + ?,
+				    renewal_count = COALESCE(renewal_count, 0) + 1
+				WHERE id = ? AND status IN ('active', 'expired')
+			`, now, ttl, listingID)
+			if err != nil {
+				log.Printf("invoice_watcher: renew listing %s: %v", listingID, err)
+				return
+			}
+			if n, _ := res.RowsAffected(); n > 0 {
+				log.Printf("invoice_watcher: listing %s renewed (+6h)", listingID)
+				notifyListingID = listingID
+			}
+		}
+
+	case "chat":
+		if responseID == "" || clientPubkey == "" {
+			log.Printf("invoice_watcher: chat invoice %s missing response_id or client_pubkey", invoiceID)
+			return
+		}
+
+		// Защита от дублей — не создавать комнату дважды (читаем внутри транзакции)
+		var existing string
+		err := tx.QueryRow(`SELECT chat_room_id FROM invoices WHERE id = ? AND chat_room_id IS NOT NULL`, invoiceID).Scan(&existing)
+		if err == nil && existing != "" {
+			log.Printf("invoice_watcher: chat room already created for invoice %s", invoiceID)
+			return
+		}
+
+		// Получить данные из response — counselor_hash уже хранится хешем
+		var listingIDFromResp, counselorHash, counselorPubkey string
+		err = tx.QueryRow(`
+			SELECT listing_id, counselor_hash, counselor_pubkey
+			FROM responses WHERE id = ?
+		`, responseID).Scan(&listingIDFromResp, &counselorHash, &counselorPubkey)
+		if err != nil {
+			log.Printf("invoice_watcher: response %s not found: %v", responseID, err)
+			return
+		}
+
+		// Получить хеш клиента из listing — wallet_hash уже хранится хешем
+		var clientHash string
+		err = tx.QueryRow(`SELECT wallet_hash FROM listings WHERE id = ?`, listingIDFromResp).Scan(&clientHash)
+		if err != nil {
+			log.Printf("invoice_watcher: listing %s not found: %v", listingIDFromResp, err)
+			return
+		}
+
+		// Создать chat_room — хранятся хеши, не plain адреса
+		roomID := ncrypto.NewID("room")
+		chatTTL := int64(iw.ChatTTL)
+		if chatTTL == 0 {
+			chatTTL = 86400
+		}
+		_, err = tx.Exec(`
+			INSERT INTO chat_rooms (id, listing_id, response_id, client_hash, counselor_hash,
+			                        client_pubkey, counselor_pubkey, started_at, expires_at, status)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+		`, roomID, listingIDFromResp, responseID,
+			clientHash, counselorHash,
+			clientPubkey, counselorPubkey,
+			now, now+chatTTL)
+		if err != nil {
+			log.Printf("invoice_watcher: create chat_room: %v", err)
+			return
+		}
+
+		// Убрать листинг с борда — чат уже найден
+		if _, err = tx.Exec(`UPDATE listings SET status = 'matched' WHERE id = ?`, listingIDFromResp); err != nil {
+			log.Printf("invoice_watcher: mark listing matched %s: %v", listingIDFromResp, err)
+			return
+		}
+
+		// Записать room_id в invoice (защита от дублей)
+		if _, err = tx.Exec(`UPDATE invoices SET chat_room_id = ? WHERE id = ?`, roomID, invoiceID); err != nil {
+			log.Printf("invoice_watcher: set chat_room_id on invoice %s: %v", invoiceID, err)
+			return
+		}
+
+		log.Printf("invoice_watcher: chat room %s created (listing=%s, response=%s)",
+			roomID, listingIDFromResp, responseID)
+	}
+
+	if err := tx.Commit(); err != nil {
+		log.Printf("invoice_watcher: commit invoice %s: %v", invoiceID, err)
+		return
+	}
+
+	// Notify matching helpers after commit (listing must be 'active' in DB)
+	if notifyListingID != "" && iw.TelegramSender != nil {
+		boardURL := iw.PublicBaseURL + "/board"
+		go telegram.NotifyMatchingHelpers(context.Background(), iw.DB, iw.TelegramSender, notifyListingID, boardURL)
+	}
+}
+
+// verifySenderAndBalance checks that the payment came from the registered wallet address
+// and that the sender's balance still meets the minimum threshold (with $10 buffer for price swings).
+//
+// BTC/LTC transactions can have multiple inputs from different addresses.
+// We accept the payment if ANY of the senders matches the registered wallet hash.
+//
+// Error handling:
+//   - Confirmed mismatch (wrong sender, wrong hash, no senders): reject invoice
+//   - API error (balance check, price feed): leave invoice pending — will retry next cycle
+//   - Empty payerAddress: reject — indicates a data integrity problem
+// verifySenderAndBalance checks sender identity and post-payment balance.
+// priceAtCreation: USD/coin rate stored when the invoice was created (0 if unknown).
+// At confirmation we use the more user-favorable of creation price and current price,
+// so a price drop between creation and confirmation does not incorrectly fail the gate.
+func (iw *InvoiceWatcher) verifySenderAndBalance(invoiceID, typ, currency, payerAddress string, senders []string, priceAtCreation float64) bool {
+	// DevMode: skip all verification, confirm everything
+	if iw.DevMode {
+		return true
+	}
+
+	// Empty payerAddress means the invoice was created without a registered wallet — data integrity error
+	if payerAddress == "" {
+		log.Printf("invoice_watcher: empty payer_address for invoice %s — rejecting", invoiceID)
+		iw.DB.Exec(`UPDATE invoices SET status = 'rejected' WHERE id = ?`, invoiceID)
+		return false
+	}
+
+	// No senders in transaction inputs — unreadable tx, reject
+	if len(senders) == 0 {
+		log.Printf("invoice_watcher: no sender addresses in tx for invoice %s — rejecting", invoiceID)
+		iw.DB.Exec(`UPDATE invoices SET status = 'rejected' WHERE id = ?`, invoiceID)
+		return false
+	}
+
+	// Verify at least one sender matches the registered wallet — compare hashes, never plain addresses
+	var matchedSender string
+	for _, s := range senders {
+		if ncrypto.WalletHash(iw.HashKey, s) == payerAddress {
+			matchedSender = s
+			break
+		}
+	}
+	if matchedSender == "" {
+		log.Printf("invoice_watcher: no sender hash matches payer for invoice %s — rejecting", invoiceID)
+		iw.DB.Exec(`UPDATE invoices SET status = 'rejected' WHERE id = ?`, invoiceID)
+		return false
+	}
+
+	// Balance check: sender must still hold the required minimum AFTER paying the invoice.
+	//
+	// Invariant (intentional product decision):
+	//   listing ($5 payment):  client registered with ≥$150 → post-payment check ≥$135 ($150 - $5 - $10 buffer)
+	//   chat ($15 payment):    peer registered with ≥$1000 → post-payment check ≥$975 ($1000 - $15 - $10 buffer)
+	//
+	// The lower post-payment threshold is by design — we do not penalize users for the platform fee itself.
+	// The $10 buffer covers price volatility in the ~30s poll interval. This is a heuristic, not a hard guarantee.
+	if iw.Prices == nil {
+		return true // no price client configured, skip balance check
+	}
+
+	invoiceCost := 5.0
+	minHold := 150.0
+	if typ == "chat" {
+		invoiceCost = 15.0
+		minHold = 1000.0
+	}
+	minUSD := minHold - invoiceCost - 10.0 // subtract invoice cost + $10 volatility buffer
+
+	var balanceUSD float64
+	if currency == "BTC" {
+		sat, err := iw.Mempool.GetBalance(matchedSender)
+		if err != nil {
+			log.Printf("invoice_watcher: BTC balance check failed for invoice %s: %v — leaving pending", invoiceID, err)
+			return false // leave pending, retry next cycle
+		}
+		currentPrice, err := iw.Prices.BTCPrice()
+		if err != nil {
+			log.Printf("invoice_watcher: BTC price unavailable for invoice %s: %v — leaving pending", invoiceID, err)
+			return false // leave pending, retry next cycle
+		}
+		// Use the more favorable price (higher = more USD per coin = higher apparent balance).
+		// This protects users from price drops between invoice creation and confirmation.
+		price := currentPrice
+		if priceAtCreation > price {
+			price = priceAtCreation
+		}
+		balanceUSD = float64(sat) / 1e8 * price
+	} else {
+		lit, err := iw.Blockcypher.GetBalance(matchedSender)
+		if err != nil {
+			log.Printf("invoice_watcher: LTC balance check failed for invoice %s: %v — leaving pending", invoiceID, err)
+			return false // leave pending, retry next cycle
+		}
+		currentPrice, err := iw.Prices.LTCPrice()
+		if err != nil {
+			log.Printf("invoice_watcher: LTC price unavailable for invoice %s: %v — leaving pending", invoiceID, err)
+			return false // leave pending, retry next cycle
+		}
+		price := currentPrice
+		if priceAtCreation > price {
+			price = priceAtCreation
+		}
+		balanceUSD = float64(lit) / 1e8 * price
+	}
+
+	if balanceUSD < minUSD {
+		log.Printf("invoice_watcher: insufficient balance for invoice %s: sender has $%.2f, need $%.2f — rejecting",
+			invoiceID, balanceUSD, minUSD)
+		iw.DB.Exec(`UPDATE invoices SET status = 'rejected' WHERE id = ?`, invoiceID)
+		return false
+	}
+
+	log.Printf("invoice_watcher: sender verified for invoice %s: balance $%.2f ≥ $%.2f", invoiceID, balanceUSD, minUSD)
+	return true
+}

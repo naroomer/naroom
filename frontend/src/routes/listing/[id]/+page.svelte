@@ -1,0 +1,731 @@
+<script>
+	import { goto } from '$app/navigation';
+	import { onMount, onDestroy } from 'svelte';
+	import nacl from 'tweetnacl';
+	import { lang, t as tFn, pluralRu } from '$lib/i18n.js';
+
+	let t = $derived((key, params) => tFn($lang, key, params));
+
+	function bytesToHex(bytes) {
+		return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+	}
+
+	let { data } = $props();
+	const listing = $derived(data.listing);
+
+	function urgencyColor(u) {
+		if (u === 'urgent') return 'var(--urgent)';
+		if (u === 'soon')   return 'var(--warn)';
+		return 'var(--can-wait)';
+	}
+	function timeLeft(seconds) {
+		if (seconds <= 0) return t('time.expired');
+		const h = Math.floor(seconds / 3600);
+		const m = Math.floor((seconds % 3600) / 60);
+		if (h > 0) return t('time.h_m_left', {h, m});
+		return t('time.m_left', {m});
+	}
+	function sessionsLabel(n) {
+		if ($lang === 'ru') {
+			const form = pluralRu(n);
+			const key = form === 'one' ? 'listing.sessions_one' : form === 'few' ? 'listing.sessions_few' : 'listing.sessions_other';
+			return t(key, {n});
+		}
+		return t(n === 1 ? 'listing.sessions_one' : 'listing.sessions_other', {n});
+	}
+	function daysRemLabel(days) {
+		if ($lang === 'ru') {
+			const form = pluralRu(days);
+			const key = form === 'one' ? 'listing.days_rem_one' : form === 'few' ? 'listing.days_rem_few' : 'listing.days_rem_other';
+			return t(key, {days});
+		}
+		return t(days === 1 ? 'listing.days_rem_one' : 'listing.days_rem_other', {days});
+	}
+	function shortAddr(addr) {
+		if (!addr) return '';
+		return addr.length > 16 ? addr.slice(0, 8) + '...' + addr.slice(-6) : addr;
+	}
+
+	function balanceTierStr(tier) {
+		if (!tier || tier < 1) return '';
+		return '$'.repeat(Math.min(tier, 5));
+	}
+
+	function memberSinceStr(ts) {
+		if (!ts) return '';
+		const days = Math.floor((Date.now() / 1000 - ts) / 86400);
+		if (days < 7)   return t('listing.days_platform',   {n: days});
+		if (days < 30)  return t('listing.weeks_platform',  {n: Math.floor(days/7)});
+		if (days < 365) return t('listing.months_platform', {n: Math.floor(days/30)});
+		return t('listing.years_platform', {n: Math.floor(days/365)});
+	}
+
+	function ratingStr(rep) {
+		const total = rep.thumbs_up + rep.thumbs_down;
+		if (total === 0) return null;
+		const pct = Math.round(rep.thumbs_up / total * 100);
+		return t('listing.positive', {pct});
+	}
+	function timeAgo(ts) {
+		const diff = Math.floor(Date.now()/1000) - ts;
+		if (diff < 60) return 'just now';
+		if (diff < 3600) return `${Math.floor(diff/60)}m ago`;
+		return `${Math.floor(diff/3600)}h ago`;
+	}
+
+	// ── Peer respond form ──────────────────────────────────────────────
+	let showRespond  = $state(false);
+	let peerWallet = $state('');
+	let peerCurrency = $state('BTC');
+	let respondLoading = $state(false);
+	let respondError   = $state('');
+	let responded      = $state(false);
+
+	// Region lock state
+	let regionLockState = $state('idle'); // idle | warning | locked_other
+	let peerLockedCity  = $state('');     // city peer is already locked to
+
+	// Poll for chat room after peer responds (waiting for client to accept)
+	let peerPollTimer;
+
+	function startPeerPoll(listingId) {
+		const token = sessionStorage.getItem('naroom_session_peer') ?? '';
+		peerPollTimer = setInterval(async () => {
+			try {
+				const res = await fetch(`/api/peer/chatroom?listing_id=${encodeURIComponent(listingId)}`, {
+					headers: {
+						...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+						'X-Dev-Wallet': peerWallet,
+						'X-Dev-Role': 'peer',
+					},
+				});
+				if (!res.ok) return;
+				const data = await res.json();
+				if (data.room_id) {
+					clearInterval(peerPollTimer);
+					goto(`/chat/${data.room_id}`);
+				}
+			} catch {}
+		}, 4000);
+	}
+
+	// Generate or recall NaCl keypair for peer — returns public key hex
+	function getPeerPubkey() {
+		let pubHex = sessionStorage.getItem('peer_pubkey');
+		if (!pubHex) {
+			const kp = nacl.box.keyPair();
+			pubHex = bytesToHex(kp.publicKey);
+			sessionStorage.setItem('peer_pubkey', pubHex);
+			sessionStorage.setItem('peer_privkey', bytesToHex(kp.secretKey));
+		}
+		return pubHex;
+	}
+
+	async function checkRegionAndRespond() {
+		if (!peerWallet) return;
+		respondLoading = true; respondError = '';
+		try {
+			// Step 1: register wallet and get session token
+			const vr = await fetch('/api/wallet/verify', {
+				method: 'POST', headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ wallet_address: peerWallet, currency: peerCurrency, role: 'peer', signature: '', message: '' }),
+			});
+			if (!vr.ok) throw new Error((await vr.json()).error ?? 'Wallet verification failed');
+			const vrData = await vr.json();
+			const peerToken = vrData.session_token ?? '';
+			if (peerToken) sessionStorage.setItem('naroom_session_peer', peerToken);
+
+			// Step 2: check region lock
+			const rr = await fetch('/api/peer/region', {
+				headers: {
+					...(peerToken ? { 'Authorization': `Bearer ${peerToken}` } : {}),
+					'X-Dev-Wallet': peerWallet,
+					'X-Dev-Role': 'peer',
+				},
+			});
+			const regionData = rr.ok ? await rr.json() : { region: null };
+
+			if (regionData.region === null) {
+				// First time — show region lock warning
+				regionLockState = 'warning';
+			} else if (regionData.region !== listing.city) {
+				// Locked to a different city
+				peerLockedCity = regionData.region;
+				regionLockState = 'locked_other';
+			} else {
+				// Already locked to this city — proceed directly
+				await doSubmitRespond(peerToken);
+			}
+		} catch(e) { respondError = e.message; }
+		finally { respondLoading = false; }
+	}
+
+	async function doSubmitRespond(token) {
+		token = token ?? sessionStorage.getItem('naroom_session_peer') ?? '';
+		respondLoading = true; respondError = '';
+		try {
+			const rr = await fetch(`/api/listing/${listing.id}/respond`, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+					...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+					'X-Dev-Wallet': peerWallet,
+					'X-Dev-Role': 'peer',
+				},
+				body: JSON.stringify({ peer_pubkey: getPeerPubkey() }),
+			});
+			if (!rr.ok) throw new Error((await rr.json()).error ?? 'Failed to submit response');
+			regionLockState = 'idle';
+			responded = true;
+			startPeerPoll(listing.id);
+		} catch(e) { respondError = e.message; }
+		finally { respondLoading = false; }
+	}
+
+	// ── Client: view my responses ──────────────────────────────────────────
+	let clientWallet = $state('');
+	let clientCurrency = $state('BTC');
+	let myResponses    = $state(null); // null = not loaded
+	let loadingResponses = $state(false);
+	let responsesError   = $state('');
+
+	// Invoice for accepted peer ($15)
+	let acceptInvoice  = $state(null);
+	let acceptLoading  = $state(false);
+	let acceptError    = $state('');
+
+	// Poll for chat room after accept
+	let chatPollTimer;
+
+	async function getClientSession() {
+		// Verify wallet and get/refresh session token
+		let token = sessionStorage.getItem('naroom_session_client') ?? '';
+		if (!token) {
+			const vr = await fetch('/api/wallet/register', {
+				method: 'POST', headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ wallet_address: clientWallet, currency: clientCurrency, role: 'client' }),
+			});
+			if (!vr.ok) throw new Error((await vr.json()).error ?? 'Wallet verification failed');
+			const d = await vr.json();
+			token = d.session_token ?? '';
+			if (token) sessionStorage.setItem('naroom_session_client', token);
+		}
+		return token;
+	}
+
+	function clientAuthHeaders(token) {
+		return {
+			'Content-Type': 'application/json',
+			...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+			'X-Dev-Wallet': clientWallet,
+			'X-Dev-Role': 'client',
+		};
+	}
+
+	async function loadResponses() {
+		if (!clientWallet) { responsesError = 'Enter your wallet address'; return; }
+		loadingResponses = true; responsesError = '';
+		try {
+			const token = await getClientSession();
+			const res = await fetch(`/api/listing/${listing.id}/responses`, {
+				headers: clientAuthHeaders(token),
+			});
+			if (!res.ok) throw new Error((await res.json()).error ?? 'Failed to load');
+			myResponses = await res.json();
+		} catch(e) { responsesError = e.message; }
+		finally { loadingResponses = false; }
+	}
+
+	// Generate or recall NaCl keypair for client — returns public key hex
+	function getClientPubkey() {
+		let pubHex = sessionStorage.getItem('client_pubkey_' + listing.id);
+		if (!pubHex) {
+			const kp = nacl.box.keyPair();
+			pubHex = bytesToHex(kp.publicKey);
+			sessionStorage.setItem('client_pubkey_' + listing.id, pubHex);
+			sessionStorage.setItem('client_privkey', bytesToHex(kp.secretKey));
+		}
+		return pubHex;
+	}
+
+	async function acceptResponse(responseId) {
+		acceptLoading = true; acceptError = '';
+		try {
+			const token = await getClientSession();
+			const res = await fetch(`/api/response/${responseId}/accept`, {
+				method: 'POST',
+				headers: clientAuthHeaders(token),
+				body: JSON.stringify({
+					client_pubkey: getClientPubkey(),
+					currency:      clientCurrency,
+				}),
+			});
+			if (!res.ok) throw new Error((await res.json()).error ?? 'Accept failed');
+			acceptInvoice = await res.json();
+			startChatPoll(token);
+		} catch(e) { acceptError = e.message; }
+		finally { acceptLoading = false; }
+	}
+
+	function startChatPoll(token) {
+		chatPollTimer = setInterval(async () => {
+			try {
+				const res = await fetch(`/api/listing/${listing.id}/chatroom`, {
+					headers: clientAuthHeaders(token),
+				});
+				if (!res.ok) return;
+				const data = await res.json();
+				if (data.room_id) {
+					clearInterval(chatPollTimer);
+					goto(`/chat/${data.room_id}`);
+				}
+			} catch {}
+		}, 3000);
+	}
+
+	// ── Listing renew ──────────────────────────────────────────────────
+	let renewLoading = $state(false);
+	let renewError   = $state('');
+	let renewDone    = $state(false);
+
+	// Show renew button when: owner wallet entered, can_renew=true, expiring soon or expired
+	let showRenew = $derived(
+		listing.can_renew &&
+		!!clientWallet &&
+		myResponses !== null && // owner confirmed by loading responses
+		(listing.time_left < 3600 || listing.status === 'expired')
+	);
+
+	async function startRenew() {
+		renewLoading = true; renewError = '';
+		try {
+			const token = await getClientSession();
+			const res = await fetch(`/api/listing/${listing.id}/renew`, {
+				method: 'POST',
+				headers: clientAuthHeaders(token),
+			});
+			if (!res.ok) throw new Error((await res.json()).error ?? 'Renew failed');
+			renewDone = true;
+			// Reload after short delay so user sees success message
+			setTimeout(() => window.location.reload(), 1500);
+		} catch(e) { renewError = e.message; }
+		finally { renewLoading = false; }
+	}
+
+	// Load saved wallet from sessionStorage (browser-only)
+	onMount(() => {
+		const saved = sessionStorage.getItem('my_wallet_' + listing.id);
+		if (saved) clientWallet = saved;
+		const savedCurrency = sessionStorage.getItem('my_currency_' + listing.id);
+		if (savedCurrency) clientCurrency = savedCurrency;
+	});
+
+	// Cleanup poll timers on unmount
+	onDestroy(() => {
+		clearInterval(chatPollTimer);
+		clearInterval(peerPollTimer);
+	});
+</script>
+
+<div class="page">
+	<header>
+		<a href="/board/{listing.city}" class="back">{t('back_to_board')}</a>
+	</header>
+
+	<div class="urgency-bar" style="background: {urgencyColor(listing.urgency)}"></div>
+
+	{#if listing.is_sample}
+		<div class="sample-banner">{t('board.example')} — {t('listing.sample_hint')}</div>
+	{/if}
+
+	<!-- Listing info card -->
+	<div class="listing-card">
+		<div class="listing-header">
+			<div>
+				<div class="dep">{t('dep.' + listing.dependency_type)}</div>
+				<div class="help">{t('help.' + listing.help_type)}</div>
+			</div>
+			<span class="urgency-tag" style="color: {urgencyColor(listing.urgency)}; border-color: {urgencyColor(listing.urgency)}">
+				{t('urgency.' + listing.urgency)}
+			</span>
+		</div>
+		<div class="listing-meta">
+			<div class="meta-item">
+				<span class="meta-label">{t('listing.languages')}</span>
+				<span class="meta-value">{listing.languages?.map(l => l.toUpperCase()).join(', ')}</span>
+			</div>
+			<div class="meta-item">
+				<span class="meta-label">{t('listing.time_left')}</span>
+				<span class="meta-value">{timeLeft(listing.time_left)}</span>
+			</div>
+			{#if listing.responses_count > 0}
+			<div class="meta-item">
+				<span class="meta-label">{t('listing.responses')}</span>
+				<span class="meta-value" style="color: var(--accent)">{listing.responses_count}</span>
+			</div>
+			{/if}
+		</div>
+	</div>
+
+	{#if listing.status === 'active' && listing.time_left > 0}
+
+		<!-- ── COUNSELOR SECTION ── -->
+		<div class="section">
+			<div class="section-title">{t('listing.can_help')}</div>
+
+			{#if responded}
+				<div class="success-box">
+					<span class="success-icon">✓</span>
+					<div>
+						<div class="success-title">{t('listing.response_sent')}</div>
+						<div class="success-sub">{t('listing.response_sent_sub')}</div>
+					</div>
+				</div>
+				<div class="poll-row">
+					<span class="dot"></span>
+					{t('checking_auto')}
+				</div>
+			{:else if !showRespond}
+				<p class="section-desc">
+					{t('listing.peer_desc', {dep: t('dep.' + listing.dependency_type).toLowerCase()})}
+				</p>
+				<button class="btn-primary" onclick={() => showRespond = true}>{t('listing.respond_as_peer')}</button>
+			{:else}
+				<div class="sub-form">
+					<div class="field">
+						<label for="peer-wallet">{t('listing.peer_wallet', {currency: peerCurrency})}</label>
+						<div class="wallet-row">
+							<input id="peer-wallet" type="text" placeholder={t('listing.enter_address')} bind:value={peerWallet} />
+							<div class="currency-toggle">
+								<button class:active={peerCurrency === 'BTC'} onclick={() => peerCurrency = 'BTC'}>BTC</button>
+								<button class:active={peerCurrency === 'LTC'} onclick={() => peerCurrency = 'LTC'}>LTC</button>
+							</div>
+						</div>
+					</div>
+					{#if regionLockState === 'locked_other'}
+						<div class="region-blocked">
+							{t('hiw.region_locked_other', { city: peerLockedCity })}
+						</div>
+					{:else if regionLockState === 'warning'}
+						<div class="region-warning">
+							<div class="region-warning-title">⚠ {t('hiw.region_lock_title')}</div>
+							<p class="region-warning-body">{t('hiw.region_lock_body', { city: listing.city })}</p>
+							<div class="form-actions">
+								<button class="btn-primary" disabled={respondLoading} onclick={() => doSubmitRespond(null)}>
+									{respondLoading ? t('listing.sending') : t('hiw.region_lock_confirm')}
+								</button>
+								<button class="btn-ghost" onclick={() => { regionLockState = 'idle'; showRespond = false; }}>{t('cancel')}</button>
+							</div>
+						</div>
+					{:else}
+						{#if respondError}<div class="error">{respondError}</div>{/if}
+						<div class="form-actions">
+							<button class="btn-primary" disabled={!peerWallet || respondLoading} onclick={checkRegionAndRespond}>
+								{respondLoading ? t('listing.sending') : t('listing.send_response')}
+							</button>
+							<button class="btn-ghost" onclick={() => { showRespond = false; respondError = ''; regionLockState = 'idle'; }}>{t('cancel')}</button>
+						</div>
+						<p class="fine">{t('listing.no_funds')}</p>
+					{/if}
+				</div>
+			{/if}
+		</div>
+
+		<!-- ── CLIENT SECTION ── -->
+		<div class="section">
+			<div class="section-title">{t('listing.i_posted')}</div>
+
+			{#if acceptInvoice}
+				<!-- Waiting for peer to pay $15 -->
+				<div class="invoice-box">
+					<div class="invoice-icon">⏳</div>
+					<div>
+						<div class="invoice-title">{t('listing.waiting_peer')}</div>
+						<div class="invoice-sub">{t('listing.waiting_peer_sub', {amount: acceptInvoice.amount_crypto, currency: acceptInvoice.currency})}</div>
+					</div>
+				</div>
+				<div class="poll-row">
+					<span class="dot"></span>
+					{t('checking_auto')}
+				</div>
+
+			{:else if myResponses !== null}
+				<!-- Responses loaded -->
+				{#if myResponses.length === 0}
+					<div class="empty-responses">{t('listing.no_responses')}</div>
+				{:else}
+					<div class="responses-list">
+						{#each myResponses as resp, i}
+							<div class="response-card" class:new-counselor={resp.reputation?.is_new}>
+								<div class="resp-main">
+									<div class="resp-header">
+										<span class="resp-label">{t('listing.peer_n', {n: i + 1})}</span>
+										{#if resp.reputation?.is_new}
+											<span class="badge-new">{t('listing.badge_new')}</span>
+										{/if}
+										{#if balanceTierStr(resp.reputation?.balance_tier)}
+											<span class="badge-tier">{balanceTierStr(resp.reputation?.balance_tier)}</span>
+										{/if}
+									</div>
+									<div class="resp-meta">
+										{#if resp.reputation?.sessions_completed > 0}
+											<span>{sessionsLabel(resp.reputation.sessions_completed)}</span>
+										{/if}
+										{#if ratingStr(resp.reputation)}
+											<span>· {ratingStr(resp.reputation)}</span>
+										{/if}
+										{#if memberSinceStr(resp.reputation?.member_since)}
+											<span>· {memberSinceStr(resp.reputation?.member_since)}</span>
+										{/if}
+									</div>
+								</div>
+								<button
+									class="btn-accept"
+									disabled={acceptLoading}
+									onclick={() => acceptResponse(resp.id)}
+								>
+									{acceptLoading ? '...' : t('listing.accept')}
+								</button>
+							</div>
+						{/each}
+					</div>
+					{#if acceptError}<div class="error">{acceptError}</div>{/if}
+					<div class="field" style="margin-top: 12px">
+						<div class="field-label">{t('listing.currency_payment')}</div>
+						<div class="currency-toggle">
+							<button class:active={clientCurrency === 'BTC'} onclick={() => clientCurrency = 'BTC'}>BTC</button>
+							<button class:active={clientCurrency === 'LTC'} onclick={() => clientCurrency = 'LTC'}>LTC</button>
+						</div>
+					</div>
+					<p class="fine">{t('listing.accept_fine')}</p>
+				{/if}
+
+			{:else}
+				<!-- Enter wallet to unlock responses -->
+				<p class="section-desc">{t('listing.enter_wallet_desc')}</p>
+				<div class="sub-form">
+					<div class="field">
+						<label for="client-wallet">{t('listing.your_wallet')}</label>
+						<input id="client-wallet" type="text" placeholder={t('listing.btc_ltc_ph')} bind:value={clientWallet} />
+					</div>
+					{#if responsesError}<div class="error">{responsesError}</div>{/if}
+					<button class="btn-primary" disabled={!clientWallet || loadingResponses} onclick={loadResponses}>
+						{loadingResponses ? t('listing.loading') : t('listing.view_responses')}
+					</button>
+				</div>
+			{/if}
+		</div>
+
+	{:else}
+		<div class="expired-note">{t('listing.expired_note')}</div>
+	{/if}
+
+	<!-- ── RENEW SECTION (owner only, expiring/expired, < 2 responses) ── -->
+	{#if showRenew}
+	<div class="section renew-section">
+		<div class="section-title">{t('listing.extend')}</div>
+		{#if renewDone}
+			<p class="section-desc">{t('listing.renew_done')}</p>
+		{:else}
+			<p class="section-desc">
+				{listing.status === 'expired' ? t('listing.has_expired') : t('listing.expires_in', {time: timeLeft(listing.time_left)})}
+				{t('listing.renew_free_hint')}
+			</p>
+			{#if renewError}<div class="error">{renewError}</div>{/if}
+			<button class="btn-primary" disabled={renewLoading} onclick={startRenew}>
+				{renewLoading ? '...' : t('listing.renew_free')}
+			</button>
+			<p class="fine">{t('listing.renew_fine2', {n: (listing.renewal_count ?? 0) + 1})}</p>
+		{/if}
+	</div>
+	{/if}
+</div>
+
+<style>
+	.page {
+		max-width: 560px;
+		margin: 0 auto;
+		padding: 0 16px 60px;
+	}
+	header { padding: 20px 0 20px; }
+	.back { color: var(--text-dim); font-size: 13px; }
+	.back:hover { color: var(--text); }
+
+	.urgency-bar { height: 3px; border-radius: 2px; margin-bottom: 20px; }
+
+	.sample-banner {
+		font-size: 12px;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 1px;
+		color: var(--accent);
+		border: 1px solid var(--accent);
+		border-radius: 6px;
+		padding: 8px 14px;
+		text-align: center;
+		margin-bottom: 16px;
+	}
+
+	/* Listing card */
+	.listing-card {
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 12px;
+		padding: 20px;
+		display: flex;
+		flex-direction: column;
+		gap: 16px;
+		margin-bottom: 28px;
+	}
+	.listing-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: flex-start;
+	}
+	.dep { font-size: 20px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+	.help { font-size: 14px; color: var(--text-dim); }
+	.urgency-tag {
+		font-size: 11px; font-weight: 700; text-transform: uppercase;
+		letter-spacing: 0.8px; padding: 4px 10px; border-radius: 20px;
+		border: 1px solid; white-space: nowrap;
+	}
+	.listing-meta { display: flex; gap: 20px; flex-wrap: wrap; }
+	.meta-item { display: flex; flex-direction: column; gap: 2px; }
+	.meta-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-faint); }
+	.meta-value { font-size: 13px; color: var(--text); font-weight: 500; }
+
+	/* Sections */
+	.section {
+		border: 1px solid var(--border);
+		border-radius: 12px;
+		padding: 20px;
+		display: flex;
+		flex-direction: column;
+		gap: 14px;
+		margin-bottom: 16px;
+	}
+	.section-title {
+		font-size: 12px; font-weight: 600; text-transform: uppercase;
+		letter-spacing: 0.8px; color: var(--text-faint);
+	}
+	.section-desc { font-size: 14px; color: var(--text-dim); line-height: 1.6; }
+
+	/* Sub-form */
+	.sub-form { display: flex; flex-direction: column; gap: 14px; }
+	.field { display: flex; flex-direction: column; gap: 8px; }
+	label, .field-label { font-size: 13px; font-weight: 500; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+	.wallet-row { display: flex; gap: 8px; }
+	input {
+		flex: 1; background: var(--bg-card); border: 1px solid var(--border);
+		border-radius: 8px; padding: 10px 14px; color: var(--text); font-size: 13px;
+		font-family: monospace; outline: none; transition: border-color 0.15s;
+	}
+	input:focus { border-color: var(--accent); }
+	input::placeholder { color: var(--text-faint); }
+	.currency-toggle {
+		display: flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+	}
+	.currency-toggle button {
+		padding: 0 14px; background: var(--bg-card); color: var(--text-dim);
+		font-size: 12px; font-weight: 600; transition: all 0.15s;
+	}
+	.currency-toggle button.active { background: var(--accent); color: var(--bg); }
+	.form-actions { display: flex; gap: 12px; }
+	.fine { font-size: 12px; color: var(--text-faint); text-align: center; }
+	.error {
+		background: rgba(212, 132, 90, 0.12); border: 1px solid var(--danger);
+		border-radius: 8px; padding: 10px 14px; color: var(--danger); font-size: 13px;
+	}
+
+	/* Buttons */
+	.btn-primary {
+		padding: 12px 22px; background: var(--accent); color: var(--bg);
+		border-radius: 10px; font-size: 14px; font-weight: 600;
+		transition: opacity 0.15s; align-self: flex-start;
+	}
+	.btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+	.btn-primary:not(:disabled):hover { opacity: 0.85; }
+	.btn-ghost {
+		padding: 12px 18px; border: 1px solid var(--border);
+		border-radius: 10px; color: var(--text-dim); font-size: 14px; transition: all 0.15s;
+	}
+	.btn-ghost:hover { border-color: var(--text-faint); color: var(--text); }
+
+	/* Success */
+	.success-box {
+		background: rgba(123, 166, 142, 0.1); border: 1px solid var(--accent);
+		border-radius: 10px; padding: 16px; display: flex; gap: 14px; align-items: flex-start;
+	}
+	.success-icon { font-size: 20px; color: var(--accent); flex-shrink: 0; }
+	.success-title { font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+	.success-sub { font-size: 13px; color: var(--text-dim); }
+
+	/* Responses list */
+	.responses-list { display: flex; flex-direction: column; gap: 8px; }
+	.response-card {
+		display: flex; align-items: center; gap: 10px;
+		background: var(--bg-card); border: 1px solid var(--border);
+		border-radius: 8px; padding: 12px 14px;
+	}
+	.response-card.new-counselor { border-color: rgba(212, 180, 90, 0.4); }
+	.resp-main { flex: 1; display: flex; flex-direction: column; gap: 4px; }
+	.resp-header { display: flex; align-items: center; gap: 6px; }
+	.resp-label { font-size: 14px; font-weight: 600; color: var(--text); }
+	.resp-meta { font-size: 12px; color: var(--text-faint); display: flex; gap: 4px; flex-wrap: wrap; }
+	.badge-new {
+		font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
+		color: var(--warn); border: 1px solid var(--warn); border-radius: 4px; padding: 1px 5px;
+	}
+	.badge-tier {
+		font-size: 11px; font-weight: 700; color: var(--accent);
+		letter-spacing: 1px;
+	}
+	.btn-accept {
+		padding: 6px 16px; background: var(--accent); color: var(--bg);
+		border-radius: 6px; font-size: 13px; font-weight: 600; transition: opacity 0.15s;
+	}
+	.btn-accept:disabled { opacity: 0.4; cursor: not-allowed; }
+	.btn-accept:not(:disabled):hover { opacity: 0.85; }
+	.empty-responses { font-size: 13px; color: var(--text-faint); text-align: center; padding: 12px 0; }
+
+	/* Invoice waiting */
+	.invoice-box {
+		display: flex; gap: 14px; align-items: flex-start;
+		background: var(--bg-card); border: 1px solid var(--border);
+		border-radius: 10px; padding: 16px;
+	}
+	.invoice-icon { font-size: 22px; flex-shrink: 0; }
+	.invoice-title { font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+	.invoice-sub { font-size: 13px; color: var(--text-dim); line-height: 1.5; }
+	.poll-row {
+		display: flex; align-items: center; gap: 8px;
+		color: var(--text-dim); font-size: 13px;
+	}
+	.dot {
+		width: 8px; height: 8px; border-radius: 50%;
+		background: var(--accent); animation: pulse 1.5s infinite; flex-shrink: 0;
+	}
+	@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+	.expired-note { font-size: 14px; color: var(--text-faint); text-align: center; padding: 40px 0; }
+
+	/* Region lock */
+	.region-warning {
+		background: rgba(212, 180, 90, 0.08); border: 1px solid var(--warn);
+		border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 12px;
+	}
+	.region-warning-title { font-size: 14px; font-weight: 600; color: var(--warn); }
+	.region-warning-body  { font-size: 13px; color: var(--text-dim); line-height: 1.6; margin: 0; }
+	.region-blocked {
+		background: rgba(212, 132, 90, 0.08); border: 1px solid var(--danger);
+		border-radius: 8px; padding: 12px 14px; font-size: 13px; color: var(--danger);
+	}
+
+	/* Renew section */
+	.renew-section { border-color: var(--warn); margin-top: 4px; }
+	.address-box {
+		background: var(--bg-card); border: 1px solid var(--border);
+		border-radius: 8px; padding: 14px 16px; font-family: monospace;
+		font-size: 13px; word-break: break-all; color: var(--text);
+	}
+</style>
