@@ -14,6 +14,7 @@
 | IP addresses | No | Rate limiting uses hashed /24 subnet in memory; never written to disk |
 | User accounts, email, phone, username | No | Not collected by design |
 | Telegram identity | Yes, separately | Telegram `chat_id` stored in `client_listing_notifications` and `helper_board_subscriptions`; never cross-referenced with wallet hash |
+| Pageview analytics | Optional, disabled by default | GoatCounter (self-reported, no cookies, no fingerprinting); only on public pages — see below |
 
 ---
 
@@ -157,3 +158,51 @@ For WebSocket authentication, the token is passed in the `Sec-WebSocket-Protocol
 4. **Third-party blockchain API visibility.** Balance checks and payment verification send wallet addresses to external APIs (mempool.space, BlockCypher). These providers can observe that the NA Room server is checking specific addresses. Running own nodes or routing through Tor mitigates this but is not implemented by default.
 
 5. **Frontend delivery trust.** E2E encryption protects against server-side storage compromise but not against a malicious operator who ships altered JavaScript. Users who want to verify must inspect and build the frontend from source.
+
+---
+
+## Optional Analytics — GoatCounter
+
+NA Room optionally supports [GoatCounter](https://www.goatcounter.com/) for privacy-first pageview analytics. It is **disabled by default** and must be explicitly opted in by the operator.
+
+### What is tracked (if enabled)
+
+Only anonymous pageviews on public, non-sensitive pages:
+
+| Route | Tracked |
+|-------|---------|
+| `/` (landing) | Yes |
+| `/how-it-works` | Yes |
+| `/board/[city]` (public board) | Yes |
+| `/new` (create listing) | **No** |
+| `/listing/[id]` | **No** |
+| `/chat/[room_id]` | **No** |
+| `/helper` (wallet form) | **No** |
+| Any payment or review flow | **No** |
+
+The analytics script is injected by the browser only when the visitor is on an allowed public route. It is never loaded on routes that contain wallet, session, chat, listing-private, payment, or review state.
+
+### What GoatCounter does NOT use
+
+- No cookies
+- No localStorage or sessionStorage
+- No fingerprinting
+- No session replay or heatmaps
+- No ad pixels or third-party data sharing
+- No cross-site tracking
+
+GoatCounter collects: URL path, referrer, browser, screen size, country (from IP). IP addresses are not stored by GoatCounter. See [goatcounter.com/help/privacy](https://www.goatcounter.com/help/privacy).
+
+### How to enable
+
+Set `PUBLIC_GOATCOUNTER_CODE` to your GoatCounter subdomain in the frontend build environment, then rebuild the frontend:
+
+```
+PUBLIC_GOATCOUNTER_CODE=yourcode   # e.g. "naroom" for naroom.goatcounter.com
+```
+
+Leave it empty (the default) to disable analytics entirely. No script is loaded, no requests are made.
+
+### How to disable
+
+Leave `PUBLIC_GOATCOUNTER_CODE` unset or empty. This is the default. The analytics module checks the value at startup and does nothing if it is absent.
