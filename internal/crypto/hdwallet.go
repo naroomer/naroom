@@ -81,7 +81,14 @@ func NewHDWallet(db *sql.DB, btcXpub, ltcXpub string) (*HDWallet, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parse BTC key: %w", err)
 		}
-		w.btcKey = key
+		// Спускаемся на external chain (index 0) — стандарт BIP-44/84.
+		// Trezor экспортирует zpub на уровне аккаунта (m/84'/0'/0'),
+		// receive-адреса находятся по пути m/84'/0'/0'/0/i.
+		ext, err := key.Derive(0)
+		if err != nil {
+			return nil, fmt.Errorf("derive BTC external chain: %w", err)
+		}
+		w.btcKey = ext
 		w.btcSegwit = segwit
 	}
 
@@ -90,7 +97,11 @@ func NewHDWallet(db *sql.DB, btcXpub, ltcXpub string) (*HDWallet, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parse LTC key: %w", err)
 		}
-		w.ltcKey = key
+		ext, err := key.Derive(0)
+		if err != nil {
+			return nil, fmt.Errorf("derive LTC external chain: %w", err)
+		}
+		w.ltcKey = ext
 		w.ltcSegwit = segwit
 	}
 
