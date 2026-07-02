@@ -23,6 +23,10 @@ import (
 func main() {
 	cfg := config.Load()
 
+	if cfg.DevMode && !config.DevModeAllowed {
+		log.Fatal("DEV_MODE=true rejected: binary compiled without -tags dev (production build)")
+	}
+
 	if cfg.ServerSalt == "" {
 		log.Fatal("SERVER_SALT is required")
 	}
@@ -212,7 +216,8 @@ func main() {
 		Blockcypher: blockcypher,
 		Prices:      prices,
 		Interval:    time.Duration(cfg.InvoiceWatchInterval) * time.Second,
-		DevMode:     cfg.DevMode,
+		DevMode:      cfg.DevMode,
+		SkipPayments: cfg.DevMode || os.Getenv("DEV_SKIP_PAYMENTS") == "true",
 		ListingTTL:  cfg.ListingTTL,
 		ChatTTL:     cfg.ChatTTL,
 

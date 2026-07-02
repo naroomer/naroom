@@ -108,6 +108,17 @@ func (h *Handler) AcceptResponse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Guard: no other accepted response for this listing (TOCTOU protection)
+	var alreadyAccepted int
+	tx.QueryRow(`
+		SELECT COUNT(*) FROM responses
+		WHERE listing_id = ? AND id != ? AND status = 'accepted'
+	`, listingID, responseID).Scan(&alreadyAccepted)
+	if alreadyAccepted > 0 {
+		writeError(w, 409, "another response already accepted for this listing")
+		return
+	}
+
 	// Check no active chat for this client (peer_left counts — client must close it first).
 	var activeChatCount int
 	tx.QueryRow(`

@@ -20,9 +20,10 @@ type InvoiceWatcher struct {
 	Blockcypher *ncrypto.BlockcypherClient
 	Prices      PriceFetcher // implemented by *ncrypto.PriceCache; interface for testability
 	Interval    time.Duration
-	DevMode     bool
-	ListingTTL  int
-	ChatTTL     int
+	DevMode      bool
+	SkipPayments bool // auto-confirm all invoices without blockchain checks
+	ListingTTL   int
+	ChatTTL      int
 
 	// Telegram support — set when bot tokens are configured.
 	// When RequireTelegram is true, listings only activate after BOTH payment
@@ -117,8 +118,8 @@ func (iw *InvoiceWatcher) watch(ctx context.Context) {
 			continue
 		}
 
-		// Dev mode: автоматически подтверждаем все pending invoices
-		if iw.DevMode {
+		// Dev mode or SkipPayments: автоматически подтверждаем все pending invoices
+		if iw.DevMode || iw.SkipPayments {
 			iw.confirmInvoice(inv.id, inv.typ, "dev_txid_"+inv.id, 1000000,
 				inv.listingID.String, inv.responseID.String, inv.clientPubkey.String)
 			continue

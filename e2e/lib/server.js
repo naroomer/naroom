@@ -60,7 +60,7 @@ function encryptAddress(address) {
 }
 
 export class TestServer {
-  constructor({ devMode = true } = {}) {
+  constructor({ devMode = true, extraEnv = {} } = {}) {
     this.port = null;
     this.dbPath = null;
     this.proc = null;
@@ -68,6 +68,7 @@ export class TestServer {
     this.base = null;
     this.wsBase = null;
     this._devMode = devMode;
+    this._extraEnv = extraEnv;
   }
 
   async start() {
@@ -77,7 +78,8 @@ export class TestServer {
     this.base = `http://127.0.0.1:${this.port}`;
     this.wsBase = `ws://127.0.0.1:${this.port}`;
 
-    this.proc = spawn('go', ['run', './cmd/naroom/main.go'], {
+    // Use -tags dev so DEV_MODE=true is accepted by the binary
+    this.proc = spawn('go', ['run', '-tags', 'dev', './cmd/naroom/main.go'], {
       cwd: BACKEND_DIR,
       env: {
         ...process.env,
@@ -91,6 +93,8 @@ export class TestServer {
         DB_PATH: this.dbPath,
         TTL_CLEAN_INTERVAL: '5',       // fast cleanup for tests
         INVOICE_WATCH_INTERVAL: '2',   // fast invoice confirm for tests (default 30s is too slow)
+        // Allow callers to override any env var (e.g. MEMPOOL_API, DEV_SKIP_PAYMENTS)
+        ...this._extraEnv,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });

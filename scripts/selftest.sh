@@ -109,8 +109,14 @@ if ! $UNIT_ONLY; then
   cd "$E2E_DIR"
 
   # Hard fail if no test files found
+  # 026 is a Playwright browser test — requires running frontend + `npm i playwright`.
+  # Run it separately: FRONTEND_URL=http://localhost:4173 node e2e/tests/026_analytics_privacy.js
   E2E_FILES=( tests/0*.js )
-  if [ ! -e "${E2E_FILES[0]}" ]; then
+  E2E_FILES=( "${E2E_FILES[@]/tests\/026_analytics_privacy.js}" )
+  E2E_FILES=( "${E2E_FILES[@]}" )  # re-index
+  # Filter out empty entries
+  E2E_FILES=( $(printf '%s\n' "${E2E_FILES[@]}" | grep -v '^$') )
+  if [ ${#E2E_FILES[@]} -eq 0 ]; then
     echo -e "${RED}ERROR: no E2E test files found in $E2E_DIR/tests/${NC}" >&2
     exit 1
   fi

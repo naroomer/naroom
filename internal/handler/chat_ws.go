@@ -405,7 +405,19 @@ func (h *Handler) CloseChat(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	tx.Exec(`UPDATE chat_rooms SET status = 'closed', closed_at = ?, closed_by = 'client' WHERE id = ?`, now, roomID)
+	res, err := tx.Exec(`
+		UPDATE chat_rooms SET status = 'closed', closed_at = ?, closed_by = 'client'
+		WHERE id = ? AND status IN ('active', 'peer_left')
+	`, now, roomID)
+	if err != nil {
+		writeError(w, 500, "db error")
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		tx.Rollback()
+		writeJSON(w, 200, map[string]any{"status": "already_closed"})
+		return
+	}
 	tx.Exec(`UPDATE responses SET status = 'closed' WHERE id = ?`, responseID)
 	tx.Exec(`
 		UPDATE listings SET status = 'active'
