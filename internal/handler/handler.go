@@ -18,11 +18,11 @@ type Handler struct {
 	Blockcypher *crypto.BlockcypherClient
 	Prices      *crypto.PriceCache
 	Wallet      *crypto.HDWallet
-	DevMode     bool
-	ListingTTL  int
-	ChatTTL     int
-	ChatMinTTL  int
-	Hub         *ChatHub // for broadcasting room_closed to WS clients
+	DevMode    bool
+	ListingTTL int
+	ChatTTL          int
+	ChatMinTTL       int
+	Hub              *ChatHub // for broadcasting room_closed to WS clients
 
 	// Telegram notification bots. Nil when tokens are not configured.
 	Telegram              telegram.Sender

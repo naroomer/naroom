@@ -4,11 +4,14 @@
 
 | Type | Location | Runner | Count |
 |------|----------|--------|-------|
-| Go unit tests | `internal/crypto/`, `internal/worker/` | `go test` | 26 |
-| E2E tests | `e2e/tests/` | Node.js | 25 |
+| Go unit tests | `internal/crypto/`, `internal/handler/`, `internal/worker/` | `go test` | 30 |
+| E2E tests (automated) | `e2e/tests/` | Node.js | 32 |
+| E2E test (Playwright) | `e2e/tests/026_analytics_privacy.js` | Playwright | 1 |
 | Frontend type check | `frontend/` | `npm run check` | — |
 
-Current status: **25/25 E2E · 26/26 unit — all green**
+Current status: **32/32 E2E · 30/30 unit — all green**
+
+The Playwright test (026) runs separately via `selftest-full.sh` because it requires a running frontend and Playwright installation.
 
 ---
 
@@ -21,10 +24,22 @@ bash scripts/selftest.sh
 This script:
 1. Builds the Go binary (`go build ./...`)
 2. Runs Go unit tests (`go test ./...`)
-3. Runs `npm run check` in `/frontend`
-4. Starts the E2E runner (`node e2e/run_all.js`)
+3. Runs `npm run check` + `npm run build` in `/frontend`
+4. Runs all 32 E2E tests (excludes 026 — Playwright)
 
 All steps must pass. The script exits non-zero on any failure.
+
+### Extended Suite (includes Playwright test 026)
+
+```bash
+# Build and serve the frontend first:
+cd frontend && npm run build && npm run preview &
+
+# Then run the full suite:
+FRONTEND_URL=http://localhost:4173 bash scripts/selftest-full.sh
+```
+
+Requires: `npm install -D playwright && npx playwright install chromium`
 
 ---
 
@@ -35,12 +50,6 @@ node e2e/tests/001_happy_path.js
 ```
 
 Each test file is a standalone module that boots its own server instance. Tests do not share state.
-
-To run a subset, pass file paths directly to the runner:
-
-```bash
-node e2e/run_all.js e2e/tests/007_rate_limiting.js e2e/tests/018_balance_threshold.js
-```
 
 ---
 
@@ -55,7 +64,7 @@ node e2e/run_all.js e2e/tests/007_rate_limiting.js e2e/tests/018_balance_thresho
 | `005_large_image_payload.js` | Image payload within 8 MB accepted; non-chat JSON body over 64 KB returns 413 |
 | `006_state_bleed.js` | Two independent flows sharing a database see only their own data; close of one flow does not affect the other |
 | `007_rate_limiting.js` | Burst of requests to `/wallet/register` returns 429 after burst limit exceeded (runs with `devMode=false`) |
-| `008_wallet_challenge.js` | Wallet registration: valid registration returns session token; re-registration updates session; missing field returns 400; invalid signature returns 401 |
+| `008_wallet_challenge.js` | Wallet registration: valid registration returns session token; re-registration updates session; missing field returns 400 |
 | `009_session_lifecycle.js` | Session token issue, authenticate, refresh (old token becomes 401), revoke (revoked token becomes 401) |
 | `010_ws_auth.js` | WebSocket auth via `Sec-WebSocket-Protocol` header; no token → rejected; invalid token → rejected; URL contains no token |
 | `011_peer_left_expiry.js` | Peer closes WebSocket → room enters `peer_left`; after TTL, room closes and listing is restored to active; no review token issued |
@@ -73,6 +82,14 @@ node e2e/run_all.js e2e/tests/007_rate_limiting.js e2e/tests/018_balance_thresho
 | `023_wallet_session_ttl.js` | `wallet_sessions` row is pruned when all auth sessions for that wallet have expired |
 | `024_log_privacy.js` | Server log output during a full flow contains no raw IP address, wallet address, or session token |
 | `025_abuse_ban.js` | Three abuse reports against a client sets `banned_until = now + 72h`; five reports sets a long-term ban |
+| `026_analytics_privacy.js` | **(Playwright)** Browser-level check that analytics (GoatCounter) does not load on private pages (`/new`, `/helper`, `/chat/*`, `/listing/*`) |
+| `027_challenge_replay.js` | `/wallet/challenge` endpoint exists (registration ownership proof); verifies challenge/verify flow is present |
+| `028_payment_edge_cases.js` | Payment watcher edge cases: underpayment not confirmed; API timeout → watcher retries; recovery after API restore |
+| `029_ciphertext_only.js` | Server-side DB contains only ciphertext: canary plaintext not recoverable from `encrypted_messages`, raw DB file, or WAL |
+| `030_content_type_spoofing.js` | HTTP input validation: malformed JSON → 4xx; empty body → 4xx; missing required field → 400; oversized body → rejected; wrong HTTP method → not 200 |
+| `031_concurrent_accept.js` | Two simultaneous accepts on two responses → exactly one accepted (TOCTOU guard) |
+| `032_concurrent_close.js` | Concurrent close attempts on the same room → only one wins; no zombie state |
+| `033_devmode_prod_failsafe.js` | Binary compiled without `-tags dev` rejects `DEV_MODE=true` at startup |
 
 ---
 
@@ -91,25 +108,29 @@ Each test constructs its own `TestServer` instance. Tests are fully isolated.
 
 ---
 
-## How `registerDirect()` Works
+## How `verifyWallet()` Works
 
-Most E2E tests call `api.verifyWallet(address, currency, role)` which hits `POST /wallet/register`. In `devMode=true` (the default for the test suite), the server accepts a direct registration payload that bypasses the BIP-322 / message-signing challenge. This allows tests to register arbitrary wallet addresses without needing real private keys.
+Most E2E tests call `api.verifyWallet(address, currency, role)` which hits `POST /wallet/register`. In `devMode=true` (the default for the test suite), the server accepts a direct registration payload that bypasses the challenge/verify flow. This allows tests to register arbitrary wallet addresses without needing real private keys.
 
-For tests that specifically require `devMode=false` (tests 007, 018, 020), the `TestServer` is instantiated with `{ devMode: false }`. These tests use the dev-mode bypass path for registration only when the endpoint still accepts it (007, 020 test that it does not; 018 injects balance via a test hook).
+For tests that specifically require `devMode=false` (tests 007, 018, 020), the `TestServer` is instantiated with `{ devMode: false }`.
 
 ---
 
 ## Unit Test Coverage
 
-### `internal/crypto/verify_test.go` (10 tests)
+### `internal/crypto/verify_test.go` (7 tests)
 
-Tests for HMAC determinism, address normalization, BTC/LTC signature verification (P2PKH, P2WPKH), wrong-signature rejection, wrong-address rejection, replay salt rotation, and challenge expiry.
+Tests for BTC P2PKH signature verification, BTC P2WPKH (segwit), LTC P2PKH, wrong-address rejection, wrong-message rejection, invalid base64, and short-signature rejection.
 
 ### `internal/crypto/encrypt_test.go` (7 tests)
 
 Tests for AES-256-GCM round-trip, wrong-key error, tamper detection (GCM auth tag), unique nonce per call, dev-mode key derivation, prod-mode missing key fatal, and truncated input error.
 
-### `internal/worker/invoice_watcher_test.go` (9 tests)
+### `internal/handler/wallet_challenge_test.go` (4 tests)
+
+Tests the challenge/verify security properties: one-time use (replay rejected), TTL expiry, address binding (challenge for A cannot be used by B), and concurrent-replay atomicity (exactly one winner).
+
+### `internal/worker/invoice_watcher_test.go` (12 tests)
 
 Tests for empty payer address rejection, no-senders rejection, wrong-wallet rejection, multi-input match, API error leaving invoice pending, double-confirm guard, grace window (still pending), grace window (expired), and balance threshold math at exact pass/fail boundaries for listing and chat types.
 
@@ -120,9 +141,8 @@ Tests for empty payer address rejection, no-senders rejection, wrong-wallet reje
 1. Create `e2e/tests/NNN_description.js` following the pattern of an existing test.
 2. Import `TestServer`, `ApiClient`, and assertion helpers from `e2e/lib/`.
 3. Export an `async function run()`.
-4. Add it to `e2e/run_all.js` (or it will be picked up automatically if the runner globs the directory).
-5. Update `docs/INVARIANTS.md` with the invariant the test covers.
-6. Update `docs/TEST_MATRIX.md` to add the new test row.
+4. Update `docs/INVARIANTS.md` with the invariant the test covers.
+5. Update `docs/TEST_MATRIX.md` to add the new test row.
 
 ---
 

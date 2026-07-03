@@ -161,7 +161,7 @@ invoices         — payer_address (HMAC hash, not plain address), type, currenc
 - Backup strategy for SQLite WAL (without leaking salt)
 
 ### Open source GitHub release
-- Publish full source code to `github.com/naroom`
+- Publish full source code to `https://github.com/naroomer/naroom` (placeholder at time of writing was `github.com/naroom`)
 - Write/update `SECURITY.md` explaining threat model
 - Write `SELF_HOSTING.md` for operators
 - Make domain configurable via env (no hardcoded `naroom.net`)

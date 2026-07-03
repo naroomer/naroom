@@ -382,11 +382,18 @@ func (h *Handler) CloseChat(w http.ResponseWriter, r *http.Request) {
 	// ── Peer leaves ──────────────────────────────────────────────────────
 	if walletHash == counselorHash {
 		// Don't close the room — client must do it manually.
-		_, err := h.DB.Exec(`
-			UPDATE chat_rooms SET status = 'peer_left', peer_left_at = ? WHERE id = ?
+		// Guard: only transition from 'active'. If client already closed (status='closed'),
+		// an out-of-order peer-close must not resurrect the room or issue duplicate review tokens.
+		res, err := h.DB.Exec(`
+			UPDATE chat_rooms SET status = 'peer_left', peer_left_at = ? WHERE id = ? AND status = 'active'
 		`, now, roomID)
 		if err != nil {
 			writeError(w, 500, "db error")
+			return
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			// Room was already closed, expired, or peer already left — idempotent response.
+			writeJSON(w, 200, map[string]any{"status": "already_closed"})
 			return
 		}
 		// Notify client via WebSocket (hub keyed by wallet_hash)

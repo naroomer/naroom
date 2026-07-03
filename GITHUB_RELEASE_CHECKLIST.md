@@ -39,8 +39,8 @@ Run the full test suite and confirm all pass:
 bash scripts/selftest.sh
 ```
 
-- [ ] Go unit tests: all 26 pass (or more if new tests were added)
-- [ ] E2E tests: all 25 pass (or more if new tests were added)
+- [ ] Go unit tests: all 30 pass (or more if new tests were added)
+- [ ] E2E tests: all 32 pass (or more if new tests were added); run `selftest-full.sh` for Playwright test 026
 - [ ] Frontend type check: `npm run check` exits 0
 - [ ] No skipped or pending tests without documented reason
 

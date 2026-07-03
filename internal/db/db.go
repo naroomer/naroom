@@ -37,11 +37,6 @@ func Open(path string) (*sql.DB, error) {
 	db.Exec(`ALTER TABLE invoices ADD COLUMN price_at_creation REAL`)
 
 	// Schema cleanup migrations (must not silently fail if column/table is present)
-	// wallet_challenges stored plain wallet_address and was never used by any handler.
-	// Dropping it eliminates the plain-text address exposure entirely.
-	db.Exec(`DROP TABLE IF EXISTS wallet_challenges`)
-	db.Exec(`DROP INDEX IF EXISTS idx_wallet_challenges_wallet`)
-
 	// reconnection_hashes was a stub feature never read by any handler or frontend.
 	// ALTER TABLE … DROP COLUMN IF EXISTS is not valid SQLite syntax — check first.
 	if columnExists(db, "listings", "reconnection_hashes") {

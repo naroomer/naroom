@@ -197,7 +197,7 @@ Tras cada sesión el cliente puede dejar 👍 o 👎. Con el tiempo, tu número 
 - **Sin almacenamiento de mensajes** — todos los mensajes del chat se eliminan al terminar la sesión
 - **Sin registro de IP** más allá de lo mínimo necesario para el funcionamiento
 - **Compatible con Tor** — la plataforma funciona en dirección .onion para quienes necesitan anonimato adicional
-- **Código abierto** — el código fuente completo está disponible en github.com/naroom; cualquiera puede verificar el cifrado, la eliminación de datos y la ausencia de funciones ocultas
+- **Código abierto** — el código fuente completo está disponible en https://github.com/naroomer/naroom; cualquiera puede verificar el cifrado, la eliminación de datos y la ausencia de funciones ocultas
 - **Idioma por defecto** — Tor Browser y navegadores sin cabeceras de idioma abren en inglés, sin intentar identificar el dispositivo
 
 ---

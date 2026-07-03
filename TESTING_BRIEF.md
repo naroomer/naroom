@@ -7,7 +7,7 @@
 - **Бэкенд:** Go 1.21+, SQLite3
 - **Фронтенд:** SvelteKit 5 (Node.js)
 - **Крипто:** BTC (mempool.space API), LTC (BlockCypher API)
-- **Чат:** WebSocket + E2E шифрование (X25519 + AES-256-GCM)
+- **Чат:** WebSocket + E2E шифрование (X25519 + XSalsa20-Poly1305, `nacl.box`)
 - **Аналитика:** GoatCounter (только публичные страницы, без cookies)
 
 ## Требования
@@ -42,7 +42,7 @@ cd frontend && npm install && npm run dev
 ## Автоматические тесты
 
 ```bash
-# Полный прогон: сборка + unit + frontend + 25 E2E тестов
+# Полный прогон: сборка + unit + frontend + 32 E2E тестов
 ./scripts/selftest.sh
 
 # Только unit-тесты
@@ -50,9 +50,12 @@ cd frontend && npm install && npm run dev
 
 # Только E2E (нужен node)
 ./scripts/selftest.sh --e2e-only
+
+# Расширенный прогон (включает Playwright тест 026)
+FRONTEND_URL=http://localhost:4173 bash scripts/selftest-full.sh
 ```
 
-Последний результат: **25/25 PASS**
+Последний результат: **32/32 PASS**
 
 ### Что покрывают E2E тесты
 
@@ -83,6 +86,14 @@ cd frontend && npm install && npm run dev
 | 023_wallet_session_ttl | TTL wallet-сессии |
 | 024_log_privacy | Логи не содержат IP, кошельки, токены |
 | 025_abuse_ban | Бан после нескольких жалоб |
+| 026_analytics_privacy | **(Playwright)** Аналитика не загружается на приватных страницах |
+| 027_challenge_replay | /wallet/challenge endpoint существует; challenge/verify flow работает |
+| 028_payment_edge_cases | Краевые случаи оплаты: недоплата, таймаут API, восстановление |
+| 029_ciphertext_only | Сервер видит только шифротекст; plaintext не восстановим из БД |
+| 030_content_type_spoofing | Валидация входных данных: malformed JSON → 4xx, пустое тело → 4xx, лишнее поле → 400, размер → отклонение, метод → не 200 |
+| 031_concurrent_accept | Два одновременных accept → ровно один проходит (TOCTOU) |
+| 032_concurrent_close | Одновременное закрытие комнаты → не создаёт зомби-состояние |
+| 033_devmode_prod_failsafe | Бинарник без `-tags dev` отклоняет `DEV_MODE=true` при старте |
 
 ## Ручное тестирование (без реальных денег)
 

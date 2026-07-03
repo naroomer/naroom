@@ -125,15 +125,24 @@ func (iw *InvoiceWatcher) watch(ctx context.Context) {
 			continue
 		}
 
-		// Check for confirmed payment
+		// Check for confirmed payment.
+		// Pass 99% of the expected amount as minSatoshis — FindPayment skips dust and
+		// other sub-threshold TXs without ever returning them, so a dust TX cannot
+		// block detection of the real payment or cause a premature rejection.
+		expectedSats := satoshisFromCryptoStr(inv.amountCrypto)
+		minRequired := int64(math.Round(float64(expectedSats) * 0.99)) // 1% underpayment tolerance
+		if minRequired < 1 {
+			minRequired = 1
+		}
+
 		if inv.currency == "BTC" {
-			tx, amount, senders, err := iw.Mempool.FindPayment(inv.address, 0)
+			tx, amount, senders, err := iw.Mempool.FindPayment(inv.address, minRequired)
 			if err != nil {
 				log.Printf("invoice_watcher: BTC check error for %s: %v", inv.id, err)
 				continue
 			}
 			if tx != nil {
-				// Payment found on-chain — record detection time for bounded grace period.
+				// Payment of the right size found on-chain — record detection time for bounded grace.
 				// This ensures API outages don't expire valid payments within 24h of detection.
 				if !inv.paymentDetectedAt.Valid {
 					iw.DB.Exec(`UPDATE invoices SET payment_detected_at = ? WHERE id = ? AND payment_detected_at IS NULL`, now, inv.id)
@@ -145,13 +154,13 @@ func (iw *InvoiceWatcher) watch(ctx context.Context) {
 					inv.listingID.String, inv.responseID.String, inv.clientPubkey.String)
 			}
 		} else {
-			tx, amount, senders, err := iw.Blockcypher.FindPayment(inv.address, 0)
+			tx, amount, senders, err := iw.Blockcypher.FindPayment(inv.address, minRequired)
 			if err != nil {
 				log.Printf("invoice_watcher: LTC check error for %s: %v", inv.id, err)
 				continue
 			}
 			if tx != nil {
-				// Payment found on-chain — record detection time for bounded grace period.
+				// Payment of the right size found on-chain — record detection time for bounded grace.
 				if !inv.paymentDetectedAt.Valid {
 					iw.DB.Exec(`UPDATE invoices SET payment_detected_at = ? WHERE id = ? AND payment_detected_at IS NULL`, now, inv.id)
 				}

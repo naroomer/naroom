@@ -1,96 +1,107 @@
-// 030_content_type_spoofing
-// Свойство: загрузка изображений валидирует РЕАЛЬНЫЙ тип по содержимому
-// (magic bytes / декодирование), а не по расширению или заголовку Content-Type.
+// 030_input_validation.js — HTTP input boundary checks
 //
-// Дополняет 005 (там только размер). Векторы:
-//   a) полиглот JPEG+HTML: валидный JPEG-заголовок, но внутри <script> —
-//      должен либо отклоняться, либо ресэмплиться/перекодироваться так,
-//      что HTML-нагрузка не сохраняется и не отдаётся как text/html.
-//   b) text/plain с расширением .jpg и Content-Type: image/jpeg — отклонить
-//      (magic bytes не совпадают).
-//   c) SVG с встроенным <script> — либо отклонить (SVG не в списке разрешённых),
-//      либо отдавать с Content-Type: image/... и заголовком, запрещающим
-//      исполнение (важно для stored-XSS через <img src> → прямое открытие файла).
+// NOTE: No /api/upload endpoint exists in this codebase.
+// Image files are transmitted through /chat/poll/send as base64 data URIs
+// inside the nacl.box ciphertext payload. The previous version of this file
+// contained dead stubs for a nonexistent upload endpoint; this version tests
+// real HTTP input validation on actual endpoints.
+//
+// This version tests input-handling robustness on real existing endpoints:
+//   a) Malformed JSON → 400 (not 500 / server panic)
+//   b) Empty body   → 400 (not 500)
+//   c) Missing required field (wallet_address) → 400
+//   d) Body > 64 KB on a non-chat JSON endpoint → 413
+//   e) Wrong HTTP method (GET on POST-only route) → not 200
+//
+// Complements 005_large_image_payload.js (which covers the 8 MB chat limit
+// and the 64 KB limit on /wallet/register but doesn't verify error shapes).
 
 import { TestServer } from '../lib/server.js';
-import { ApiClient } from '../lib/http.js';
-
-export const name = '030_content_type_spoofing';
-
-// минимальный валидный JPEG (SOI + APP0 + EOI), затем HTML-нагрузка
-function polyglotJpegHtml() {
-  const jpegHead = Buffer.from([
-    0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
-    0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xD9,
-  ]);
-  const html = Buffer.from('<script>window.__xss=1</script>', 'utf8');
-  return Buffer.concat([jpegHead, html]);
-}
-
-async function uploadImage(api, { bytes, filename, contentType }) {
-  // ADAPT: под реальный upload-эндпоинт. Если multipart — использовать FormData.
-  const form = new FormData();
-  form.append('file', new Blob([bytes], { type: contentType }), filename);
-  return api.postForm('/api/upload', form); // ADAPT: роут + ApiClient.postForm
-}
+import { assertStatus } from '../lib/assert.js';
+import { Runner } from '../lib/runner.js';
 
 export async function run() {
-  const server = new TestServer();
-  await server.start();
-  const api = new ApiClient(server.url);
-  // ADAPT: верификация кошелька, если upload требует сессию
+  console.log('\n=== 030: Input validation (malformed JSON, size limits, method enforcement) ===');
+  const srv = new TestServer();
+  const t = new Runner('030_input_validation');
 
   try {
-    // --- (a) полиглот ---
-    let res = await uploadImage(api, {
-      bytes: polyglotJpegHtml(),
-      filename: 'cat.jpg',
-      contentType: 'image/jpeg',
-    });
-    if (res.status >= 200 && res.status < 300) {
-      // Если приняли — обязана быть перекодировка. Проверяем, что отданный
-      // файл больше не содержит HTML-нагрузку.
-      const url = res.body.url; // ADAPT
-      const fetched = await fetch(server.url + url);
-      const ct = fetched.headers.get('content-type') || '';
-      const body = Buffer.from(await fetched.arrayBuffer());
-      if (ct.includes('text/html')) {
-        throw new Error('SPOOF(a): полиглот отдаётся как text/html — исполнимый XSS');
-      }
-      if (body.toString('latin1').includes('<script>')) {
-        throw new Error('SPOOF(a): HTML-нагрузка сохранена внутри принятого файла (нет перекодировки)');
-      }
-    }
-    // status 4xx = отклонён, это ок
+    await srv.start();
 
-    // --- (b) text/plain как .jpg ---
-    res = await uploadImage(api, {
-      bytes: Buffer.from('это просто текст, не картинка', 'utf8'),
-      filename: 'fake.jpg',
-      contentType: 'image/jpeg',
+    // ── (a) Malformed JSON → 4xx, not 500 ────────────────────────────────────
+    await t.run('malformed JSON → 4xx not 5xx', async () => {
+      const r = await fetch(`${srv.base}/wallet/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{not: valid json,,}',
+      });
+      if (r.status >= 500) throw new Error(`malformed JSON caused ${r.status} (panic?) — expected 4xx`);
+      if (r.status < 400) throw new Error(`malformed JSON returned ${r.status} — expected 4xx`);
     });
-    if (res.status >= 200 && res.status < 300) {
-      throw new Error('SPOOF(b): text/plain с .jpg расширением принят как изображение');
-    }
 
-    // --- (c) SVG со скриптом ---
-    res = await uploadImage(api, {
-      bytes: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>', 'utf8'),
-      filename: 'x.svg',
-      contentType: 'image/svg+xml',
+    // ── (b) Empty body → 4xx, not 500 ────────────────────────────────────────
+    await t.run('empty body → 4xx not 5xx', async () => {
+      const r = await fetch(`${srv.base}/wallet/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '',
+      });
+      if (r.status >= 500) throw new Error(`empty body caused ${r.status} (panic?) — expected 4xx`);
+      if (r.status < 400) throw new Error(`empty body returned ${r.status} — expected 4xx`);
     });
-    if (res.status >= 200 && res.status < 300) {
-      const url = res.body.url;
-      const fetched = await fetch(server.url + url);
-      const ct = fetched.headers.get('content-type') || '';
-      // SVG допустим только если он не исполняется в контексте сайта:
-      // отдан как attachment или image/svg+xml с CSP/Content-Disposition.
-      const cd = fetched.headers.get('content-disposition') || '';
-      if (ct.includes('svg') && !cd.includes('attachment')) {
-        throw new Error('SPOOF(c): SVG со скриптом отдаётся инлайн — stored XSS при прямом открытии');
+
+    // ── (c) Missing required field → 400 ─────────────────────────────────────
+    await t.run('missing wallet_address → 400', async () => {
+      const r = await fetch(`${srv.base}/wallet/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ currency: 'BTC', role: 'client' }),
+      });
+      assertStatus({ status: r.status, body: {} }, 400, 'missing wallet_address');
+    });
+
+    // ── (d) Body > 64 KB on non-chat endpoint → rejected (not 2xx) ───────────
+    // Handler enforces MaxBytesReader and rejects with 4xx (typically 400).
+    await t.run('body > 64 KB on /wallet/register → rejected (not 2xx)', async () => {
+      const big = JSON.stringify({
+        wallet_address: '1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf',
+        currency: 'BTC',
+        role: 'client',
+        _pad: 'x'.repeat(65 * 1024),
+      });
+      const r = await fetch(`${srv.base}/wallet/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: big,
+      });
+      if (r.status >= 200 && r.status < 300) {
+        throw new Error(`oversized body accepted (${r.status}) — body limit not enforced`);
       }
-    }
+    });
+
+    // ── (e) Wrong HTTP method → not 200 ──────────────────────────────────────
+    await t.run('GET on POST-only /wallet/register → 405 or 404', async () => {
+      const r = await fetch(`${srv.base}/wallet/register`, { method: 'GET' });
+      if (r.status === 200) throw new Error('GET /wallet/register returned 200 — method not enforced');
+      if (r.status >= 500) throw new Error(`GET /wallet/register returned ${r.status}`);
+    });
+
+    // ── (f) Malformed JSON on /listing/create (auth-gated) → 4xx ─────────────
+    await t.run('malformed JSON on auth-gated endpoint → 4xx not 5xx', async () => {
+      const r = await fetch(`${srv.base}/listing/create`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer fake' },
+        body: '{"broken":',
+      });
+      if (r.status >= 500) throw new Error(`malformed JSON on /listing/create caused ${r.status}`);
+      // 400 (bad JSON) or 401 (bad token parsed before body) are both fine
+    });
+
   } finally {
-    await server.stop();
+    await srv.stop();
   }
+
+  return t.summary();
 }
+
+run().then(ok => { process.exit(ok ? 0 : 1); }).catch(e => { console.error(e); process.exit(1); });

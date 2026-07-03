@@ -24,10 +24,10 @@ cp .env.example .env
 go run ./cmd/naroom/main.go
 ```
 
-For development without blockchain payments:
+For development without blockchain payments (requires dev build tag):
 
 ```bash
-DEV_MODE=true go run ./cmd/naroom/main.go
+go run -tags dev ./cmd/naroom/main.go
 ```
 
 Frontend (SvelteKit, in `/frontend`):
@@ -44,9 +44,9 @@ npm run dev
 bash scripts/selftest.sh
 ```
 
-This runs: Go unit tests, frontend type-check, and 25 E2E tests against a real Go backend on a temp SQLite database.
+This runs: Go unit tests, frontend type-check, and 32 E2E tests against a real Go backend on a temp SQLite database.
 
-Current status: **25/25 E2E · 26/26 unit — all green**
+Current status: **32/32 E2E · 30/30 unit — all green**
 
 ## Documentation
 

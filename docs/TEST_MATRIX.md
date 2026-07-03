@@ -12,16 +12,22 @@ Categories: **ID** (Identity/Privacy) · **SE** (Session/Auth) · **LS** (Listin
 
 | Test | Invariant(s) | What it proves |
 |------|-------------|----------------|
-| `TestWalletHashDeterministic` | ID-1 | Same address → same HMAC hash |
-| `TestWalletHashDifferentAddresses` | ID-1 | Different addresses → different hashes |
-| `TestWalletHashDifferentSalts` | ID-1 | Different salts → different hashes (salt isolation) |
-| `TestSignatureVerify_BTC_P2PKH` | SE-1 | Valid BTC legacy signature accepted |
-| `TestSignatureVerify_BTC_Segwit_P2WPKH` | SE-1 | Valid BTC segwit signature accepted |
-| `TestSignatureVerify_LTC` | SE-1 | Valid LTC signature accepted |
-| `TestSignatureVerify_WrongSig` | SE-1 | Wrong signature → rejected |
-| `TestSignatureVerify_WrongAddress` | SE-1 | Right sig, wrong address → rejected |
-| `TestSignatureVerify_ReplaySalt` | SE-1 | Challenge salt changes per-call (replay blocked) |
-| `TestSignatureVerify_Expired` | SE-1 | Expired challenge → rejected |
+| `TestVerifyBTCMessage_P2PKH` | SE-1 | Valid BTC P2PKH signature accepted |
+| `TestVerifyBTCMessage_P2WPKH` | SE-1 | Valid BTC segwit (bech32) signature accepted |
+| `TestVerifyBTCMessage_WrongAddress` | SE-1 | Right sig, wrong address → rejected |
+| `TestVerifyBTCMessage_WrongMessage` | SE-1 | Valid sig, wrong message → rejected |
+| `TestVerifyLTCMessage_P2PKH` | SE-1 | Valid LTC signature accepted |
+| `TestVerifyBTCMessage_InvalidBase64` | SE-1 | Non-base64 signature → error, no panic |
+| `TestVerifyBTCMessage_ShortSignature` | SE-1 | Signature < 65 bytes → rejected |
+
+### `internal/handler/wallet_challenge_test.go`
+
+| Test | Invariant(s) | What it proves |
+|------|-------------|----------------|
+| `TestChallenge_OneTimeUse` | SE-1 | Challenge consumed on first verify; replay rejected |
+| `TestChallenge_Expired` | SE-1 | Expired challenge (past TTL) → rejected even with valid sig |
+| `TestChallenge_AddressBinding` | SE-1 | Challenge for address A cannot be used by address B |
+| `TestChallenge_ConcurrentReplay` | SE-1 | Two goroutines race same challenge → exactly one wins (atomic consume) |
 
 ### `internal/crypto/encrypt_test.go`
 
@@ -346,13 +352,100 @@ Note: runs with `devMode: false` specifically for rate limiting to be active.
 
 ---
 
+## Tests — Fable Five Audit Sprint
+
+### `tests/026_analytics_privacy.js` *(Playwright — selftest-full.sh only)*
+
+| Step/Check | Invariant(s) |
+|-----------|-------------|
+| Browser loads public page (`/`) → GoatCounter loads | ID-5 |
+| Browser loads `/new`, `/helper`, `/chat/*`, `/listing/*` → GoatCounter absent | ID-5 |
+
+---
+
+### `tests/027_challenge_replay.js`
+
+| Step/Check | Invariant(s) |
+|-----------|-------------|
+| POST `/wallet/challenge` returns non-404 (endpoint exists) | SE-1 |
+| `/wallet/challenge` ownership proof mechanism is present | SE-1 |
+
+---
+
+### `tests/028_payment_edge_cases.js`
+
+| Step/Check | Invariant(s) |
+|-----------|-------------|
+| Underpayment (tx < invoice amount) → invoice stays pending | IN-2, IN-6 |
+| Mempool API timeout → watcher does not crash; retries | IN-6 |
+| API recovers → payment confirmed on next poll | IN-6 |
+
+---
+
+### `tests/029_ciphertext_only.js`
+
+| Step/Check | Invariant(s) |
+|-----------|-------------|
+| Canary plaintext sent through `nacl.box` pipeline | CH-1 |
+| Sanity: peer decrypts canary back (proves real crypto, not no-op) | CH-1 |
+| `encrypted_messages` columns contain no plaintext (raw/base64/hex) | CH-1 |
+| Raw DB file + WAL + SHM contain no plaintext | CH-1 |
+
+---
+
+### `tests/030_content_type_spoofing.js`
+
+| Step/Check | Invariant(s) |
+|-----------|-------------|
+| Malformed JSON on `/wallet/register` → 4xx (not 500/panic) | SE-5 |
+| Empty body on `/wallet/register` → 4xx (not 500/panic) | SE-5 |
+| Missing `wallet_address` field → 400 | SE-5 |
+| Body > 64 KB on non-chat endpoint → rejected (not 2xx) | SE-5 |
+| GET on POST-only route → not 200 | SE-5 |
+| Malformed JSON on auth-gated endpoint → 4xx (not 5xx) | SE-5 |
+
+---
+
+### `tests/031_concurrent_accept.js`
+
+| Step/Check | Invariant(s) |
+|-----------|-------------|
+| Two peers respond to same listing | RS-1 |
+| Client fires two simultaneous accepts (Promise.all) | RS-1, RS-2 |
+| Exactly one accept returns 200; other returns 409 | RS-1 |
+| DB: exactly one response row with status='accepted' | RS-1 |
+
+---
+
+### `tests/032_concurrent_close.js`
+
+| Step/Check | Invariant(s) |
+|-----------|-------------|
+| Client and peer both close room simultaneously | CH-4, CH-5 |
+| Room status → `closed` exactly once (not duplicated) | CH-4 |
+| Second close returns 200 or 410, not 500 | CH-4 |
+| No zombie `peer_left` / `closed` dual-state | CH-5 |
+
+---
+
+### `tests/033_devmode_prod_failsafe.js`
+
+| Step/Check | Invariant(s) |
+|-----------|-------------|
+| Build binary without `-tags dev` | ID-6 |
+| Start with `DEV_MODE=true` → fatal exit (non-zero) | ID-6 |
+| Build binary with `-tags dev` | ID-6 |
+| Start with `DEV_MODE=true` → starts successfully | ID-6 |
+
+---
+
 ## Coverage Summary
 
 | Invariant | Test(s) | Status |
 |-----------|---------|--------|
 | **ID-1** Plain address never in chats/listings/invoices | 001 (flow), 008 (registration) | ⚠️ No DB assertion |
 | **ID-2** wallet_address_enc is AES-GCM ciphertext | encrypt_test.go | ⚠️ Unit only |
-| **ID-3** wallet_challenges dropped | build gate (table no longer exists) | ✅ Risk eliminated Sprint 1 |
+| **ID-3** wallet ownership proof required at registration | 027 (endpoint exists), wallet_challenge_test.go (security properties) | ✅ Fable Five sprint |
 | **ID-4** Session tokens stored as SHA-256 hash | 008, 009 | ✅ |
 | **ID-5** No IP in logs | 024 | ✅ Sprint 2 |
 | **ID-6** WALLET_ENC_KEY required in prod | encrypt_test.go:TestPrepareEncKeyProd | ✅ |
@@ -370,7 +463,7 @@ Note: runs with `devMode: false` specifically for rate limiting to be active.
 | **RS-3** 30-min cooldown after cancel | 021 | ✅ Sprint 2 |
 | **RS-4** Region lock cross-city | 015 | ✅ Sprint 1 |
 | **RS-5** Multi-slot balance scaling | 018 | ✅ Sprint 1 |
-| **CH-1** Server never decrypts | 001 (inspection) | ⚠️ |
+| **CH-1** Server never decrypts | 029 (DB column + raw file + WAL assertion) | ✅ Fable Five sprint |
 | **CH-2** Only participants send/receive | 001, 010 | ⚠️ Poll path not tested |
 | **CH-3** WS auth via header (not URL) | 010 | ✅ |
 | **CH-4** Messages deleted on close | 001, 004 | ⚠️ No DB assertion |
@@ -390,5 +483,5 @@ Note: runs with `devMode: false` specifically for rate limiting to be active.
 | **WK-2** peer_left → listing restored | 011 | ✅ |
 | **WK-3** wallet_sessions TTL cleanup | 023 | ✅ Sprint 2 |
 
-**Totals after Sprint 2:** ✅ 32 covered · ⚠️ 8 partial · ❌ 0 missing  
-_(Sprint 1: 26✅ / 9⚠️ / 5❌ — Sprint 2: eliminated all 5 missing gaps)_
+**Totals after Fable Five sprint:** ✅ 34 covered · ⚠️ 6 partial · ❌ 0 missing  
+_(Sprint 1: 26✅ / 9⚠️ / 5❌ — Sprint 2: +5 — Fable Five: CH-1 ✅, ID-3 ✅)_

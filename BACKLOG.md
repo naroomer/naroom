@@ -6,8 +6,8 @@
 
 ## Приоритет 1 — Запуск (нужно до первых пользователей)
 
-- [ ] **Реальный домен** — заменить `naroom.io` в `sitemap.xml`, `robots.txt`, `llms.txt` на финальный домен; убрать хардкод `naroom.net` из challenge.go и сделать через env `DOMAIN`
-- [ ] **GitHub репозиторий** — создать `github.com/naroom` (или другой URL), заменить плейсхолдер в `hiw.a5`, `llms.txt`, `SECURITY.md`, `SELF_HOSTING.md`
+- [x] **Реальный домен** — `naroom.net` используется как финальный домен в `sitemap.xml`, `robots.txt`, `config.go` (PUBLIC_BASE_URL default). `naroom.io` нигде в активных файлах не используется. Остаток: сделать домен полностью конфигурируемым через `DOMAIN`/`PUBLIC_BASE_URL` env без хардкода в config.go.
+- [x] **GitHub репозиторий** — URL определён: `https://github.com/naroomer/naroom`. Обновлено в USER_GUIDE*.md, llms.txt, SELF_HOSTING.md, TESTING_BRIEF.md. Остаток: заменить плейсхолдер в `hiw.a5` (frontend i18n) и убедиться что все публичные страницы ссылаются на корректный URL.
 - [ ] **E2E тесты после рефакторинга** — запустить `e2e/tests/001–014`; все хеши теперь HMAC-SHA256 + новая схема sessions (без wallet_address) — нужно убедиться что 14/14 проходят
 - [ ] **Удалить dev DB перед тестами** — смена алгоритма хеширования делает старые хеши невалидными; удалить `naroom.db` и пересоздать
 

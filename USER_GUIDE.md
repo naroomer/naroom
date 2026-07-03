@@ -198,7 +198,7 @@ After each session the client can leave 👍 or 👎. Over time your session cou
 - **No message storage** — all chat messages are deleted when the session ends
 - **No IP logging** beyond what is necessary for platform operation
 - **Tor-compatible** — the platform works on .onion address for users who need additional anonymity
-- **Open source** — full source code is available at github.com/naroom; anyone can verify encryption, data deletion, and the absence of hidden functions
+- **Open source** — full source code is available at https://github.com/naroomer/naroom; anyone can verify encryption, data deletion, and the absence of hidden functions
 - **Language fallback** — Tor Browser and browsers with no language headers open in English by default, with no fingerprinting attempt
 
 ---
