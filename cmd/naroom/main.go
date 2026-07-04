@@ -61,7 +61,7 @@ func main() {
 
 	// Init crypto clients
 	mempool := crypto.NewMempoolClient(cfg.MempoolAPI)
-	blockcypher := crypto.NewBlockcypherClient(cfg.BlockcypherAPI)
+	blockcypher := crypto.NewBlockcypherClient(cfg.BlockcypherAPI, cfg.BlockcypherToken)
 	prices := crypto.NewPriceCache(5 * time.Minute)
 
 	// Init HD wallet (dev mode если xpub не задан)
@@ -162,6 +162,7 @@ func main() {
 	r.With(requireSession, middleware.LimitBody(64*1024), rlGeneral.Limit(rateFn)).Post("/response/{id}/accept", h.AcceptResponse)
 	r.With(requireSession, rlGeneral.Limit(rateFn)).Get("/peer/region", h.GetPeerRegion)
 	r.With(requireSession, rlGeneral.Limit(rateFn)).Get("/peer/chatroom", h.GetCounselorChatRoom)
+	r.With(requireSession, rlGeneral.Limit(rateFn)).Get("/peer/invoice", h.PeerPendingInvoice)
 	r.With(requireSession, rlGeneral.Limit(rateFn)).Get("/chat/{room_id}", h.GetChatRoom)
 	r.Get("/chat/ws", h.ChatWS(hub)) // auth handled inside handler (WS can't send custom headers)
 	r.With(requireSession, middleware.LimitBody(8*1024*1024), rlGeneral.Limit(rateFn)).Post("/chat/poll/send", h.ChatPollSend)

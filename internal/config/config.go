@@ -15,8 +15,9 @@ type Config struct {
 	BTCXpub string
 	LTCXpub string
 
-	MempoolAPI     string
-	BlockcypherAPI string
+	MempoolAPI       string
+	BlockcypherAPI   string
+	BlockcypherToken string // optional API token
 
 	BalanceCheckInterval int // seconds
 	TTLCleanInterval     int
@@ -52,8 +53,9 @@ func Load() *Config {
 		BTCXpub: envOr("BTC_XPUB", ""),
 		LTCXpub: envOr("LTC_XPUB", ""),
 
-		MempoolAPI:     envOr("MEMPOOL_API", "https://mempool.space/api"),
-		BlockcypherAPI: envOr("BLOCKCYPHER_API", "https://api.blockcypher.com/v1/ltc/main"),
+		MempoolAPI:       envOr("MEMPOOL_API", "https://mempool.space/api"),
+		BlockcypherAPI:   envOr("BLOCKCYPHER_API", "https://api.blockcypher.com/v1/ltc/main"),
+		BlockcypherToken: envOr("BLOCKCYPHER_TOKEN", ""),
 
 		BalanceCheckInterval: envInt("BALANCE_CHECK_INTERVAL", 600),
 		TTLCleanInterval:     envInt("TTL_CLEAN_INTERVAL", 60),

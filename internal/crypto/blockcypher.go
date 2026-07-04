@@ -4,27 +4,38 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
 // BlockcypherClient talks to blockcypher API for LTC.
 type BlockcypherClient struct {
 	baseURL    string
+	token      string // optional API token to avoid rate limiting
 	httpClient *http.Client
 }
 
-func NewBlockcypherClient(baseURL string) *BlockcypherClient {
+func NewBlockcypherClient(baseURL, token string) *BlockcypherClient {
 	return &BlockcypherClient{
 		baseURL: baseURL,
+		token:   token,
 		httpClient: &http.Client{
 			Timeout: 15 * time.Second,
 		},
 	}
 }
 
+// tokenParam returns "?token=XXX" if token is set, otherwise "".
+func (b *BlockcypherClient) tokenParam() string {
+	if b.token == "" {
+		return ""
+	}
+	return "?token=" + b.token
+}
+
 // GetBalance returns confirmed balance in litoshis for an LTC address.
 func (b *BlockcypherClient) GetBalance(address string) (int64, error) {
-	url := fmt.Sprintf("%s/addrs/%s/balance", b.baseURL, address)
+	url := fmt.Sprintf("%s/addrs/%s/balance%s", b.baseURL, address, b.tokenParam())
 	resp, err := b.httpClient.Get(url)
 	if err != nil {
 		return 0, fmt.Errorf("blockcypher balance: %w", err)
@@ -50,7 +61,7 @@ func (b *BlockcypherClient) GetBalance(address string) (int64, error) {
 
 // GetTransactions returns transactions for an LTC address.
 func (b *BlockcypherClient) GetTransactions(address string) ([]BlockcypherTx, error) {
-	url := fmt.Sprintf("%s/addrs/%s/full?limit=10", b.baseURL, address)
+	url := fmt.Sprintf("%s/addrs/%s/full?limit=10%s", b.baseURL, address, strings.Replace(b.tokenParam(), "?", "&", 1))
 	resp, err := b.httpClient.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("blockcypher txs: %w", err)
