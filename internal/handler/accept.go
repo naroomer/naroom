@@ -33,14 +33,18 @@ func (h *Handler) AcceptResponse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Currency == "" || req.ClientPubkey == "" {
-		writeError(w, 400, "client_pubkey and currency required")
+	if req.ClientPubkey == "" {
+		writeError(w, 400, "client_pubkey required")
 		return
 	}
-	if req.Currency != "BTC" && req.Currency != "LTC" {
-		writeError(w, 400, "currency must be BTC or LTC")
+	// Always use the currency from the wallet session — never trust the frontend value.
+	var sessionCurrency string
+	if err := h.DB.QueryRow(`SELECT currency FROM wallet_sessions WHERE wallet_hash = ? AND role = 'client'`,
+		clientHash).Scan(&sessionCurrency); err != nil || (sessionCurrency != "BTC" && sessionCurrency != "LTC") {
+		writeError(w, 403, "wallet session not found")
 		return
 	}
+	req.Currency = sessionCurrency
 
 	// Resolve prices and address before opening a transaction (external calls must be outside tx).
 	var amountCrypto string

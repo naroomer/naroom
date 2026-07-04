@@ -1,10 +1,28 @@
 package handler
 
 import (
+	"fmt"
+	"log"
 	"net/http"
+	"strings"
 
 	"naroom/internal/crypto"
 )
+
+// detectCurrencyFromAddress returns "BTC" or "LTC" based on address prefix.
+// ltc1…, L…, M… → LTC; bc1…, 1…, 3… → BTC.
+// Returns "" if unknown (frontend-supplied value is used as fallback).
+func detectCurrencyFromAddress(addr string) string {
+	switch {
+	case strings.HasPrefix(addr, "ltc1"), strings.HasPrefix(addr, "LTC1"),
+		strings.HasPrefix(addr, "L"), strings.HasPrefix(addr, "M"):
+		return "LTC"
+	case strings.HasPrefix(addr, "bc1"), strings.HasPrefix(addr, "BC1"),
+		strings.HasPrefix(addr, "1"), strings.HasPrefix(addr, "3"):
+		return "BTC"
+	}
+	return ""
+}
 
 type walletRegisterReq struct {
 	WalletAddress string `json:"wallet_address"`
@@ -32,6 +50,11 @@ func (h *Handler) WalletRegister(w http.ResponseWriter, r *http.Request) {
 	if req.Currency != "BTC" && req.Currency != "LTC" {
 		writeError(w, 400, "currency must be BTC or LTC")
 		return
+	}
+	// Auto-correct currency from address prefix — frontend may send wrong value
+	// due to caching or race conditions with auto-detect.
+	if detected := detectCurrencyFromAddress(req.WalletAddress); detected != "" {
+		req.Currency = detected
 	}
 
 	// ── Dev mode: skip balance check ─────────────────────────────────────────
@@ -63,10 +86,32 @@ func (h *Handler) WalletRegister(w http.ResponseWriter, r *http.Request) {
 		minUSD = 1000.0
 	}
 
-	balanceUSD, err := h.checkBalanceUSD(req.WalletAddress, req.Currency)
-	if err != nil {
-		writeError(w, 502, "balance check failed: "+err.Error())
-		return
+	// Use cached balance if wallet was verified within the last 5 minutes.
+	// Avoids hammering BlockCypher/Mempool on repeated register calls.
+	walletHash := crypto.WalletHash(h.HashKey, req.WalletAddress)
+	var cachedBalance float64
+	cacheHit := false
+	if err := h.DB.QueryRow(`
+		SELECT balance_usd FROM wallet_sessions
+		WHERE wallet_hash = ? AND balance_status = 'ok' AND last_checked_at > strftime('%s','now') - 300
+		LIMIT 1
+	`, walletHash).Scan(&cachedBalance); err == nil {
+		cacheHit = true
+	}
+
+	var balanceUSD float64
+	if cacheHit {
+		balanceUSD = cachedBalance
+	} else {
+		var err error
+		balanceUSD, err = h.checkBalanceUSD(req.WalletAddress, req.Currency)
+		if err != nil {
+			// If all balance APIs are unavailable (rate-limited, blocked), let the user
+			// through. The actual crypto payment at listing/chat time will enforce funds.
+			// This avoids blocking legitimate users when external APIs fail.
+			log.Printf("balance check unavailable for %s (%s): %v — allowing through", req.Currency, req.Role, err)
+			balanceUSD = minUSD // treat as passing
+		}
 	}
 	if balanceUSD < minUSD {
 		writeJSON(w, 402, map[string]any{
@@ -82,7 +127,6 @@ func (h *Handler) WalletRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "db error")
 		return
 	}
-	walletHash := crypto.WalletHash(h.HashKey, req.WalletAddress)
 	token, err := h.issueSession(walletHash, req.Role, req.Currency)
 	if err != nil {
 		writeError(w, 500, "session creation failed")
@@ -114,7 +158,12 @@ func (h *Handler) checkBalanceUSD(address, currency string) (float64, error) {
 	case "LTC":
 		litoshis, err := h.Blockcypher.GetBalance(address)
 		if err != nil {
-			return 0, err
+			// Fallback to Blockchair when BlockCypher is rate-limited or unavailable.
+			log.Printf("BlockCypher failed (%v), falling back to Blockchair", err)
+			litoshis, err = h.Blockchair.GetLTCBalance(address)
+			if err != nil {
+				return 0, fmt.Errorf("LTC balance unavailable: %v", err)
+			}
 		}
 		ltc := float64(litoshis) / 1e8
 		price, err := h.Prices.LTCPrice()

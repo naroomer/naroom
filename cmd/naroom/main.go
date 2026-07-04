@@ -62,6 +62,7 @@ func main() {
 	// Init crypto clients
 	mempool := crypto.NewMempoolClient(cfg.MempoolAPI)
 	blockcypher := crypto.NewBlockcypherClient(cfg.BlockcypherAPI, cfg.BlockcypherToken)
+	blockchair := crypto.NewBlockchairClient() // LTC fallback when BlockCypher is rate-limited
 	prices := crypto.NewPriceCache(5 * time.Minute)
 
 	// Init HD wallet (dev mode если xpub не задан)
@@ -100,6 +101,7 @@ func main() {
 		WalletEncKey:     walletEncKey,
 		Mempool:          mempool,
 		Blockcypher:      blockcypher,
+		Blockchair:       blockchair,
 		Prices:           prices,
 		Wallet:           wallet,
 		DevMode:    cfg.DevMode,

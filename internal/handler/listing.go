@@ -257,8 +257,8 @@ func (h *Handler) CreateListing(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate fields
-	if req.City == "" || req.Currency == "" {
-		writeError(w, 400, "city, currency required")
+	if req.City == "" {
+		writeError(w, 400, "city required")
 		return
 	}
 	if !validDependency[req.DependencyType] {
@@ -277,32 +277,58 @@ func (h *Handler) CreateListing(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "at least one language required")
 		return
 	}
-	if req.Currency != "BTC" && req.Currency != "LTC" {
-		writeError(w, 400, "currency must be BTC or LTC")
+
+	// Always use the currency registered with the wallet session — never trust frontend.
+	// This prevents BTC invoices being generated for LTC wallets when the browser
+	// sends a stale/cached currency value.
+	var sessionCurrency, balanceStatus string
+	if err := h.DB.QueryRow(`SELECT currency, balance_status FROM wallet_sessions WHERE wallet_hash = ? AND role = 'client'`,
+		walletHash).Scan(&sessionCurrency, &balanceStatus); err != nil {
+		writeError(w, 403, "wallet not verified")
 		return
 	}
+	req.Currency = sessionCurrency // override whatever frontend sent
 
-	// Check wallet is verified and has sufficient balance
+	// Check wallet has sufficient balance
 	if !h.DevMode {
-		var balanceStatus string
-		err := h.DB.QueryRow(`SELECT balance_status FROM wallet_sessions WHERE wallet_hash = ? AND role = 'client'`,
-			walletHash).Scan(&balanceStatus)
-		if err != nil {
-			writeError(w, 403, "wallet not verified")
-			return
-		}
 		if balanceStatus != "ok" {
 			writeError(w, 403, "insufficient balance")
 			return
 		}
 	}
 
-	// Check no active listing from this wallet (excluding listings that already have a chat)
+	// Idempotency: if wallet already has a pending listing with an unpaid invoice
+	// created within the last hour, return that same invoice instead of creating a new one.
+	// This handles rapid double-clicks and page refreshes gracefully.
+	var existingInvoiceID, existingAddr, existingCrypto, existingCurrency, existingListingID string
+	var existingUSD float64
+	idempErr := h.DB.QueryRow(`
+		SELECT i.id, i.address, i.amount_usd, i.amount_crypto, i.currency, l.id
+		FROM invoices i
+		JOIN listings l ON l.id = i.listing_id
+		WHERE l.wallet_hash = ? AND l.status = 'pending' AND i.status = 'pending'
+		  AND l.created_at > strftime('%s','now') - 3600
+		ORDER BY l.created_at DESC LIMIT 1
+	`, walletHash).Scan(&existingInvoiceID, &existingAddr, &existingUSD, &existingCrypto, &existingCurrency, &existingListingID)
+	if idempErr == nil {
+		// Return existing invoice — same address, same amount, no new records created.
+		writeJSON(w, 200, map[string]any{
+			"invoice_id":    existingInvoiceID,
+			"address":       existingAddr,
+			"amount_usd":    existingUSD,
+			"amount_crypto": existingCrypto,
+			"currency":      existingCurrency,
+			"listing_id":    existingListingID,
+		})
+		return
+	}
+
+	// Check no active listing from this wallet (excluding listings that already have a chat).
 	var activeCount int
 	h.DB.QueryRow(`
 		SELECT COUNT(*) FROM listings
-		WHERE wallet_hash = ? AND status IN ('active', 'pending')
-		  AND NOT EXISTS (SELECT 1 FROM chat_rooms cr WHERE cr.listing_id = listings.id AND cr.status = 'active')
+		WHERE wallet_hash = ? AND status = 'active'
+		AND NOT EXISTS (SELECT 1 FROM chat_rooms cr WHERE cr.listing_id = listings.id AND cr.status = 'active')
 	`, walletHash).Scan(&activeCount)
 	if activeCount > 0 {
 		writeError(w, 409, "already have active listing")

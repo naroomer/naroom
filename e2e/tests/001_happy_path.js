@@ -46,7 +46,12 @@ export async function run() {
 
     await t.run('duplicate listing rejected', async () => {
       const r = await api.createListing(CLIENT_WALLET);
-      assertStatus(r, 409, 'duplicate listing');
+      // Idempotency: pending listing returns same invoice (200), not 409.
+      if (r.status === 200) {
+        if (r.body.invoice_id !== invoiceId) throw new Error(`Expected same invoice_id, got ${r.body.invoice_id}`);
+      } else {
+        assertStatus(r, 409, 'duplicate listing');
+      }
     });
 
     await t.run('no session → create listing rejected', async () => {

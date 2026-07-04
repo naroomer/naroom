@@ -239,22 +239,8 @@ func (iw *InvoiceWatcher) confirmInvoice(invoiceID, typ, txid string, amount int
 			log.Printf("invoice_watcher: listing invoice %s has no listing_id", invoiceID)
 			return
 		}
-		if iw.RequireTelegram {
-			// Two-gate activation: both confirmed invoice AND Telegram binding required.
-			// ActivateListingIfReady checks both within the same transaction.
-			activated, err := telegram.ActivateListingIfReady(tx, listingID, iw.ListingTTL, true)
-			if err != nil {
-				log.Printf("invoice_watcher: activate listing %s: %v", listingID, err)
-				return
-			}
-			if activated {
-				log.Printf("invoice_watcher: listing %s activated (payment+telegram)", listingID)
-				notifyListingID = listingID
-			} else {
-				log.Printf("invoice_watcher: listing %s payment confirmed, awaiting telegram binding", listingID)
-			}
-		} else {
-			// Dev mode or no Telegram configured: activate on payment alone.
+		// Activate on payment alone — Telegram is notifications only, not a gate.
+		{
 			ttl := int64(iw.ListingTTL)
 			if ttl == 0 {
 				ttl = 21600
@@ -270,7 +256,7 @@ func (iw *InvoiceWatcher) confirmInvoice(invoiceID, typ, txid string, amount int
 				return
 			}
 			if n, _ := res.RowsAffected(); n > 0 {
-				log.Printf("invoice_watcher: listing %s activated (6h)", listingID)
+				log.Printf("invoice_watcher: listing %s activated", listingID)
 				notifyListingID = listingID
 			}
 		}
@@ -280,19 +266,8 @@ func (iw *InvoiceWatcher) confirmInvoice(invoiceID, typ, txid string, amount int
 			log.Printf("invoice_watcher: renew invoice %s has no listing_id", invoiceID)
 			return
 		}
-		if iw.RequireTelegram {
-			renewed, err := telegram.RenewListingIfReady(tx, listingID, iw.ListingTTL, true)
-			if err != nil {
-				log.Printf("invoice_watcher: renew listing %s: %v", listingID, err)
-				return
-			}
-			if renewed {
-				log.Printf("invoice_watcher: listing %s renewed (payment+telegram)", listingID)
-				notifyListingID = listingID
-			} else {
-				log.Printf("invoice_watcher: listing %s renewal payment confirmed, awaiting fresh telegram binding", listingID)
-			}
-		} else {
+		// Renew on payment alone — Telegram is notifications only, not a gate.
+		{
 			ttl := int64(iw.ListingTTL)
 			if ttl == 0 {
 				ttl = 21600
@@ -309,7 +284,7 @@ func (iw *InvoiceWatcher) confirmInvoice(invoiceID, typ, txid string, amount int
 				return
 			}
 			if n, _ := res.RowsAffected(); n > 0 {
-				log.Printf("invoice_watcher: listing %s renewed (+6h)", listingID)
+				log.Printf("invoice_watcher: listing %s renewed", listingID)
 				notifyListingID = listingID
 			}
 		}

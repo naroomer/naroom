@@ -14,8 +14,9 @@ type Handler struct {
 	DB           *sql.DB
 	HashKey      []byte // HMAC key for WalletHash — never log or expose
 	WalletEncKey []byte // AES-256-GCM key for wallet_address_enc — never log or expose
-	Mempool *crypto.MempoolClient
+	Mempool     *crypto.MempoolClient
 	Blockcypher *crypto.BlockcypherClient
+	Blockchair  *crypto.BlockchairClient
 	Prices      *crypto.PriceCache
 	Wallet      *crypto.HDWallet
 	DevMode    bool
