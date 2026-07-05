@@ -58,7 +58,9 @@ export async function run() {
       if (val !== listingId1) throw new Error(`listing_id mismatch: ${val} != ${listingId1}`);
     });
 
-    // Close flow 1
+    // Close flow 1 (symmetric: both sides must close)
+    // Peer closes first, then client completes the full close → listing restored
+    await api.closeChat(roomId1, PEER_WALLET);
     await api.closeChat(roomId1, CLIENT_WALLET);
 
     // ── Flow 2: original listing restored after close ─────────────────────

@@ -1,11 +1,30 @@
 # Security Policy — NA Room
 
+## Wallet Verification Model (Two-Step)
+
+NA Room verifies wallet control in two distinct steps:
+
+| Step | When | What is verified |
+|------|------|-----------------|
+| Balance pre-check | `POST /wallet/register` | Wallet address holds ≥ threshold balance at time of registration. **NOT ownership proof** — no cryptographic signature required. |
+| Payment proof | On-chain (invoice watcher) | Payment sender address hashes to the registered wallet hash (IN-3), AND sender's post-payment balance still meets threshold (IN-5). |
+
+**Chat room creation is gated on both:** the invoice watcher's `verifySenderAndBalance` must return true before `confirmInvoice` creates the chat room. A successful `/wallet/register` alone — without a confirmed payment — never opens a chat room.
+
+**No challenge-signature is required or planned.** There is no `/wallet/challenge` endpoint. Bitcoin/Litecoin message signing (challenge-response) is intentionally absent from the architecture. Wallet control is proven at payment time by sender address verification — this is the ownership proof. This is a deliberate design decision and is not a known gap.
+
+**Single-transaction payment requirement.** Each invoice must be settled by a single transaction. Multiple transactions to the same invoice address are not aggregated — only the first transaction that meets the full amount threshold is evaluated.
+
+**Wrong sender → invoice rejected immediately.** When the invoice watcher detects a payment, the sender's address is hashed and compared to `invoices.payer_address`. If no input address matches, the invoice is marked `rejected` before any balance check occurs. The listing or chat room is never activated.
+
+---
+
 ## What NA Room Protects
 
 | What | How |
 |------|-----|
 | Chat message content | End-to-end encrypted (X25519 + XSalsa20-Poly1305 via TweetNaCl). The server stores only `nonce + ciphertext` and cannot decrypt anything. |
-| Messages after session | Permanently deleted when a session closes. |
+| Messages after session | Deleted when **both** sides close (second `POST /chat/{room_id}/close`). If only one side has closed (status `peer_left` or `client_left`), messages remain for the other side to read. A 24h TTL worker deletes all messages unconditionally. |
 | Wallet identity in listings, chats, responses, invoices | Never stored as plain text in these tables. Stored as `HMAC-SHA256(HASH_KEY, address)`. Without the server's `HASH_KEY` the database cannot be linked to real wallets. |
 | IP addresses | Not logged. Rate limiting uses a hashed /24 subnet, never persisted. |
 | Who you are | No accounts, no email, no phone, no username. |

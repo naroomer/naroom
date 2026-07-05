@@ -40,6 +40,8 @@ async function fullSession(api, srv) {
     return r.status === 200 ? r.body : null;
   }, { timeout: 45000, label: 'chat room open' });
 
+  // Symmetric close: peer closes first, then client completes → gets review_token
+  await api.closeChat(room.room_id, PEER_WALLET);
   const closeRes = await api.closeChat(room.room_id, CLIENT_WALLET);
   clearListings(srv); // restore to clean state for next test
   return closeRes.body.review_token ?? null;

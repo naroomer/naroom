@@ -12,7 +12,9 @@
 /naroom
 /naroom_bin
 /naroom_linux
+/naroom-linux
 naroom_*
+naroom-*
 
 # Frontend build artifacts
 frontend/node_modules/

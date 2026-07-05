@@ -33,6 +33,7 @@ func Open(path string) (*sql.DB, error) {
 	// Column additions for existing databases (idempotent — errors are ignored)
 	db.Exec(`ALTER TABLE encrypted_messages ADD COLUMN msg_type TEXT NOT NULL DEFAULT 'text'`)
 	db.Exec(`ALTER TABLE chat_rooms ADD COLUMN peer_left_at INTEGER`)
+	db.Exec(`ALTER TABLE chat_rooms ADD COLUMN client_left_at INTEGER`)
 	db.Exec(`ALTER TABLE invoices ADD COLUMN payment_detected_at INTEGER`)
 	db.Exec(`ALTER TABLE invoices ADD COLUMN price_at_creation REAL`)
 

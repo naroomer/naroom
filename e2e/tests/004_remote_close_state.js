@@ -42,7 +42,8 @@ export async function run() {
   console.log('\n=== 004: Remote Close — Other Side Detects Terminal State ===');
   const t = new Runner('004_remote_close_state');
 
-  // ── Test A: Client closes → peer detects closed room ──────────────────
+  // ── Test A: Peer closes first → client_left_event; then client completes close ──
+  // Symmetric CloseChat: first close → partial. Second close → full close + terminal for peer.
   {
     const srv = new TestServer();
     try {
@@ -58,13 +59,20 @@ export async function run() {
         await peerWS.connect();
       });
 
-      await t.run('client closes chat', async () => {
-        const r = await api.closeChat(roomId, CLIENT_WALLET);
-        assertStatus(r, 200, 'client close');
-        await sleep(500);
+      await t.run('peer closes first → status=peer_left (room still accessible to client)', async () => {
+        const r = await api.closeChat(roomId, PEER_WALLET);
+        assertStatus(r, 200, 'peer first close');
+        if (r.body.status !== 'peer_left') throw new Error(`Expected peer_left, got ${r.body.status}`);
+        await sleep(300);
       });
 
-      await t.run('peer WS reaches terminal state (not infinite reconnect)', async () => {
+      await t.run('client closes second → room fully closed', async () => {
+        const r = await api.closeChat(roomId, CLIENT_WALLET);
+        assertStatus(r, 200, 'client second close');
+        if (r.body.status !== 'closed') throw new Error(`Expected closed, got ${r.body.status}`);
+      });
+
+      await t.run('peer WS reaches terminal state after full close', async () => {
         const result = await peerWS.reconnectUntilTerminal(api);
         if (!result.terminal) throw new Error('Expected terminal, got reconnected');
         if (result.status !== 'closed') throw new Error(`Expected status=closed, got ${result.status}`);
@@ -135,15 +143,25 @@ export async function run() {
 
       await api.closeChat(roomId, CLIENT_WALLET);
 
+      // With symmetric close: client close → client_left; then peer close → full close.
+      // The room is now in 'closed' state. Trying to close again → 410.
       await t.run('poll send rejected for closed room (410)', async () => {
         const enc = encrypt('late message', clientKeys.priv, peerKeys.pub);
         const r = await api.pollSend(roomId, CLIENT_WALLET, clientKeys.pub, enc.nonce, enc.ciphertext);
         assertStatus(r, 410, 'send to closed room');
       });
 
-      await t.run('double close rejected (410)', async () => {
+      await t.run('peer completes close after client_left → fully closed', async () => {
+        // The room is in 'client_left' status — peer can close to complete the session.
         const r = await api.closeChat(roomId, PEER_WALLET);
-        assertStatus(r, 410, 'double close');
+        if (r.status !== 200 && r.status !== 410) {
+          throw new Error(`Expected 200 or 410 from peer close, got ${r.status}`);
+        }
+      });
+
+      await t.run('double close on fully-closed room rejected (410)', async () => {
+        const r = await api.closeChat(roomId, CLIENT_WALLET);
+        assertStatus(r, 410, 'double close on closed room');
       });
 
     } finally { await srv.stop(); }

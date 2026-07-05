@@ -18,6 +18,36 @@
 
 ---
 
+## Wallet Verification Model (Two-Step)
+
+NA Room uses a two-step model — not a single "wallet verified" claim:
+
+**Step 1 — Balance pre-check (`POST /wallet/register`)**
+
+`/wallet/register` checks that the submitted wallet address holds a balance at or above the platform threshold (≥$150 for clients, ≥$1000 for peers). It does NOT verify that the caller controls the address. There is no cryptographic signature, no challenge-response, no proof of key ownership. It is a public balance pre-check only.
+
+There is no `/wallet/challenge` endpoint. Bitcoin/Litecoin message signing (challenge-response ownership proof at registration time) is intentionally not part of the architecture and is not planned. Wallet control is proven at payment time by on-chain sender verification — see Step 2 below.
+
+After the pre-check passes, the server issues a session token keyed to the `HMAC-SHA256(HASH_KEY, address)` — the hash, not the plain address.
+
+**Step 2 — Payment proof (invoice watcher, on-chain)**
+
+Actual control of the wallet is established at payment time. When a payment to an invoice address is detected on-chain, the invoice watcher (`internal/worker/invoice_watcher.go`) performs `verifySenderAndBalance`:
+
+1. **Sender hash match:** at least one transaction input address must hash to the same value as `invoices.payer_address` (which was set at invoice creation from the session's wallet hash). Hashes are compared — plain addresses never touch the DB comparison. Wrong sender → invoice immediately rejected.
+2. **Post-payment balance check:** after the payment, the matched sender's balance is retrieved and checked against the post-payment threshold (listing: ≥$135; chat: ≥$975). Insufficient balance → invoice rejected.
+3. **Underpayment:** transaction amounts below 99% of the invoice amount are ignored entirely — they do not trigger any action and do not block future valid payments.
+
+**Chat room opens only when BOTH conditions pass.** No chat room is created until `verifySenderAndBalance` returns true AND `confirmInvoice` completes its transaction.
+
+**Wrong sender → invoice rejected immediately.** If no input address in the payment transaction hashes to `invoices.payer_address`, the invoice is marked `rejected` before any balance check runs. The listing or chat is never activated.
+
+**Single-transaction payment.** Each invoice is settled by one transaction. Multiple smaller transactions to the same invoice address are not aggregated — only a single transaction meeting the full amount threshold triggers the sender check and balance gate.
+
+**Dev mode (`DEV_MODE=true` or `DEV_SKIP_PAYMENTS=true`):** both steps are bypassed. Invoices are auto-confirmed without blockchain checks. This is explicitly intended for development and testing only.
+
+---
+
 ## Wallet Identity: HMAC-SHA256 Hashing
 
 Every reference to a wallet in persistent tables (listings, responses, chat rooms, sessions, reputation, invoices) uses a keyed hash:
@@ -79,7 +109,7 @@ The server has no key material. It cannot decrypt stored messages. It relays cip
 
 **Message deletion:**
 
-Messages are deleted from `encrypted_messages` when the client explicitly closes the chat room. A TTL worker also deletes all messages older than 24 hours unconditionally.
+Messages are deleted from `encrypted_messages` when **both** participants have closed the chat room (the second `POST /chat/{room_id}/close` triggers the deletion). If only one side has closed (status `peer_left` or `client_left`), messages remain intact so the other side can still read history. A TTL worker also deletes all messages older than 24 hours unconditionally, regardless of room status.
 
 ---
 

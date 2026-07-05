@@ -42,7 +42,7 @@ cd frontend && npm install && npm run dev
 ## Автоматические тесты
 
 ```bash
-# Полный прогон: сборка + unit + frontend + 32 E2E тестов
+# Полный прогон: сборка + unit + frontend + 35 E2E тестов
 ./scripts/selftest.sh
 
 # Только unit-тесты
@@ -55,7 +55,7 @@ cd frontend && npm install && npm run dev
 FRONTEND_URL=http://localhost:4173 bash scripts/selftest-full.sh
 ```
 
-Последний результат: **32/32 PASS**
+Последний результат: **35/35 PASS**
 
 ### Что покрывают E2E тесты
 
@@ -94,6 +94,9 @@ FRONTEND_URL=http://localhost:4173 bash scripts/selftest-full.sh
 | 031_concurrent_accept | Два одновременных accept → ровно один проходит (TOCTOU) |
 | 032_concurrent_close | Одновременное закрытие комнаты → не создаёт зомби-состояние |
 | 033_devmode_prod_failsafe | Бинарник без `-tags dev` отклоняет `DEV_MODE=true` при старте |
+| 034_chat_close_resume | Жизненный цикл закрытия чата, /resume, обновление pubkey |
+| 035_payment_verification | Верификация платежа: sender hash, баланс, двойное подтверждение |
+| 036_ban_enforcement | Забаненный кошелёк не может создавать объявления/откликаться/писать в чат → 403 |
 
 ## Ручное тестирование (без реальных денег)
 

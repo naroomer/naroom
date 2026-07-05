@@ -41,7 +41,9 @@ export async function run() {
   console.log('\n=== 003: Role Separation — Review ===');
   const t = new Runner('003_role_separation_review');
 
-  // ── Test A: Client closes → gets token ───────────────────────────────
+  // ── Test A: Both sides close → client (second closer) gets token ────────
+  // With symmetric CloseChat: first close → partial close; second close → full close + review_token.
+  // Client always receives the review_token when both sides have closed.
   {
     const srv = new TestServer();
     try {
@@ -50,9 +52,17 @@ export async function run() {
       await setupChat(api);
       const room = srv.db(`SELECT id FROM chat_rooms WHERE status='active' LIMIT 1`);
 
-      await t.run('client closes chat → receives review_token', async () => {
+      await t.run('peer closes first → status=peer_left, no token yet', async () => {
+        const r = await api.closeChat(room, PEER_WALLET);
+        assertStatus(r, 200, 'peer first close');
+        if (r.body.status !== 'peer_left') throw new Error(`Expected peer_left, got ${r.body.status}`);
+        assertNoField(r.body, 'review_token', 'peer first close response');
+      });
+
+      await t.run('client closes second → full close, receives review_token', async () => {
         const r = await api.closeChat(room, CLIENT_WALLET);
-        assertStatus(r, 200, 'client close');
+        assertStatus(r, 200, 'client second close');
+        if (r.body.status !== 'closed') throw new Error(`Expected closed, got ${r.body.status}`);
         assertHasField(r.body, 'review_token', 'client close response');
       });
 
@@ -95,7 +105,9 @@ export async function run() {
       const room = srv.db(`SELECT id FROM chat_rooms WHERE status='active' LIMIT 1`);
 
       let token;
-      await t.run('client closes and gets review_token', async () => {
+      await t.run('client closes and gets review_token (peer closes first)', async () => {
+        // Peer leaves first so client gets the full-close + review_token
+        await api.closeChat(room, PEER_WALLET);
         const r = await api.closeChat(room, CLIENT_WALLET);
         token = r.body.review_token;
         if (!token) throw new Error('No token');

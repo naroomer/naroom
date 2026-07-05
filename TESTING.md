@@ -4,12 +4,12 @@
 
 | Type | Location | Runner | Count |
 |------|----------|--------|-------|
-| Go unit tests | `internal/crypto/`, `internal/handler/`, `internal/worker/` | `go test` | 30 |
-| E2E tests (automated) | `e2e/tests/` | Node.js | 32 |
+| Go unit tests | `internal/crypto/`, `internal/handler/`, `internal/worker/` | `go test` | 26 |
+| E2E tests (automated) | `e2e/tests/` | Node.js | 35 |
 | E2E test (Playwright) | `e2e/tests/026_analytics_privacy.js` | Playwright | 1 |
 | Frontend type check | `frontend/` | `npm run check` | — |
 
-Current status: **32/32 E2E · 30/30 unit — all green**
+Current status: **35/35 E2E · 26/26 unit — all green**
 
 The Playwright test (026) runs separately via `selftest-full.sh` because it requires a running frontend and Playwright installation.
 
@@ -25,7 +25,7 @@ This script:
 1. Builds the Go binary (`go build ./...`)
 2. Runs Go unit tests (`go test ./...`)
 3. Runs `npm run check` + `npm run build` in `/frontend`
-4. Runs all 32 E2E tests (excludes 026 — Playwright)
+4. Runs all 35 E2E tests (excludes 026 — Playwright)
 
 All steps must pass. The script exits non-zero on any failure.
 
@@ -83,7 +83,7 @@ Each test file is a standalone module that boots its own server instance. Tests 
 | `024_log_privacy.js` | Server log output during a full flow contains no raw IP address, wallet address, or session token |
 | `025_abuse_ban.js` | Three abuse reports against a client sets `banned_until = now + 72h`; five reports sets a long-term ban |
 | `026_analytics_privacy.js` | **(Playwright)** Browser-level check that analytics (GoatCounter) does not load on private pages (`/new`, `/helper`, `/chat/*`, `/listing/*`) |
-| `027_challenge_replay.js` | `/wallet/challenge` endpoint exists (registration ownership proof); verifies challenge/verify flow is present |
+| `027_challenge_replay.js` | Wallet trust model: balance pre-check only at register; payment-time sender verification is the ownership proof; `/wallet/challenge` absent by design |
 | `028_payment_edge_cases.js` | Payment watcher edge cases: underpayment not confirmed; API timeout → watcher retries; recovery after API restore |
 | `029_ciphertext_only.js` | Server-side DB contains only ciphertext: canary plaintext not recoverable from `encrypted_messages`, raw DB file, or WAL |
 | `030_content_type_spoofing.js` | HTTP input validation: malformed JSON → 4xx; empty body → 4xx; missing required field → 400; oversized body → rejected; wrong HTTP method → not 200 |

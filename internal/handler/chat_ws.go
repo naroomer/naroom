@@ -234,6 +234,48 @@ func (h *Handler) sendHistory(ctx context.Context, conn *websocket.Conn, roomID 
 	}
 }
 
+// ResumeChat handles GET /resume — returns any active chat room for this wallet (peer or client).
+// Used when a participant loses their session and needs to find their room.
+func (h *Handler) ResumeChat(w http.ResponseWriter, r *http.Request) {
+	walletHash := middleware.SessionWalletHash(r.Context())
+	if walletHash == "" {
+		writeError(w, 401, "session required")
+		return
+	}
+	var roomID string
+	err := h.DB.QueryRow(`
+		SELECT id FROM chat_rooms
+		WHERE (counselor_hash = ? OR client_hash = ?) AND status = 'active'
+		ORDER BY started_at DESC LIMIT 1
+	`, walletHash, walletHash).Scan(&roomID)
+	if err != nil {
+		writeError(w, 404, "no active chat room")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"room_id": roomID})
+}
+
+// ResumePeerChat handles GET /peer/resume — returns any active chat room for this peer.
+// Used when peer loses their session and needs to find their room without a listing_id.
+func (h *Handler) ResumePeerChat(w http.ResponseWriter, r *http.Request) {
+	walletHash := middleware.SessionWalletHash(r.Context())
+	if walletHash == "" {
+		writeError(w, 401, "session required")
+		return
+	}
+	var roomID string
+	err := h.DB.QueryRow(`
+		SELECT id FROM chat_rooms
+		WHERE counselor_hash = ? AND status = 'active'
+		ORDER BY started_at DESC LIMIT 1
+	`, walletHash).Scan(&roomID)
+	if err != nil {
+		writeError(w, 404, "no active chat room")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"room_id": roomID})
+}
+
 // GetCounselorChatRoom handles GET /peer/chatroom?listing_id=Y
 // Counselor polls this to know when client accepted and chat room opened.
 // listing_id scopes the lookup to prevent stale rooms from previous sessions being returned.
@@ -292,6 +334,15 @@ func (h *Handler) GetChatRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// If the OTHER side left (not us), we can still access the room in read mode.
+	// If WE left (our status), treat as closed for us.
+	if (walletHash == clientHash && status == "client_left") ||
+		(walletHash == counselorHash && status == "peer_left") {
+		// This side already left — treat as closed for them
+		writeJSON(w, 200, map[string]any{"room_id": roomID, "status": "closed"})
+		return
+	}
+
 	role := "client"
 	myPubkey := clientPubkey
 	peerPubkey := counselorPubkey
@@ -314,6 +365,57 @@ func (h *Handler) GetChatRoom(w http.ResponseWriter, r *http.Request) {
 		resp["peer_left_at"] = peerLeftAt.Int64
 	}
 	writeJSON(w, 200, resp)
+}
+
+// UpdateChatPubkey handles POST /chat/{room_id}/pubkey — lets a participant update
+// their stored public key after session loss and keypair regeneration.
+// Only the public key is updated; private keys never leave the browser.
+func (h *Handler) UpdateChatPubkey(w http.ResponseWriter, r *http.Request) {
+	roomID := chi.URLParam(r, "room_id")
+	walletHash := middleware.SessionWalletHash(r.Context())
+	if roomID == "" || walletHash == "" {
+		writeError(w, 400, "room_id required")
+		return
+	}
+	var req struct {
+		Pubkey string `json:"pubkey"`
+	}
+	if err := decodeJSON(r, &req); err != nil || req.Pubkey == "" {
+		writeError(w, 400, "pubkey required")
+		return
+	}
+
+	var clientHash, counselorHash, status string
+	err := h.DB.QueryRow(`SELECT client_hash, counselor_hash, status FROM chat_rooms WHERE id = ?`, roomID).
+		Scan(&clientHash, &counselorHash, &status)
+	if err != nil {
+		writeError(w, 404, "room not found")
+		return
+	}
+	if status != "active" {
+		writeError(w, 410, "room not active")
+		return
+	}
+
+	var col string
+	if walletHash == clientHash {
+		col = "client_pubkey"
+	} else if walletHash == counselorHash {
+		col = "counselor_pubkey"
+	} else {
+		writeError(w, 403, "not a participant")
+		return
+	}
+
+	if _, err := h.DB.Exec(`UPDATE chat_rooms SET `+col+` = ? WHERE id = ?`, req.Pubkey, roomID); err != nil {
+		writeError(w, 500, "db error")
+		return
+	}
+	// Notify the other participant via WS so they reload the room and recompute shared key
+	if h.Hub != nil {
+		h.Hub.broadcastSystem(roomID, walletHash, wsSystemMsg{Type: "system", Event: "pubkey_updated"})
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
 // wsSystemMsg is sent over WebSocket to notify participants of room state changes.
@@ -367,8 +469,9 @@ func (h *Handler) CloseChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "room not found")
 		return
 	}
-	// Allow close if active or peer_left (client closing after peer left)
-	if status != "active" && status != "peer_left" {
+	// Allow close if active, peer_left (client closing after peer left),
+	// or client_left (peer closing after client left).
+	if status != "active" && status != "peer_left" && status != "client_left" {
 		writeError(w, 410, "room already closed")
 		return
 	}
@@ -379,32 +482,49 @@ func (h *Handler) CloseChat(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().Unix()
 
-	// ── Peer leaves ──────────────────────────────────────────────────────
-	if walletHash == counselorHash {
-		// Don't close the room — client must do it manually.
-		// Guard: only transition from 'active'. If client already closed (status='closed'),
-		// an out-of-order peer-close must not resurrect the room or issue duplicate review tokens.
+	isPeer   := walletHash == counselorHash
+	isClient := walletHash == clientHash
+
+	// ── One side leaves first → mark their departure, other side keeps messages ──
+	// If the OTHER side already left, this is the final close → delete messages.
+	otherAlreadyLeft := (isPeer && status == "client_left") || (isClient && status == "peer_left")
+
+	if !otherAlreadyLeft {
+		// First person to leave — room stays accessible for the other side.
+		var newStatus, col, wsEvent string
+		if isPeer {
+			newStatus = "peer_left"
+			col       = "peer_left_at"
+			wsEvent   = "peer_left"
+		} else {
+			newStatus = "client_left"
+			col       = "client_left_at"
+			wsEvent   = "client_left"
+		}
 		res, err := h.DB.Exec(`
-			UPDATE chat_rooms SET status = 'peer_left', peer_left_at = ? WHERE id = ? AND status = 'active'
-		`, now, roomID)
+			UPDATE chat_rooms SET status = ?, `+col+` = ? WHERE id = ? AND status = 'active'
+		`, newStatus, now, roomID)
 		if err != nil {
 			writeError(w, 500, "db error")
 			return
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
-			// Room was already closed, expired, or peer already left — idempotent response.
 			writeJSON(w, 200, map[string]any{"status": "already_closed"})
 			return
 		}
-		// Notify client via WebSocket (hub keyed by wallet_hash)
 		if h.Hub != nil {
-			h.Hub.broadcastSystem(roomID, walletHash, wsSystemMsg{Type: "system", Event: "peer_left"})
+			h.Hub.broadcastSystem(roomID, walletHash, wsSystemMsg{Type: "system", Event: wsEvent})
 		}
-		writeJSON(w, 200, map[string]any{"status": "peer_left"})
+		writeJSON(w, 200, map[string]any{"status": newStatus})
 		return
 	}
 
-	// ── Client closes ────────────────────────────────────────────────────
+	// ── Both sides have now left → fully close, delete messages ──────────
+	closedBy := "client"
+	if isPeer {
+		closedBy = "peer"
+	}
+
 	tx, err := h.DB.Begin()
 	if err != nil {
 		writeError(w, 500, "db error")
@@ -413,9 +533,9 @@ func (h *Handler) CloseChat(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback()
 
 	res, err := tx.Exec(`
-		UPDATE chat_rooms SET status = 'closed', closed_at = ?, closed_by = 'client'
-		WHERE id = ? AND status IN ('active', 'peer_left')
-	`, now, roomID)
+		UPDATE chat_rooms SET status = 'closed', closed_at = ?, closed_by = ?
+		WHERE id = ? AND status IN ('peer_left', 'client_left')
+	`, now, closedBy, roomID)
 	if err != nil {
 		writeError(w, 500, "db error")
 		return
@@ -431,6 +551,7 @@ func (h *Handler) CloseChat(w http.ResponseWriter, r *http.Request) {
 		WHERE id = (SELECT listing_id FROM chat_rooms WHERE id = ?)
 		  AND status = 'matched' AND visible_until > ?
 	`, roomID, now)
+
 	chatDuration := now - startedAt
 	minDuration := int64(6 * 3600)
 	if h.DevMode {
@@ -449,7 +570,7 @@ func (h *Handler) CloseChat(w http.ResponseWriter, r *http.Request) {
 		resp["review_token"] = token
 	} else {
 		tx.Exec(`UPDATE reputation SET sessions_total = sessions_total + 1, sessions_early_exit = sessions_early_exit + 1 WHERE counselor_hash = ?`, counselorHash)
-		log.Printf("chat %s closed early by client after %ds", roomID, chatDuration)
+		log.Printf("chat %s closed by %s after %ds", roomID, closedBy, chatDuration)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -459,7 +580,6 @@ func (h *Handler) CloseChat(w http.ResponseWriter, r *http.Request) {
 
 	h.DB.Exec(`DELETE FROM encrypted_messages WHERE room_id = ?`, roomID)
 
-	// Notify peer via WebSocket that session is over (hub keyed by wallet_hash)
 	if h.Hub != nil {
 		h.Hub.broadcastSystem(roomID, walletHash, wsSystemMsg{Type: "system", Event: "room_closed"})
 	}

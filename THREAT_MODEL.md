@@ -1,5 +1,18 @@
 # Threat Model — NA Room
 
+## Wallet Verification Model (Two-Step)
+
+`POST /wallet/register` is a **balance pre-check only**, not a proof of wallet ownership. It verifies that the submitted address holds sufficient balance at registration time. No cryptographic signature is required and no ownership is established at this step.
+
+Actual wallet control is verified at payment time by `internal/worker/invoice_watcher.go:verifySenderAndBalance`:
+
+1. **Sender hash match:** at least one on-chain transaction input address must hash (HMAC-SHA256 with the same `HASH_KEY`) to the same value stored in `invoices.payer_address`. Mismatch → invoice rejected.
+2. **Post-payment balance check:** the matched sender must still hold ≥ (minHold − invoiceCost − $10) after the payment (listing: ≥$135; peer chat: ≥$975). Insufficient → rejected.
+
+**No chat room is created until both pass.** A registered peer without a confirmed on-chain payment cannot open chat.
+
+---
+
 ## Core Principle
 
 > Providers may know who operates the server, but the server and providers should not be able to identify users, read chats, or reconstruct sensitive activity beyond minimum operational metadata.

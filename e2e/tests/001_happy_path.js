@@ -222,8 +222,16 @@ export async function run() {
       if (imgs[0].ciphertext.length < 100) throw new Error('Image ciphertext suspiciously small');
     });
 
-    // ── Phase 8: Close chat ───────────────────────────────────────────────
-    await t.run('client closes chat, receives review_token', async () => {
+    // ── Phase 8: Close chat (symmetric two-step close) ───────────────────
+    // Symmetric CloseChat: first close → partial close; second close → full close + review_token.
+    // Peer closes first so client (second closer) receives the review_token.
+    await t.run('peer closes first → status=peer_left', async () => {
+      const r = await api.closeChat(roomId, PEER_WALLET);
+      assertStatus(r, 200, 'peer first close');
+      if (r.body.status !== 'peer_left') throw new Error(`Expected peer_left, got ${r.body.status}`);
+    });
+
+    await t.run('client closes second → full close, receives review_token', async () => {
       const r = await api.closeChat(roomId, CLIENT_WALLET);
       assertStatus(r, 200, 'close chat');
       if (r.body.status !== 'closed') throw new Error('status not closed');

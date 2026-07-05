@@ -22,12 +22,14 @@ Categories: **ID** (Identity/Privacy) · **SE** (Session/Auth) · **LS** (Listin
 
 ### `internal/handler/wallet_challenge_test.go`
 
-| Test | Invariant(s) | What it proves |
-|------|-------------|----------------|
-| `TestChallenge_OneTimeUse` | SE-1 | Challenge consumed on first verify; replay rejected |
-| `TestChallenge_Expired` | SE-1 | Expired challenge (past TTL) → rejected even with valid sig |
-| `TestChallenge_AddressBinding` | SE-1 | Challenge for address A cannot be used by address B |
-| `TestChallenge_ConcurrentReplay` | SE-1 | Two goroutines race same challenge → exactly one wins (atomic consume) |
+> **NOTE:** `/wallet/challenge` is intentionally absent from the architecture. Challenge-signature (Bitcoin message signing) is not required or planned. Wallet control is proven at payment time by sender address verification (`invoice_watcher.go:verifySenderAndBalance`). The `wallet_challenge_test.go` file no longer exists. The tests below are superseded by E2E 027 T1-T4 and 035 T1/T4/T5.
+
+| Test | Invariant(s) | Status |
+|------|-------------|--------|
+| `TestChallenge_OneTimeUse` | SE-1 | **REMOVED** — challenge-signature not implemented by design |
+| `TestChallenge_Expired` | SE-1 | **REMOVED** |
+| `TestChallenge_AddressBinding` | SE-1 | **REMOVED** |
+| `TestChallenge_ConcurrentReplay` | SE-1 | **REMOVED** |
 
 ### `internal/crypto/encrypt_test.go`
 
@@ -352,6 +354,23 @@ Note: runs with `devMode: false` specifically for rate limiting to be active.
 
 ---
 
+### `tests/036_ban_enforcement.js`
+
+| Step/Check | Invariant(s) |
+|-----------|-------------|
+| T1: banned wallet cannot respond to listing → 403 + error="account banned" | RP-4 |
+| T2: banned wallet cannot create listing → 403 + error="account banned" | RP-4 |
+| T3: banned wallet cannot renew listing → 403 + error="account banned" | RP-4 |
+| T4: banned wallet cannot send chat poll message → 403 + error="account banned" | RP-4 |
+| T5: banned wallet cannot update chat pubkey → 403 + error="account banned" | RP-4 |
+| T6: non-banned wallet can still create listing → 201 (sanity) | RP-4 |
+| T7: banned peer wallet CAN still submit abuse report → 200 (not blocked) | RP-4 |
+| T8: banned wallet CAN access GET /board → 200 (read-only OK) | RP-4 |
+| T8: banned wallet CAN access GET /listing → 200 (read-only OK) | RP-4 |
+| 403 response includes banned_until timestamp | RP-4 |
+
+---
+
 ## Tests — Fable Five Audit Sprint
 
 ### `tests/026_analytics_privacy.js` *(Playwright — selftest-full.sh only)*
@@ -363,12 +382,16 @@ Note: runs with `devMode: false` specifically for rate limiting to be active.
 
 ---
 
-### `tests/027_challenge_replay.js`
+### `tests/027_challenge_replay.js` (renamed: Wallet Trust Model)
+
+> Content replaced in Sprint 5. Old test checked for `/wallet/challenge` (not implemented). New test verifies the actual payment-time trust model.
 
 | Step/Check | Invariant(s) |
 |-----------|-------------|
-| POST `/wallet/challenge` returns non-404 (endpoint exists) | SE-1 |
-| `/wallet/challenge` ownership proof mechanism is present | SE-1 |
+| `/wallet/register` returns session_token with no challenge/sig field (balance pre-check only) | IN-0 |
+| Second wallet can register same address without ownership assertion | IN-0 |
+| Register-only peer cannot open chat room (no payment) | IN-0, IN-3 |
+| `/wallet/challenge` returns 404 — absent by design (architectural tripwire) | IN-0 |
 
 ---
 
@@ -445,7 +468,7 @@ Note: runs with `devMode: false` specifically for rate limiting to be active.
 |-----------|---------|--------|
 | **ID-1** Plain address never in chats/listings/invoices | 001 (flow), 008 (registration) | ⚠️ No DB assertion |
 | **ID-2** wallet_address_enc is AES-GCM ciphertext | encrypt_test.go | ⚠️ Unit only |
-| **ID-3** wallet ownership proof required at registration | 027 (endpoint exists), wallet_challenge_test.go (security properties) | ✅ Fable Five sprint |
+| **ID-3** wallet ownership proof = payment sender match (not registration challenge) | 027 T1-T4 (trust model), 035 T1/T4/T5 (payment verification) | ✅ Sprint 5 (model corrected) |
 | **ID-4** Session tokens stored as SHA-256 hash | 008, 009 | ✅ |
 | **ID-5** No IP in logs | 024 | ✅ Sprint 2 |
 | **ID-6** WALLET_ENC_KEY required in prod | encrypt_test.go:TestPrepareEncKeyProd | ✅ |
@@ -478,10 +501,11 @@ Note: runs with `devMode: false` specifically for rate limiting to be active.
 | **RP-1** Review token single-use | 001, 003 | ✅ |
 | **RP-2** Token only to client, ≥ 6h | 003 | ⚠️ No short-session test |
 | **RP-3** Abuse report dedup | 012 | ✅ |
-| **RP-4** Abuse ban thresholds | 025 | ✅ Thresholds SET correctly (Sprint 2) · ❌ Ban NOT CHECKED in listing/respond — enforcement **NOT IMPLEMENTED** |
+| **RP-4** Abuse ban thresholds + enforcement | 025, 036 | ✅ Thresholds SET correctly (Sprint 2) · ✅ Ban enforced in middleware (Sprint 6) · 036: 16/16 PASS |
 | **WK-1** Message TTL cleanup | 022 | ✅ Sprint 2 |
 | **WK-2** peer_left → listing restored | 011 | ✅ |
 | **WK-3** wallet_sessions TTL cleanup | 023 | ✅ Sprint 2 |
 
-**Totals after Fable Five sprint:** ✅ 34 covered · ⚠️ 6 partial · ❌ 0 missing  
-_(Sprint 1: 26✅ / 9⚠️ / 5❌ — Sprint 2: +5 — Fable Five: CH-1 ✅, ID-3 ✅)_
+**Totals after Sprint 6 (RP-4 ban enforcement):** ✅ 37 covered · ⚠️ 4 partial · ❌ 0 missing  
+_(Sprint 1: 26✅ / 9⚠️ / 5❌ — Sprint 2: +5 — Fable Five: CH-1 ✅, ID-3 ✅ — Sprint 5: IN-0 ✅, CH-7 ✅, CH-8 ✅ — Sprint 6: RP-4 enforcement ✅)_  
+E2E: **35/35 PASS** · Unit: **26/26 PASS**

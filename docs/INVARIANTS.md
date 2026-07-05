@@ -16,8 +16,8 @@ Invariant IDs use short category codes: **ID** (Identity/Privacy), **SE** (Sessi
 
 ## ID — Identity & Privacy
 
-### ID-1: Plain wallet address never stored in persistent tables (except wallet_sessions, wallet_challenges)
-**Rule:** `listings`, `responses`, `chat_rooms`, `invoices`, `sessions`, `reputation`, `review_tokens`, `abuse_counters`, `abuse_dedup` — all store only `HMAC-SHA256(HASH_KEY, address)`.
+### ID-1: Plain wallet address never stored in persistent tables (except wallet_sessions)
+**Rule:** `listings`, `responses`, `chat_rooms`, `invoices`, `sessions`, `reputation`, `review_tokens`, `abuse_counters`, `abuse_dedup` — all store only `HMAC-SHA256(HASH_KEY, address)`. The `wallet_challenges` table was dropped in Sprint 1 (ID-3); it no longer exists.
 
 **Enforced:**
 - `internal/handler/wallet.go:upsertWalletSession` — encrypts before INSERT
@@ -299,14 +299,39 @@ Invariant IDs use short category codes: **ID** (Identity/Privacy), **SE** (Sessi
 
 ---
 
-### CH-4: Messages deleted when chat closes
-**Rule:** `encrypted_messages` for a room are deleted when client closes.
+### CH-4: Messages deleted when BOTH sides close
+**Rule:** `encrypted_messages` for a room are deleted only when the second participant closes (both-sides-left path). On the first close (status → `peer_left` / `client_left`) messages are preserved for the remaining participant. The 24h TTL worker is a backstop.
 
 **Enforced:**
-- `internal/handler/chat_ws.go:CloseChat` — `DELETE FROM encrypted_messages WHERE room_id=?` (client close path)
+- `internal/handler/chat_ws.go:CloseChat` — `DELETE FROM encrypted_messages WHERE room_id=?` runs only in the `otherAlreadyLeft` path (second close)
+- `internal/worker/ttl_cleaner.go` — unconditional 24h message expiry regardless of room status
 
-**Tests:** 001 (close flow); no test queries DB directly after close to confirm deletion
-**Coverage:** ⚠️ Partial
+**Tests:** 034 T1 (first close: messages intact), T2 (second close: messages deleted + DB assertion)
+**Coverage:** ✅ Covered (T1+T2 added Sprint 3)
+
+---
+
+### CH-7: /resume and /peer/resume scoped to session's wallet_hash
+**Rule:** `GET /resume` returns only rooms where the session's wallet is `client_hash` or `counselor_hash`. Cannot enumerate rooms of other wallets.
+
+**Enforced:**
+- `internal/handler/chat_ws.go:ResumeChat` — `WHERE (counselor_hash=? OR client_hash=?) AND status='active'`
+- `internal/handler/chat_ws.go:ResumePeerChat` — `WHERE counselor_hash=? AND status='active'`
+
+**Tests:** 034 T7 (unrelated wallet → 404), T8 (/peer/resume scoped to counselor_hash)
+**Coverage:** ✅ Covered (Sprint 3)
+
+---
+
+### CH-8: UpdateChatPubkey enforces room membership and active-only
+**Rule:** Only a room participant can update their own pubkey field. Non-participants → 403. Closed rooms → 410.
+
+**Enforced:**
+- `internal/handler/chat_ws.go:UpdateChatPubkey` — walletHash compared to clientHash / counselorHash
+- status check: `status != 'active' → 410`
+
+**Tests:** 034 T10 (client updates own), T11 (peer updates own), T12 (unrelated → 403), T13 (closed room → 410)
+**Coverage:** ✅ Covered (Sprint 3)
 
 ---
 
@@ -334,6 +359,20 @@ Invariant IDs use short category codes: **ID** (Identity/Privacy), **SE** (Sessi
 
 ## IN — Invoice & Payment
 
+### IN-0: Wallet verification is two-step; register-only never opens chat
+**Rule:** `POST /wallet/register` performs a balance pre-check only. It does NOT prove wallet control. A chat room is created only after BOTH (a) payment sender hash matches `invoices.payer_address` AND (b) post-payment balance ≥ threshold. No path in the code creates a chat room based on `/wallet/register` alone.
+
+**Enforced:**
+- `internal/handler/register.go:WalletRegister` — comment explicitly states "Proof of ownership happens at payment time"
+- `internal/handler/accept.go:AcceptResponse` — creates invoice with `payer_address = HMAC(counselorAddress)`; no chat room created here
+- `internal/worker/invoice_watcher.go:verifySenderAndBalance` — called before `confirmInvoice`; both sender match AND balance check must pass
+- `internal/worker/invoice_watcher.go:confirmInvoice` — chat room INSERT is inside the `type == "chat"` branch, only reachable after `verifySenderAndBalance` returns true
+
+**Tests:** E2E **027** T1-T4 (register-only has no ownership proof; no chat room without payment; `/wallet/challenge` returns 404 by design); E2E **035** T1 (register-only peer cannot open chat), T2 (invoice pending, no room), T4 (correct payment + balance → room opens); unit tests IN-3/IN-5
+**Coverage:** ✅ Covered (unit + E2E 027 + E2E 035 T1/T2/T4)
+
+---
+
 ### IN-1: Invoice payer_address stores HMAC hash, never plain address
 **Rule:** `invoices.payer_address` = `HMAC-SHA256(HASH_KEY, wallet_address)`.
 
@@ -359,6 +398,8 @@ Invariant IDs use short category codes: **ID** (Identity/Privacy), **SE** (Sessi
 
 ### IN-3: Payment must come from registered wallet (sender hash match)
 **Rule:** tx sender hash must match payer_address stored at invoice creation. Multi-input: ANY sender may match.
+
+**Note on `/wallet/register`:** `POST /wallet/register` is a balance pre-check only — it does NOT verify wallet ownership. Wallet control is established at payment time when the sender's address hash matches `invoices.payer_address`.
 
 **Enforced:**
 - `internal/worker/invoice_watcher.go:verifySenderAndBalance` — checks all tx inputs via HMAC comparison
@@ -450,18 +491,20 @@ Invariant IDs use short category codes: **ID** (Identity/Privacy), **SE** (Sessi
 ---
 
 ### RP-4: Abuse ban thresholds (3 reports → 72h, 5 → permanent)
-**Rule:** After 3 abuse reports, `abuse_counters.banned_until` is set to `now + 259200` (72h). After 5 reports, `banned_until` = `now + 10 years`.
+**Rule:** After 3 abuse reports, `abuse_counters.banned_until` is set to `now + 259200` (72h). After 5 reports, `banned_until` = `now + 10 years`. Banned wallets are blocked from all active participation.
 
-**⚠️ PARTIAL IMPLEMENTATION:** `banned_until` is SET correctly by the abuse handler. However, `banned_until` is **NOT CHECKED** in `/listing/create`, `/listing/{id}/respond`, or `/board` — banned clients are NOT blocked from listing or responding. Ban enforcement is a known gap.
-
-**Enforced (threshold logic only):**
+**Enforced:**
 - `internal/handler/abuse.go:AbuseReport` — sets `banned_until` at ≥3 and ≥5 report thresholds
+- `internal/middleware/ban.go:RequireNotBanned` — checks `abuse_counters.banned_until > now` on protected routes; returns 403 with `{"error":"account banned","banned_until":<unix_ts>}`
+- `cmd/naroom/main.go` — `requireNotBanned` applied after `requireSession` on: `POST /listing/create`, `POST /listing/{id}/respond`, `POST /listing/{id}/renew`, `POST /chat/poll/send`, `POST /chat/{room_id}/pubkey`, `POST /chat/{room_id}/close`
 
-**NOT enforced:**
-- No check of `banned_until` in `listing.go`, `respond.go`, or `board.go`
+**Intentionally NOT blocked for banned wallets:**
+- `GET /board/{city}`, `GET /listing/{id}` — read-only browsing remains accessible
+- `POST /abuse-report` — banned wallets may still be victims and need to report
+- `POST /session/refresh`, `POST /wallet/register` — needed to check status
 
-**Tests:** **025** (5 peers report same client; after 3rd: `banned_until` ≈ now+259200; after 5th: ≈ now+10yr; total=5)
-**Coverage:** ✅ Threshold SET correctly · ❌ Ban CHECK not implemented — enforcement is a known open issue
+**Tests:** **025** (5 peers report same client; after 3rd: `banned_until` ≈ now+259200; after 5th: ≈ now+10yr; total=5) + **036** (enforcement: banned wallet → 403 on respond/create/renew/pollSend/pubkey; GET /board and abuse-report remain accessible)
+**Coverage:** ✅ Threshold SET correctly · ✅ Ban CHECK enforced in middleware · ✅ Regression test 036 (16/16)
 
 ---
 
@@ -504,9 +547,14 @@ Invariant IDs use short category codes: **ID** (Identity/Privacy), **SE** (Sessi
 
 Sprint 1 changes: ID-3 eliminated (table dropped), SE-3/LS-3/RS-1/RS-4/RS-5(IN-5) newly covered by tests 015-019.
 Sprint 2 changes: SE-4/RS-3/WK-1/WK-3/ID-5/RP-4 newly covered by tests 020-025.
+Sprint 3 changes: CH-4/CH-7/CH-8 newly covered by test 034; docs corrected for dual-close deletion.
+Sprint 4 changes: IN-0 (two-step verification model) documented in docs and covered by E2E test 035; PRIVACY_MODEL/SECURITY/THREAT_MODEL updated to correct "/wallet/register = balance pre-check" framing.
+Sprint 5 changes: Test 027 content replaced — old intentionally-failing challenge test → new wallet trust model test (T1-T4). Docs updated: no challenge-signature planned, single-tx requirement, wrong-sender rejection documented in SECURITY.md and PRIVACY_MODEL.md. ID-1 parenthetical fixed (wallet_challenges table no longer exists).
+Sprint 6 changes: RP-4 ban enforcement implemented — `RequireNotBanned` middleware added; applied to create/respond/renew/pollSend/pubkey/close routes; E2E test 036 added (16 steps); INVARIANTS.md and TEST_MATRIX.md updated.
 
 | Invariant | Status | Notes |
 |-----------|--------|-------|
+| IN-0 Two-step verification; register-only never opens chat | ✅ | Unit + E2E 027 T1-T4 + E2E 035 T1/T2/T4 |
 | ID-1 Plain address in DB | ⚠️ | No DB inspection test |
 | ID-2 wallet_address_enc is ciphertext | ⚠️ | Unit only, no E2E |
 | ~~ID-3 wallet_challenges~~ | ✅ | Eliminated — table dropped in Sprint 1 |
@@ -520,13 +568,15 @@ Sprint 2 changes: SE-4/RS-3/WK-1/WK-3/ID-5/RP-4 newly covered by tests 020-025.
 | RS-5 Multi-slot balance scaling | ✅ | Test 018 added Sprint 1 (covers IN-5) |
 | CH-1 Server cannot decrypt | ⚠️ | Inspection only |
 | CH-2 Poll send from non-participant | ⚠️ | Partial |
-| CH-4 Message deletion verified in DB | ⚠️ | No DB assertion |
+| CH-4 Message deletion — both-sides close | ✅ | Test 034 T1+T2 added Sprint 3 |
+| CH-7 /resume scoped to wallet_hash | ✅ | Test 034 T7+T8 added Sprint 3 |
+| CH-8 UpdateChatPubkey membership+status | ✅ | Test 034 T10-T13 added Sprint 3 |
 | IN-1 payer_address is HMAC hash | ⚠️ | No DB column assertion |
 | IN-4 Double-confirm chat side-effect | ⚠️ | Listing side-effect proven; chat path structural only |
 | IN-5 Balance math (not just error path) | ✅ | Test 018 added Sprint 1 |
 | RP-2 No token for short session | ⚠️ | Partial |
-| RP-4 Abuse ban thresholds | ✅ | Test 025 added Sprint 2 (thresholds only; enforcement NOT YET IMPLEMENTED) |
+| RP-4 Abuse ban thresholds | ✅ | Tests 025 + 036 (thresholds + enforcement; Sprint 6) |
 | WK-1 Message TTL cleanup | ✅ | Test 022 added Sprint 2 |
 | WK-3 wallet_sessions TTL cleanup | ✅ | Test 023 added Sprint 2 |
 
-**Totals after Sprint 2:** ✅ 32 covered · ⚠️ 8 partial · ❌ 0 missing (down from 5 missing after Sprint 1)
+**Totals after Sprint 6:** ✅ 37 covered · ⚠️ 6 partial · ❌ 0 missing

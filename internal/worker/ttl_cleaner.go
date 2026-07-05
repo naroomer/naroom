@@ -50,10 +50,9 @@ func (tc *TTLCleaner) clean() {
 		log.Printf("ttl_cleaner: expired %d chat rooms", n)
 	}
 
-	// 2c. Expire peer_left rooms — peer left before client closed.
-	//     Restore the listing so the client can find a new peer.
-	//     No review token: client did not close the session explicitly.
-	tc.expirePeerLeftRooms(now)
+	// 2c. Expire half-closed rooms (peer_left / client_left) after 24h.
+	//     Deletes messages and restores listing.
+	tc.expireHalfClosedRooms(now)
 	_ = totalCleaned
 
 	// 2b. Delete chat rooms that have been expired/closed for 48h (social graph minimisation).
@@ -150,14 +149,20 @@ func (tc *TTLCleaner) clean() {
 	}
 }
 
-// expirePeerLeftRooms closes rooms that expired while the peer was already gone.
-// Restores the client's listing so they can find a new peer.
-// No review token — the client never explicitly closed the session.
-func (tc *TTLCleaner) expirePeerLeftRooms(now int64) {
+// expireHalfClosedRooms closes peer_left and client_left rooms after 24h.
+// The remaining participant had 24h to read messages; now they're deleted.
+// Listing is restored so the client can find a new peer.
+func (tc *TTLCleaner) expireHalfClosedRooms(now int64) {
+	grace := int64(86400) // 24h after the room became half-closed
 	rows, err := tc.DB.Query(`
 		SELECT id, listing_id FROM chat_rooms
-		WHERE status = 'peer_left' AND expires_at < ?
-	`, now)
+		WHERE status IN ('peer_left', 'client_left')
+		  AND (
+		    (status = 'peer_left'   AND peer_left_at   IS NOT NULL AND peer_left_at   + ? < ?)
+		 OR (status = 'client_left' AND client_left_at IS NOT NULL AND client_left_at + ? < ?)
+		 OR expires_at < ?
+		  )
+	`, grace, now, grace, now, now)
 	if err != nil {
 		return
 	}
