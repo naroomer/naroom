@@ -562,11 +562,12 @@ func (h *Handler) CloseChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tx.Exec(`UPDATE responses SET status = 'closed' WHERE id = ?`, responseID)
+	// Paid chat completed — listing is permanently closed, never returns to the board.
 	tx.Exec(`
-		UPDATE listings SET status = 'active'
+		UPDATE listings SET status = 'closed'
 		WHERE id = (SELECT listing_id FROM chat_rooms WHERE id = ?)
-		  AND status = 'matched' AND visible_until > ?
-	`, roomID, now)
+		  AND status = 'matched'
+	`, roomID)
 
 	chatDuration := now - startedAt
 	minDuration := int64(6 * 3600)

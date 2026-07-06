@@ -63,23 +63,22 @@ export async function run() {
     await api.closeChat(roomId1, PEER_WALLET);
     await api.closeChat(roomId1, CLIENT_WALLET);
 
-    // ── Flow 2: original listing restored after close ─────────────────────
-    await t.run('original listing restored to active after chat close', async () => {
+    // ── Flow 2: listing permanently closed after paid chat (LI-1) ─────────
+    await t.run('listing permanently closed after paid chat (LI-1)', async () => {
       const r = await api.getListing(listingId1);
-      if (r.body.status !== 'active') throw new Error(`Listing status=${r.body.status}, expected active`);
+      if (r.body.status !== 'closed') throw new Error(`Listing status=${r.body.status}, expected closed`);
     });
 
-    await t.run('restored listing appears on board', async () => {
+    await t.run('closed listing does not appear on board', async () => {
       const r = await api.getBoard('new_york');
       const found = r.body.find(l => l.id === listingId1);
-      if (!found) throw new Error('Restored listing not on board');
+      if (found) throw new Error('Closed listing returned to board — LI-1 violated');
     });
 
-    await t.run('client cannot create second listing while original active', async () => {
-      // Re-verify to get a fresh session (simulates page reload)
+    await t.run('client can create new listing after paid session completes', async () => {
       await api.verifyWallet(CLIENT_WALLET, 'BTC', 'client');
       const r = await api.createListing(CLIENT_WALLET, 'london');
-      assertStatus(r, 409, 'duplicate listing rejected');
+      assertStatus(r, 201, 'new listing after paid session');
     });
 
     await t.run('peer poll for closed room returns no active room', async () => {
@@ -89,10 +88,10 @@ export async function run() {
       }
     });
 
-    await t.run('peer can respond to restored listing', async () => {
+    await t.run('peer cannot respond to permanently closed listing (404)', async () => {
       await api.verifyWallet(PEER_WALLET, 'BTC', 'peer');
       const r = await api.respond(listingId1, PEER_WALLET, peerKeys.pub);
-      assertStatus(r, 201, 'respond to restored listing');
+      if (r.status !== 404) throw new Error(`Expected 404 responding to closed listing, got ${r.status}`);
     });
 
     await t.run('DB: only one active chat_room total (no state bleed)', async () => {
@@ -100,12 +99,12 @@ export async function run() {
       if (count !== 0) throw new Error(`Expected 0 active rooms after close, got ${count}`);
     });
 
-    await t.run('listing restored to active on board after chat close', async () => {
+    await t.run('listing status=closed and not on board (LI-1)', async () => {
       const status = srv.db(`SELECT status FROM listings WHERE id='${listingId1}'`);
-      if (status !== 'active') throw new Error(`Listing status=${status}, expected active after chat close`);
+      if (status !== 'closed') throw new Error(`Listing status=${status}, expected closed (LI-1)`);
       const r = await api.getBoard('new_york');
       const found = r.body.find(l => l.id === listingId1);
-      if (!found) throw new Error('Listing not on board after chat close');
+      if (found) throw new Error('Closed listing on board — LI-1 violated');
     });
 
   } finally {

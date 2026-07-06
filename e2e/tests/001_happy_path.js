@@ -266,18 +266,19 @@ export async function run() {
       if (r.status === 200) throw new Error('Token reuse should be rejected');
     });
 
-    // ── Phase 10: Original listing restored to board after close ─────────
-    await t.run('original listing restored to board after chat closed', async () => {
+    // ── Phase 10: Listing permanently closed after paid chat ends ────────
+    // LI-1: once a paid chat room has been created, the listing never returns to the board.
+    await t.run('listing permanently closed after paid chat ends (LI-1)', async () => {
       const r = await api.getListing(listingId);
-      if (r.body.status !== 'active') throw new Error(`Listing status=${r.body.status}, expected active`);
+      if (r.body.status !== 'closed') throw new Error(`Listing status=${r.body.status}, expected closed`);
       const board = await api.getBoard('new_york');
       const found = board.body.find(l => l.id === listingId);
-      if (!found) throw new Error('Restored listing not on board');
+      if (found) throw new Error('Listing returned to board after paid chat — LI-1 violated');
     });
 
-    await t.run('client cannot create second listing while original is active', async () => {
+    await t.run('client can create a new listing after paid session completes', async () => {
       const r2 = await api.createListing(CLIENT_WALLET, 'london');
-      assertStatus(r2, 409, 'duplicate listing while original active');
+      assertStatus(r2, 201, 'new listing after paid session');
     });
 
     clientWS?.close();

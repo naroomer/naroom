@@ -202,6 +202,20 @@ Invariant IDs use short category codes: **ID** (Identity/Privacy), **SE** (Sessi
 
 ---
 
+### LS-5: Listing permanently closed after paid chat — never returns to board (LI-1)
+**Rule:** Once a paid chat room has been created for a listing (`matched` → chat_room exists), the listing transitions to `closed` when the chat ends. It must never return to `active` or appear on the public board. The client can create a new listing after the session completes.
+
+**Enforced:**
+- `internal/handler/chat_ws.go:CloseChat` — `UPDATE listings SET status='closed'` when both sides close (was incorrectly `'active'` — bug fixed 2026-07-06)
+- `internal/worker/ttl_cleaner.go:expireHalfClosedRooms` — `UPDATE listings SET status='closed'` when peer_left/client_left room expires (was incorrectly `'active'` — bug fixed 2026-07-06)
+
+**Exception (unpaid accepted response):** If a peer accepted but never paid (chat invoice expired/rejected, no chat room created), the listing may return to `'active'` so a new peer can respond. Enforced by `ttl_cleaner.go` step 2d.
+
+**Tests:** 039 T1/T2/T4/T5 (listing closed after both-side close, very short chat, TTL half-closed expiry); 011 (peer_left expiry → listing closed, not on board); 001/006 (happy path verifies listing='closed' and client can create new listing)
+**Coverage:** ✅ Covered
+
+---
+
 ## RS — Response & Peer
 
 ### RS-1: Max 2 pending responses per listing
@@ -542,13 +556,13 @@ Neither path may gate on `listing.status = 'active'`. A `matched` listing is not
 
 ---
 
-### WK-2: peer_left room restores listing when it expires (no review token)
-**Rule:** If peer leaves and client never explicitly closes, room expires → listing returns to active, no review token.
+### WK-2: peer_left room permanently closes listing when it expires — no review token (LI-1)
+**Rule:** If peer leaves (`peer_left`) and client never explicitly closes, room expires via TTL → listing transitions to `closed` (NOT `active`) because a paid chat room existed. No review token issued (client did not close). See LS-5 for the full invariant.
 
 **Enforced:**
-- `internal/worker/ttl_cleaner.go:expirePeerLeftRooms`
+- `internal/worker/ttl_cleaner.go:expireHalfClosedRooms` — `UPDATE listings SET status='closed'` (was `'active'` — bug fixed 2026-07-06)
 
-**Tests:** 011 (peer_left → expiry → listing restored)
+**Tests:** 011 (peer_left → TTL expiry → listing='closed', not on board, no review_token); 039 T5 (same via fast-backdate path)
 **Coverage:** ✅ Covered
 
 ---

@@ -65,6 +65,38 @@ func (tc *TTLCleaner) clean() {
 		log.Printf("ttl_cleaner: closed %d stale accepted responses", n)
 	}
 
+	// 2d. Close accepted responses whose chat invoice expired and NO chat room was ever created
+	//     (peer accepted but never paid). Then restore those listings to 'active' so a new peer can
+	//     respond. This is the only case where 'matched' → 'active' is valid.
+	res, _ = tc.DB.Exec(`
+		UPDATE responses SET status = 'closed'
+		WHERE status = 'accepted'
+		  AND id IN (
+		    SELECT response_id FROM invoices
+		    WHERE type = 'chat' AND status IN ('expired', 'rejected') AND response_id IS NOT NULL
+		  )
+		  AND id NOT IN (
+		    SELECT response_id FROM chat_rooms
+		    WHERE response_id IS NOT NULL
+		  )
+	`)
+	if n, _ := res.RowsAffected(); n > 0 {
+		totalCleaned += n
+		log.Printf("ttl_cleaner: closed %d unpaid accepted responses (invoice expired/rejected)", n)
+		// Restore listings where no chat room ever existed and no remaining accepted response.
+		// These are safe to reopen — the peer never paid, so no paid session occurred.
+		tc.DB.Exec(`
+			UPDATE listings SET status = 'active'
+			WHERE status = 'matched'
+			  AND NOT EXISTS (
+			    SELECT 1 FROM chat_rooms WHERE listing_id = listings.id
+			  )
+			  AND NOT EXISTS (
+			    SELECT 1 FROM responses WHERE listing_id = listings.id AND status = 'accepted'
+			  )
+		`)
+	}
+
 	// 2c. Expire half-closed rooms (peer_left / client_left) after 24h.
 	//     Deletes messages and restores listing.
 	tc.expireHalfClosedRooms(now)
@@ -200,16 +232,16 @@ func (tc *TTLCleaner) expireHalfClosedRooms(now int64) {
 		}
 		tx.Exec(`UPDATE chat_rooms SET status = 'expired', closed_at = ?, closed_by = 'system' WHERE id = ?`, now, rm.id)
 		tx.Exec(`DELETE FROM encrypted_messages WHERE room_id = ?`, rm.id)
-		// Restore listing only if it hasn't expired yet
+		// Paid chat expired — listing stays closed permanently, never returns to the board.
 		tx.Exec(`
-			UPDATE listings SET status = 'active'
-			WHERE id = ? AND status = 'matched' AND visible_until > ?
-		`, rm.listingID, now)
+			UPDATE listings SET status = 'closed'
+			WHERE id = ? AND status = 'matched'
+		`, rm.listingID)
 		if err := tx.Commit(); err != nil {
 			tx.Rollback()
 			log.Printf("ttl_cleaner: peer_left expiry tx failed for room %s: %v", rm.id, err)
 			continue
 		}
-		log.Printf("ttl_cleaner: expired peer_left room %s, listing %s restored", rm.id, rm.listingID)
+		log.Printf("ttl_cleaner: expired peer_left room %s, listing %s closed", rm.id, rm.listingID)
 	}
 }
