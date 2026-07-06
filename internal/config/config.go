@@ -24,7 +24,8 @@ type Config struct {
 	InvoiceWatchInterval int
 
 	// Dev mode: mock payments, no real blockchain checks
-	DevMode bool
+	DevMode       bool
+	DevSeedPrices bool // seed fixed prices ($100k BTC, $100 LTC) without enabling full DevMode
 
 	// Configurable TTLs for testing (seconds)
 	ListingTTL int // default 21600 (6h)
@@ -61,7 +62,8 @@ func Load() *Config {
 		TTLCleanInterval:     envInt("TTL_CLEAN_INTERVAL", 60),
 		InvoiceWatchInterval: envInt("INVOICE_WATCH_INTERVAL", 30),
 
-		DevMode: envOr("DEV_MODE", "") == "true",
+		DevMode:       envOr("DEV_MODE", "") == "true",
+		DevSeedPrices: envOr("DEV_SEED_PRICES", "") == "true",
 
 		ListingTTL: envInt("LISTING_TTL", 21600),  // 6h
 		ChatTTL:    envInt("CHAT_TTL", 86400),     // 24h

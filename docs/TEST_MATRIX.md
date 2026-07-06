@@ -266,9 +266,10 @@ Note: runs with `devMode: false` specifically for rate limiting to be active.
 | Step/Check | Invariant(s) |
 |-----------|-------------|
 | devMode=false; peer starts at min_required_usd=1000 | IN-5, RS-5 |
-| Slot 1 (needs $1000, has $1000) → 201 | IN-5, RS-5 |
-| Slot 2 (needs $2000, has $1000) → 403 | IN-5, RS-5 |
-| Raise min_required_usd to $2000; slot 2 → 201 | IN-5, RS-5 |
+| Slot 1 ($1000 → 2 slots, activeResponses=0) → 201 | IN-5, RS-5 |
+| Slot 2 ($1000 → 2 slots, activeResponses=1) → 201 | IN-5, RS-5 |
+| Slot 3 (slots full: 2/2 at $1000) → 403 balance gate | IN-5, RS-5 |
+| Raise min_required_usd to $2000 (maxSlots→4); slot 3 → 201 | IN-5, RS-5 |
 
 ---
 
@@ -368,6 +369,21 @@ Note: runs with `devMode: false` specifically for rate limiting to be active.
 | T8: banned wallet CAN access GET /board → 200 (read-only OK) | RP-4 |
 | T8: banned wallet CAN access GET /listing → 200 (read-only OK) | RP-4 |
 | 403 response includes banned_until timestamp | RP-4 |
+
+---
+
+### `tests/037_slot_release.js`
+
+| Step/Check | Invariant(s) |
+|-----------|-------------|
+| T1: peer with $999 balance → 2 slots (formula floor(999/1000)*2=0, min 2) → 201 | RS-5, WK-4 |
+| T2: peer with $1000 → 2 slots → first respond 201 | RS-5, WK-4 |
+| T3: peer with $1000 at 2 active responses → 3rd respond 403 | RS-5 |
+| T4: peer with $1999 → still 2 slots (not 4) → 3rd respond 403 | RS-5 |
+| T5: peer with $2000 → 4 slots → 4th respond 201, 5th → 403 | RS-5 |
+| T6: inject accepted response + expired chat room → TTL cleaner → response 'closed' → peer can respond again | WK-4 |
+| T7: second TTL cleaner cycle leaves all response statuses valid (idempotent) | WK-4 |
+| T8: peer_left room (future expires_at) does NOT free slot → response stays 'accepted' | WK-4 |
 
 ---
 
@@ -505,7 +521,8 @@ Note: runs with `devMode: false` specifically for rate limiting to be active.
 | **WK-1** Message TTL cleanup | 022 | ✅ Sprint 2 |
 | **WK-2** peer_left → listing restored | 011 | ✅ |
 | **WK-3** wallet_sessions TTL cleanup | 023 | ✅ Sprint 2 |
+| **WK-4** Expired/closed chat frees peer slot | 037 | ✅ Sprint 7 |
 
-**Totals after Sprint 6 (RP-4 ban enforcement):** ✅ 37 covered · ⚠️ 4 partial · ❌ 0 missing  
-_(Sprint 1: 26✅ / 9⚠️ / 5❌ — Sprint 2: +5 — Fable Five: CH-1 ✅, ID-3 ✅ — Sprint 5: IN-0 ✅, CH-7 ✅, CH-8 ✅ — Sprint 6: RP-4 enforcement ✅)_  
-E2E: **35/35 PASS** · Unit: **26/26 PASS**
+**Totals after Sprint 7 (WK-4 slot release):** ✅ 38 covered · ⚠️ 4 partial · ❌ 0 missing  
+_(Sprint 1: 26✅ / 9⚠️ / 5❌ — Sprint 2: +5 — Fable Five: CH-1 ✅, ID-3 ✅ — Sprint 5: IN-0 ✅, CH-7 ✅, CH-8 ✅ — Sprint 6: RP-4 enforcement ✅ — Sprint 7: WK-4 slot release ✅)_  
+E2E: **36/36 PASS** · Unit: **26/26 PASS**

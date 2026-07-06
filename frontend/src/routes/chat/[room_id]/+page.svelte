@@ -2,6 +2,7 @@
 	import { page } from '$app/stores';
 	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
+	import { browser } from '$app/environment';
 	import nacl from 'tweetnacl';
 	import { lang, t as tFn } from '$lib/i18n.js';
 
@@ -9,12 +10,20 @@
 
 	// ── Room & key setup ──────────────────────────────────────────────────
 	const roomId = $page.params.room_id;
-	// Session token — try client first, then peer
-	const sessionToken = sessionStorage.getItem('naroom_session_client')
-		?? sessionStorage.getItem('naroom_session_peer')
-		?? '';
+	// Session token — try client first, then peer (only in browser — SSR has no sessionStorage)
+	let sessionToken = $state(browser
+		? (sessionStorage.getItem('naroom_session_client')
+			?? sessionStorage.getItem('naroom_session_peer')
+			?? '')
+		: '');
 	// myPubkeyHex is resolved from room metadata after loadRoom(); populated via $state
-	let myPubkeyHex = $state(sessionStorage.getItem('room_pubkey_' + roomId) ?? '');
+	let myPubkeyHex = $state(browser ? (sessionStorage.getItem('room_pubkey_' + roomId) ?? '') : '');
+
+	// Re-auth state — shown when session is missing or expired
+	let needsAuth     = $state(false);
+	let authWallet    = $state('');
+	let authLoading   = $state(false);
+	let authError     = $state('');
 
 	// Convert hex to Uint8Array
 	function hexToBytes(hex) {
@@ -86,9 +95,45 @@
 		};
 	}
 
+	async function reAuth() {
+		if (!authWallet) return;
+		authLoading = true; authError = '';
+		try {
+			const vr = await fetch('/api/wallet/register', {
+				method: 'POST', headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ wallet_address: authWallet, currency: authWallet.match(/^[LMl]|^ltc1/i) ? 'LTC' : 'BTC', role: 'peer' }),
+			});
+			if (!vr.ok) {
+				// Try as client
+				const vr2 = await fetch('/api/wallet/register', {
+					method: 'POST', headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ wallet_address: authWallet, currency: authWallet.match(/^[LMl]|^ltc1/i) ? 'LTC' : 'BTC', role: 'client' }),
+				});
+				if (!vr2.ok) throw new Error((await vr2.json()).error ?? 'Verification failed');
+				const d2 = await vr2.json();
+				sessionToken = d2.session_token ?? '';
+				if (sessionToken) sessionStorage.setItem('naroom_session_client', sessionToken);
+			} else {
+				const d = await vr.json();
+				sessionToken = d.session_token ?? '';
+				if (sessionToken) sessionStorage.setItem('naroom_session_peer', sessionToken);
+			}
+			needsAuth = false;
+			loading = true;
+			await loadRoom();
+		} catch(e) { authError = e.message; }
+		finally { authLoading = false; }
+	}
+
 	async function loadRoom() {
 		const res = await fetch(`/api/chat/${roomId}`, { headers: chatHeaders() });
-		if (!res.ok) throw new Error(t('chat.room_not_found'));
+		if (!res.ok) {
+			if (res.status === 401 || res.status === 403) {
+				needsAuth = true; loading = false;
+				return;
+			}
+			throw new Error(t('chat.room_not_found'));
+		}
 		room = await res.json();
 
 		// Server returns my_pubkey based on session — store it for reconnects and WS
@@ -112,8 +157,19 @@
 
 		// Setup encryption
 		keypair = getMyKeypair();
+		const myCurrentPubkey = bytesToHex(keypair.publicKey);
 		const peerPubkey = hexToBytes(room.peer_pubkey);
 		sharedKey = nacl.box.before(peerPubkey, keypair.secretKey);
+
+		// If our pubkey changed (keypair regenerated after session loss), notify server.
+		// Other side will pick up the new pubkey on their next loadRoom() and recompute shared key.
+		if (myCurrentPubkey !== room.my_pubkey) {
+			fetch(`/api/chat/${roomId}/pubkey`, {
+				method: 'POST',
+				headers: chatHeaders(),
+				body: JSON.stringify({ pubkey: myCurrentPubkey }),
+			}).catch(() => {});
+		}
 
 		// Connect WebSocket
 		connectWS();
@@ -142,8 +198,20 @@
 				if (data.type === 'system') {
 					if (data.event === 'peer_left' && room?.role === 'client') {
 						peerLeft = true;
+					} else if (data.event === 'client_left' && room?.role === 'peer') {
+						peerLeft = true; // reuse same UI — "other side has left"
 					} else if (data.event === 'room_closed') {
 						closed = true;
+					} else if (data.event === 'pubkey_updated') {
+						// Other side regenerated their keypair — reload room to get new pubkey
+						fetch(`/api/chat/${roomId}`, { headers: chatHeaders() })
+							.then(r2 => r2.ok ? r2.json() : null)
+							.then(updated => {
+								if (updated?.peer_pubkey) {
+									const newPeerPubkey = hexToBytes(updated.peer_pubkey);
+									sharedKey = nacl.box.before(newPeerPubkey, keypair.secretKey);
+								}
+							}).catch(() => {});
 					}
 					return;
 				}
@@ -366,7 +434,21 @@
 </script>
 
 <div class="page">
-	{#if loading}
+	{#if needsAuth}
+		<div class="center" style="flex-direction:column;gap:16px;padding:32px">
+			<div style="font-size:15px;color:var(--text-dim);text-align:center">
+				{t('chat.session_lost') || 'Session not found. Enter your wallet address to reconnect.'}
+			</div>
+			<input type="text" placeholder={t('listing.btc_ltc_ph') || 'Your BTC or LTC address...'} bind:value={authWallet}
+				style="width:100%;max-width:380px;padding:10px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:14px"
+				onkeydown={(e) => e.key === 'Enter' && reAuth()} />
+			{#if authError}<div style="color:var(--error,#e55);font-size:13px">{authError}</div>{/if}
+			<button class="btn-primary" disabled={!authWallet || authLoading} onclick={reAuth}>
+				{authLoading ? '...' : (t('chat.reconnect') || 'Reconnect')}
+			</button>
+		</div>
+
+	{:else if loading}
 		<div class="center"><div class="dot-pulse"></div></div>
 
 	{:else if closed}

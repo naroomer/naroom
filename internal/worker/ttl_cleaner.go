@@ -50,6 +50,21 @@ func (tc *TTLCleaner) clean() {
 		log.Printf("ttl_cleaner: expired %d chat rooms", n)
 	}
 
+	// 2a. Close accepted responses whose chat room is now expired/closed.
+	//     Without this, peers accumulate stale 'accepted' responses that block new slots.
+	res, _ = tc.DB.Exec(`
+		UPDATE responses SET status = 'closed'
+		WHERE status = 'accepted'
+		  AND id IN (
+		    SELECT response_id FROM chat_rooms
+		    WHERE status IN ('expired', 'closed') AND response_id IS NOT NULL
+		  )
+	`)
+	if n, _ := res.RowsAffected(); n > 0 {
+		totalCleaned += n
+		log.Printf("ttl_cleaner: closed %d stale accepted responses", n)
+	}
+
 	// 2c. Expire half-closed rooms (peer_left / client_left) after 24h.
 	//     Deletes messages and restores listing.
 	tc.expireHalfClosedRooms(now)

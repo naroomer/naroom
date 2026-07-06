@@ -19,5 +19,8 @@ export default defineConfig({
 	},
 	plugins: [
 		sveltekit()
-	]
+	],
+	ssr: {
+		noExternal: ['tweetnacl']
+	}
 });

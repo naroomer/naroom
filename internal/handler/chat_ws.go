@@ -235,6 +235,7 @@ func (h *Handler) sendHistory(ctx context.Context, conn *websocket.Conn, roomID 
 }
 
 // ResumeChat handles GET /resume — returns any active chat room for this wallet (peer or client).
+// Fallback: if no active chat room, returns listing_id for a 'matched' listing owned by this client.
 // Used when a participant loses their session and needs to find their room.
 func (h *Handler) ResumeChat(w http.ResponseWriter, r *http.Request) {
 	walletHash := middleware.SessionWalletHash(r.Context())
@@ -242,17 +243,32 @@ func (h *Handler) ResumeChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 401, "session required")
 		return
 	}
+	// Primary: active chat room (client or peer side)
 	var roomID string
 	err := h.DB.QueryRow(`
 		SELECT id FROM chat_rooms
 		WHERE (counselor_hash = ? OR client_hash = ?) AND status = 'active'
 		ORDER BY started_at DESC LIMIT 1
 	`, walletHash, walletHash).Scan(&roomID)
-	if err != nil {
-		writeError(w, 404, "no active chat room")
+	if err == nil {
+		writeJSON(w, 200, map[string]any{"room_id": roomID})
 		return
 	}
-	writeJSON(w, 200, map[string]any{"room_id": roomID})
+	// Fallback: matched listing with no chat room yet — peer accepted but chat room not yet open.
+	// Excludes listings that already have a chat room (even closed/peer_left) — those are handled
+	// by the primary query above or by sessionStorage on the client.
+	var listingID string
+	err = h.DB.QueryRow(`
+		SELECT id FROM listings
+		WHERE wallet_hash = ? AND status = 'matched'
+		  AND id NOT IN (SELECT listing_id FROM chat_rooms WHERE listing_id IS NOT NULL)
+		ORDER BY created_at DESC LIMIT 1
+	`, walletHash).Scan(&listingID)
+	if err == nil {
+		writeJSON(w, 200, map[string]any{"listing_id": listingID, "listing_status": "matched"})
+		return
+	}
+	writeError(w, 404, "no active chat room")
 }
 
 // ResumePeerChat handles GET /peer/resume — returns any active chat room for this peer.

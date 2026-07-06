@@ -73,13 +73,33 @@
 		return `${Math.floor(diff/3600)}h ago`;
 	}
 
+	// Detect BTC vs LTC from address prefix
+	function detectCurrency(addr) {
+		if (!addr || addr.length < 3) return null;
+		const a = addr.trim();
+		if (/^ltc1/i.test(a) || /^[LM]/.test(a)) return 'LTC';
+		if (/^bc1/i.test(a) || /^[13]/.test(a)) return 'BTC';
+		return null;
+	}
+
 	// ── Peer respond form ──────────────────────────────────────────────
 	let showRespond  = $state(false);
 	let peerWallet = $state('');
 	let peerCurrency = $state('BTC');
 	let respondLoading = $state(false);
 	let respondError   = $state('');
-	let responded      = $state(false);
+	let peerBalanceLow = $state(null); // {balance, required} when balance < $1000
+	let responded         = $state(false);
+	let peerPendingInvoice = $state(null); // invoice peer needs to pay to open chat
+	let peerInvoiceAddrCopied = $state(false);
+
+	function copyPeerInvoiceAddr() {
+		if (!peerPendingInvoice?.address) return;
+		navigator.clipboard.writeText(peerPendingInvoice.address).then(() => {
+			peerInvoiceAddrCopied = true;
+			setTimeout(() => peerInvoiceAddrCopied = false, 2000);
+		});
+	}
 
 	// Region lock state
 	let regionLockState = $state('idle'); // idle | warning | locked_other
@@ -92,6 +112,7 @@
 		const token = sessionStorage.getItem('naroom_session_peer') ?? '';
 		peerPollTimer = setInterval(async () => {
 			try {
+				// First check if chat room already opened (peer already paid)
 				const res = await fetch(`/api/peer/chatroom?listing_id=${encodeURIComponent(listingId)}`, {
 					headers: {
 						...(token ? { 'Authorization': `Bearer ${token}` } : {}),
@@ -99,11 +120,23 @@
 						'X-Dev-Role': 'peer',
 					},
 				});
-				if (!res.ok) return;
-				const data = await res.json();
-				if (data.room_id) {
-					clearInterval(peerPollTimer);
-					goto(`/chat/${data.room_id}`);
+				if (res.ok) {
+					const data = await res.json();
+					if (data.room_id) {
+						clearInterval(peerPollTimer);
+						goto(`/chat/${data.room_id}`);
+					}
+					return;
+				}
+				// No chat room yet — check if client accepted and invoice appeared
+				if (!peerPendingInvoice) {
+					const pi = await fetch('/api/peer/invoice', {
+						headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+					});
+					if (pi.ok) {
+						const piData = await pi.json();
+						peerPendingInvoice = piData;
+					}
 				}
 			} catch {}
 		}, 4000);
@@ -121,19 +154,89 @@
 		return pubHex;
 	}
 
-	async function checkRegionAndRespond() {
+	// Auto-detect currency from peer wallet address
+	$effect(() => {
+		const detected = detectCurrency(peerWallet);
+		if (detected) peerCurrency = detected;
+	});
+
+	// Auto-check for pending invoice when peer enters wallet (debounced)
+	let peerWalletCheckTimer;
+	$effect(() => {
+		if (!peerWallet || peerWallet.length < 20) return;
+		clearTimeout(peerWalletCheckTimer);
+		peerWalletCheckTimer = setTimeout(() => checkPeerInvoiceQuick(), 800);
+	});
+
+	async function checkPeerInvoiceQuick() {
 		if (!peerWallet) return;
-		respondLoading = true; respondError = '';
+		const detectedQuick = detectCurrency(peerWallet);
+		if (detectedQuick) peerCurrency = detectedQuick;
 		try {
-			// Step 1: register wallet and get session token
-			const vr = await fetch('/api/wallet/verify', {
+			const vr = await fetch('/api/wallet/register', {
 				method: 'POST', headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ wallet_address: peerWallet, currency: peerCurrency, role: 'peer', signature: '', message: '' }),
+				body: JSON.stringify({ wallet_address: peerWallet, currency: peerCurrency, role: 'peer' }),
 			});
-			if (!vr.ok) throw new Error((await vr.json()).error ?? 'Wallet verification failed');
+			if (!vr.ok) {
+				if (vr.status === 402) {
+					const errData = await vr.json().catch(() => ({}));
+					if (errData.balance_usd !== undefined) {
+						peerBalanceLow = { balance: Math.round(errData.balance_usd), required: errData.required_usd ?? 1000 };
+					}
+				}
+				return;
+			}
+			peerBalanceLow = null;
 			const vrData = await vr.json();
 			const peerToken = vrData.session_token ?? '';
 			if (peerToken) sessionStorage.setItem('naroom_session_peer', peerToken);
+			const pi = await fetch('/api/peer/invoice', {
+				headers: peerToken ? { 'Authorization': `Bearer ${peerToken}` } : {},
+			});
+			if (pi.ok) {
+				const piData = await pi.json();
+				peerPendingInvoice = piData;
+				startPeerPoll(piData.listing_id || listing.id);
+			}
+		} catch {}
+	}
+
+	async function checkRegionAndRespond() {
+		if (!peerWallet) return;
+		respondLoading = true; respondError = '';
+		// Re-detect currency at submit time to avoid race with $effect
+		const detectedPeer = detectCurrency(peerWallet);
+		if (detectedPeer) peerCurrency = detectedPeer;
+		try {
+			// Step 1: register wallet and get session token
+			const vr = await fetch('/api/wallet/register', {
+				method: 'POST', headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ wallet_address: peerWallet, currency: peerCurrency, role: 'peer' }),
+			});
+			if (!vr.ok) {
+				const errData = await vr.json().catch(() => ({}));
+				if (vr.status === 402 && errData.balance_usd !== undefined) {
+					peerBalanceLow = { balance: Math.round(errData.balance_usd), required: errData.required_usd ?? 1000 };
+					return;
+				}
+				throw new Error(errData.error ?? 'Wallet verification failed');
+			}
+			peerBalanceLow = null;
+			const vrData = await vr.json();
+			const peerToken = vrData.session_token ?? '';
+			if (peerToken) sessionStorage.setItem('naroom_session_peer', peerToken);
+
+			// Step 1b: check if peer already has a pending invoice (lost page recovery)
+			const pi = await fetch('/api/peer/invoice', {
+				headers: peerToken ? { 'Authorization': `Bearer ${peerToken}` } : {},
+			});
+			if (pi.ok) {
+				const piData = await pi.json();
+				// Peer already has a pending invoice — show payment UI in peer section
+				peerPendingInvoice = piData;
+				startPeerPoll(piData.listing_id || listing.id);
+				return;
+			}
 
 			// Step 2: check region lock
 			const rr = await fetch('/api/peer/region', {
@@ -194,6 +297,9 @@
 	let acceptLoading  = $state(false);
 	let acceptError    = $state('');
 
+	// Existing chat room (recovery after page refresh)
+	let existingChatRoom = $state(null);
+
 	// Poll for chat room after accept
 	let chatPollTimer;
 
@@ -227,6 +333,17 @@
 		loadingResponses = true; responsesError = '';
 		try {
 			const token = await getClientSession();
+			// Recovery: check if chat room already exists (e.g. after page refresh post-accept)
+			const cr = await fetch(`/api/listing/${listing.id}/chatroom`, {
+				headers: clientAuthHeaders(token),
+			});
+			if (cr.ok) {
+				const crData = await cr.json();
+				if (crData.room_id) {
+					existingChatRoom = crData;
+					return;
+				}
+			}
 			const res = await fetch(`/api/listing/${listing.id}/responses`, {
 				headers: clientAuthHeaders(token),
 			});
@@ -312,12 +429,35 @@
 		finally { renewLoading = false; }
 	}
 
+	// Auto-detect currency from client wallet address
+	$effect(() => {
+		const detected = detectCurrency(clientWallet);
+		if (detected) clientCurrency = detected;
+	});
+
 	// Load saved wallet from sessionStorage (browser-only)
-	onMount(() => {
+	onMount(async () => {
 		const saved = sessionStorage.getItem('my_wallet_' + listing.id);
 		if (saved) clientWallet = saved;
 		const savedCurrency = sessionStorage.getItem('my_currency_' + listing.id);
 		if (savedCurrency) clientCurrency = savedCurrency;
+
+		// If listing is matched, auto-check for open chat room using stored session.
+		// Covers the case where client returns to the listing page after peer paid.
+		if (listing.status === 'matched') {
+			const token = sessionStorage.getItem('naroom_session_client') ?? '';
+			if (token) {
+				try {
+					const res = await fetch(`/api/listing/${listing.id}/chatroom`, {
+						headers: { 'Authorization': `Bearer ${token}` },
+					});
+					if (res.ok) {
+						const d = await res.json();
+						if (d.room_id) existingChatRoom = d;
+					}
+				} catch {}
+			}
+		}
 	});
 
 	// Cleanup poll timers on unmount
@@ -373,7 +513,29 @@
 		<div class="section">
 			<div class="section-title">{t('listing.can_help')}</div>
 
-			{#if responded}
+			{#if peerPendingInvoice}
+				<div class="success-box">
+					<span class="success-icon">✓</span>
+					<div>
+						<div class="success-title">{t('listing.accepted_pay_title')}</div>
+						<div class="success-sub">{t('listing.accepted_pay_sub')}</div>
+					</div>
+				</div>
+				<div class="invoice-box invoice-box--pay">
+					<div class="invoice-amount">{peerPendingInvoice.amount_crypto} {peerPendingInvoice.currency}</div>
+					<div class="invoice-addr-row">
+						<div class="invoice-addr">{peerPendingInvoice.address}</div>
+						<button class="copy-btn" onclick={copyPeerInvoiceAddr}>
+							{peerInvoiceAddrCopied ? t('listing.copied') : t('listing.copy_address')}
+						</button>
+					</div>
+				</div>
+				<div class="balance-warn">⚠ {t('listing.peer_balance_warn')}</div>
+				<div class="poll-row">
+					<span class="dot"></span>
+					{t('checking_auto')}
+				</div>
+			{:else if responded}
 				<div class="success-box">
 					<span class="success-icon">✓</span>
 					<div>
@@ -393,14 +555,8 @@
 			{:else}
 				<div class="sub-form">
 					<div class="field">
-						<label for="peer-wallet">{t('listing.peer_wallet', {currency: peerCurrency})}</label>
-						<div class="wallet-row">
-							<input id="peer-wallet" type="text" placeholder={t('listing.enter_address')} bind:value={peerWallet} />
-							<div class="currency-toggle">
-								<button class:active={peerCurrency === 'BTC'} onclick={() => peerCurrency = 'BTC'}>BTC</button>
-								<button class:active={peerCurrency === 'LTC'} onclick={() => peerCurrency = 'LTC'}>LTC</button>
-							</div>
-						</div>
+						<label for="peer-wallet">{t('listing.peer_wallet')}</label>
+						<input id="peer-wallet" type="text" placeholder={t('listing.enter_address')} bind:value={peerWallet} />
 					</div>
 					{#if regionLockState === 'locked_other'}
 						<div class="region-blocked">
@@ -418,12 +574,16 @@
 							</div>
 						</div>
 					{:else}
-						{#if respondError}<div class="error">{respondError}</div>{/if}
+						{#if peerBalanceLow}
+							<div class="error">{t('listing.peer_low_balance', {balance: peerBalanceLow.balance, required: peerBalanceLow.required})}</div>
+						{:else if respondError}
+							<div class="error">{respondError}</div>
+						{/if}
 						<div class="form-actions">
 							<button class="btn-primary" disabled={!peerWallet || respondLoading} onclick={checkRegionAndRespond}>
 								{respondLoading ? t('listing.sending') : t('listing.send_response')}
 							</button>
-							<button class="btn-ghost" onclick={() => { showRespond = false; respondError = ''; regionLockState = 'idle'; }}>{t('cancel')}</button>
+							<button class="btn-ghost" onclick={() => { showRespond = false; respondError = ''; regionLockState = 'idle'; peerBalanceLow = null; }}>{t('cancel')}</button>
 						</div>
 						<p class="fine">{t('listing.no_funds')}</p>
 					{/if}
@@ -435,7 +595,20 @@
 		<div class="section">
 			<div class="section-title">{t('listing.i_posted')}</div>
 
-			{#if acceptInvoice}
+			{#if existingChatRoom}
+				<!-- Recovery: chat room already exists -->
+				<div class="invoice-box" style="cursor:pointer" onclick={() => goto(`/chat/${existingChatRoom.room_id}`)}>
+					<div class="invoice-icon">💬</div>
+					<div>
+						<div class="invoice-title">{t('listing.chat_ready') || 'Chat is open'}</div>
+						<div class="invoice-sub">{t('listing.chat_ready_sub') || 'Your session is active. Tap to continue.'}</div>
+					</div>
+				</div>
+				<button class="btn-primary" style="margin-top:10px" onclick={() => goto(`/chat/${existingChatRoom.room_id}`)}>
+					{t('listing.go_to_chat') || 'Go to chat →'}
+				</button>
+
+			{:else if acceptInvoice}
 				<!-- Waiting for peer to pay $15 -->
 				<div class="invoice-box">
 					<div class="invoice-icon">⏳</div>
@@ -490,13 +663,6 @@
 						{/each}
 					</div>
 					{#if acceptError}<div class="error">{acceptError}</div>{/if}
-					<div class="field" style="margin-top: 12px">
-						<div class="field-label">{t('listing.currency_payment')}</div>
-						<div class="currency-toggle">
-							<button class:active={clientCurrency === 'BTC'} onclick={() => clientCurrency = 'BTC'}>BTC</button>
-							<button class:active={clientCurrency === 'LTC'} onclick={() => clientCurrency = 'LTC'}>LTC</button>
-						</div>
-					</div>
 					<p class="fine">{t('listing.accept_fine')}</p>
 				{/if}
 
@@ -507,6 +673,37 @@
 					<div class="field">
 						<label for="client-wallet">{t('listing.your_wallet')}</label>
 						<input id="client-wallet" type="text" placeholder={t('listing.btc_ltc_ph')} bind:value={clientWallet} />
+					</div>
+					{#if responsesError}<div class="error">{responsesError}</div>{/if}
+					<button class="btn-primary" disabled={!clientWallet || loadingResponses} onclick={loadResponses}>
+						{loadingResponses ? t('listing.loading') : t('listing.view_responses')}
+					</button>
+				</div>
+			{/if}
+		</div>
+
+	{:else if listing.status === 'matched'}
+		<!-- Listing matched: chat is open. Show re-entry point for the client. -->
+		<div class="section">
+			<div class="section-title">{t('listing.i_posted')}</div>
+			{#if existingChatRoom}
+				<div class="invoice-box" style="cursor:pointer" onclick={() => goto(`/chat/${existingChatRoom.room_id}`)}>
+					<div class="invoice-icon">💬</div>
+					<div>
+						<div class="invoice-title">{t('listing.chat_ready') || 'Chat is open'}</div>
+						<div class="invoice-sub">{t('listing.chat_ready_sub') || 'Your session is active. Tap to continue.'}</div>
+					</div>
+				</div>
+				<button class="btn-primary" style="margin-top:10px" onclick={() => goto(`/chat/${existingChatRoom.room_id}`)}>
+					{t('listing.go_to_chat') || 'Go to chat →'}
+				</button>
+			{:else}
+				<!-- Session not in storage — ask wallet to re-auth -->
+				<p class="section-desc">{t('listing.matched_reauth') || 'Your request was matched. Enter your wallet address to re-enter your chat.'}</p>
+				<div class="sub-form">
+					<div class="field">
+						<label for="client-wallet-match">{t('listing.your_wallet')}</label>
+						<input id="client-wallet-match" type="text" placeholder={t('listing.btc_ltc_ph')} bind:value={clientWallet} />
 					</div>
 					{#if responsesError}<div class="error">{responsesError}</div>{/if}
 					<button class="btn-primary" disabled={!clientWallet || loadingResponses} onclick={loadResponses}>
@@ -697,6 +894,27 @@
 	.invoice-icon { font-size: 22px; flex-shrink: 0; }
 	.invoice-title { font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
 	.invoice-sub { font-size: 13px; color: var(--text-dim); line-height: 1.5; }
+	.invoice-box--pay {
+		display: block;
+	}
+	.invoice-amount {
+		font-size: 22px; font-weight: 700; color: var(--accent);
+		letter-spacing: 0.02em; margin-bottom: 10px;
+	}
+	.invoice-addr-row {
+		display: flex; flex-direction: column; gap: 8px;
+	}
+	.invoice-addr {
+		font-family: monospace; font-size: 13px; color: var(--text-dim);
+		word-break: break-all; width: 100%;
+	}
+	.copy-btn {
+		align-self: flex-start; padding: 6px 14px; font-size: 12px; font-weight: 600;
+		background: var(--bg-card2, var(--bg-card)); border: 1px solid var(--border);
+		border-radius: 6px; color: var(--accent); cursor: pointer; white-space: nowrap;
+		transition: background 0.15s;
+	}
+	.copy-btn:hover { background: var(--bg-hover, rgba(255,255,255,0.06)); }
 	.poll-row {
 		display: flex; align-items: center; gap: 8px;
 		color: var(--text-dim); font-size: 13px;
@@ -706,6 +924,12 @@
 		background: var(--accent); animation: pulse 1.5s infinite; flex-shrink: 0;
 	}
 	@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+	.balance-warn {
+		font-size: 12px; color: var(--warn); background: rgba(212,180,90,0.08);
+		border: 1px solid rgba(212,180,90,0.3); border-radius: 8px;
+		padding: 10px 14px; line-height: 1.5;
+	}
 
 	.expired-note { font-size: 14px; color: var(--text-faint); text-align: center; padding: 40px 0; }
 

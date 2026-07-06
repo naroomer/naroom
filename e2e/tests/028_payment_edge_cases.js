@@ -7,12 +7,25 @@
 //   a) недоплата: tx < суммы инвойса → инвойс НЕ подтверждён
 //   b) две транзакции в сумме = инвойс → фиксируем политику (одна TX или сумма)
 //   c) API недоступен (таймаут) → watcher не падает, ретраит, после восстановления — подтверждает
+import { createHmac } from 'node:crypto';
 import { TestServer, sleep } from '../lib/server.js';
 import { ApiClient } from '../lib/http.js';
 import { newKeypair } from '../lib/crypto.js';
 import { assertStatus, pollUntil } from '../lib/assert.js';
 import { Runner } from '../lib/runner.js';
 import { startChainStub } from '../lib/chain_stub.js';
+
+// Mirror of server.js walletHash() and Go's crypto.WalletHash()
+// Uses the same TEST_SALT='e2e-test-salt' hardcoded in e2e/lib/server.js
+const TEST_SALT = 'e2e-test-salt';
+function walletHash(address) {
+  const addr = address.trim();
+  const lower = addr.toLowerCase();
+  const normalized = (lower.startsWith('bc1') || lower.startsWith('ltc1')) ? lower : addr;
+  return createHmac('sha256', Buffer.from(TEST_SALT))
+    .update('naroom:v1:' + normalized)
+    .digest('hex');
+}
 
 // Separate wallets per scenario — one active listing per wallet at a time
 const WALLET_A = '1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf';
@@ -30,6 +43,7 @@ export async function run() {
     extraEnv: {
       DEV_MODE: 'false',           // turn off auto-confirm
       DEV_SKIP_PAYMENTS: 'false',  // invoice watcher must check real (stub) API
+      DEV_SEED_PRICES: 'true',     // seed $100k BTC price so watcher balance check never needs external price API
       MEMPOOL_API: stub.url + '/mempool',
       BLOCKCYPHER_API: stub.url + '/blockcypher',
       INVOICE_WATCH_INTERVAL: '1', // poll every 1s for fast tests
@@ -47,27 +61,41 @@ export async function run() {
     }
 
     // Per-scenario wallets so "already have active listing" never triggers
-    const scenarioWallets = [
-      [WALLET_A, 'BTC'],
-      [WALLET_B, 'BTC'],
-      [WALLET_C, 'BTC'],
-    ];
+    const scenarioWallets = [WALLET_A, WALLET_B, WALLET_C];
     let scenarioIndex = 0;
 
-    // Helper: create listing, return { listingId, invoiceId, invoiceAddress, amountSats, senderWallet }
-    async function createInvoice() {
-      const [wallet] = scenarioWallets[scenarioIndex++];
-      const r = await api.createListing(wallet);
-      assertStatus(r, 201, 'create listing');
-      const inv = r.body;
-      // Convert amount_crypto (BTC string "0.00012345") to satoshis
-      const amountSats = Math.round(parseFloat(inv.amount_crypto || '0.00050000') * 1e8);
+    // Helper: inject listing + invoice directly into the DB.
+    // Avoids /listing/create which calls an external price API (unavailable in test env).
+    // Uses $5 listing invoice at $100k/BTC → 5000 sats.
+    // payer_address is queried from wallet_sessions (set by registerDirect).
+    function createInvoice() {
+      const wallet = scenarioWallets[scenarioIndex++];
+      const ts = Math.floor(Date.now() / 1000);
+      const idx = scenarioIndex; // 1-based after increment
+      const listingId  = `lst_028_${idx}_${ts}`;
+      const invoiceId  = `inv_028_${idx}_${ts}`;
+      // Deterministic address — stub accepts any string as address key
+      const invoiceAddress = `mock_btc_028_${idx}_${ts}`;
+      const amountSats = 5000; // $5 at $100k/BTC
+      const amountCrypto = '0.00005000';
+      // payer_address = HMAC hash of the sender wallet address (same as wallet_sessions.wallet_hash)
+      const payerAddress = walletHash(wallet);
+
+      srv.db(
+        `INSERT INTO listings (id, city, dependency_type, help_type, urgency, languages, wallet_hash, visible_until, created_at, status, is_sample) ` +
+        `VALUES ('${listingId}', 'new_york', 'alcohol', 'crisis', 'urgent', '["en"]', '${payerAddress}', ${ts + 3600}, ${ts}, 'pending', 0)`
+      );
+      srv.db(
+        `INSERT INTO invoices (id, type, address, amount_usd, amount_crypto, currency, listing_id, payer_address, price_at_creation, status, created_at) ` +
+        `VALUES ('${invoiceId}', 'listing', '${invoiceAddress}', 5.0, '${amountCrypto}', 'BTC', '${listingId}', '${payerAddress}', 100000.0, 'pending', ${ts})`
+      );
+
       return {
-        listingId: inv.listing_id,
-        invoiceId: inv.invoice_id,
-        invoiceAddress: inv.address,
+        listingId,
+        invoiceId,
+        invoiceAddress,
         amountSats,
-        senderWallet: wallet, // the wallet that will pay (for payer verification)
+        senderWallet: wallet, // raw address — stub keys by this; watcher hashes it to verify payer
       };
     }
 
@@ -79,7 +107,7 @@ export async function run() {
 
     // ── (a) недоплата ────────────────────────────────────────────────────────
     await t.run('(a) underpayment: tx at 60% of invoice → NOT confirmed', async () => {
-      const inv = await createInvoice();
+      const inv = createInvoice();
       const underpay = Math.floor(inv.amountSats * 0.6);
 
       await stub.setAddressState(inv.invoiceAddress, {
@@ -99,7 +127,7 @@ export async function run() {
 
     // ── (b) две транзакции ───────────────────────────────────────────────────
     await t.run('(b) two txs summing to invoice amount — record actual policy', async () => {
-      const inv = await createInvoice();
+      const inv = createInvoice();
       const half = Math.ceil(inv.amountSats / 2);
 
       await stub.setAddressState(inv.invoiceAddress, {
@@ -112,11 +140,11 @@ export async function run() {
       await stub.setAddressState(inv.senderWallet, { balance_sats: 50_000_000 });
 
       // Wait up to 10s for watcher to process
-      let finalStatus = 'pending_payment';
+      let finalStatus = 'pending';
       const deadline = Date.now() + 10000;
       while (Date.now() < deadline) {
         finalStatus = await listingStatus(inv.listingId);
-        if (finalStatus !== 'pending_payment') break;
+        if (finalStatus !== 'pending') break;
         await sleep(1000);
       }
 
@@ -131,7 +159,7 @@ export async function run() {
 
     // ── (c) API таймаут → сервер живёт, потом восстанавливается ─────────────
     await t.run('(c) API timeout: server stays alive, confirms after recovery', async () => {
-      const inv = await createInvoice();
+      const inv = createInvoice();
 
       // Stage 1: stub times out
       await stub.setMode('timeout');

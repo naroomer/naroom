@@ -250,13 +250,15 @@ Invariant IDs use short category codes: **ID** (Identity/Privacy), **SE** (Sessi
 
 ---
 
-### RS-5: Peer balance covers (activeResponses + 1) * $1000 slots
-**Rule:** Peer with $1000 can hold 1 active response; each additional requires another $1000.
+### RS-5: Peer balance slot formula: floor(balance/1000)*2, minimum 2
+**Rule:** `maxSlots = floor(min_required_usd / 1000) * 2`, minimum 2.
+So $1000 → 2 slots, $2000 → 4 slots, $1999 → 2 slots (not 4).
+Peer is rejected (403) when `activeResponses >= maxSlots`.
 
 **Enforced:**
-- `internal/handler/respond.go:Respond` — `COUNT(*) active responses * 1000 ≤ min_required_usd`
+- `internal/handler/respond.go:Respond` — `maxSlots = int(minRequired/1000)*2; if maxSlots < 2 { maxSlots = 2 }; if activeResponses >= maxSlots → 403`
 
-**Tests:** **018** (devMode=false; peer at $1000: slot 1 OK, slot 2 → 403; raise to $2000: slot 2 OK)
+**Tests:** **018** (devMode=false; peer at $1000: slots 1+2 OK, slot 3 → 403; raise to $2000: slot 3 OK); **037** T1-T5 (formula edge cases: $999=2 slots, $1999=2 slots not 4, $2000=4 slots)
 **Coverage:** ✅ Covered (IN-5 balance math gate proven end-to-end)
 
 ---
@@ -353,6 +355,25 @@ Invariant IDs use short category codes: **ID** (Identity/Privacy), **SE** (Sessi
 - `internal/handler/chat_ws.go:GetCounselorChatRoom` — `WHERE listing_id=? AND counselor_hash=?`
 
 **Tests:** 002 (stale room guard)
+**Coverage:** ✅ Covered
+
+---
+
+### CH-9: Client must have a working path to their chat room when listing is matched
+**Rule:** When `listings.status = 'matched'` (peer paid, chat open), the client must be able to reach their `chat_room` through at least two paths:
+1. `/listing/{id}` — listing page detects `matched` status, auto-loads chat room via stored session token, renders "Go to chat →" button.
+2. `GET /resume` — returns `room_id` when a matching active `chat_room` exists for the session's wallet_hash.
+
+Neither path may gate on `listing.status = 'active'`. A `matched` listing is not expired — its associated chat room is still active.
+
+**Enforced:**
+- `frontend/src/routes/listing/[id]/+page.svelte` — `{:else if listing.status === 'matched'}` branch; `onMount` auto-calls `/api/listing/{id}/chatroom` with stored token
+- `internal/handler/chat_ws.go:ResumeChat` — primary query: `chat_rooms WHERE client_hash=? AND status='active'`; fallback: `listings WHERE wallet_hash=? AND status='matched' AND id NOT IN (SELECT listing_id FROM chat_rooms ...)`
+- `frontend/src/routes/resume/+page.svelte` — `onMount` tries stored session tokens before showing wallet form
+
+**Root cause of production bug (2026-07-06):** listing page had `{#if listing.status === 'active'}` gating all client UI; `matched` fell through to `{:else}` expired-note. Client saw dead-end. Fixed by adding explicit `matched` branch.
+
+**Tests:** 038 T1 (GET /resume → room_id when listing matched), T2 (GET /listing/{id}/chatroom → room_id)
 **Coverage:** ✅ Covered
 
 ---
@@ -543,6 +564,21 @@ Invariant IDs use short category codes: **ID** (Identity/Privacy), **SE** (Sessi
 
 ---
 
+### WK-4: Completed or expired chats release peer response slot
+**Rule:** A chat room transitioning to `expired` or `closed` status must result in the linked `responses` row
+transitioning from `accepted` to `closed`. This frees the peer's response slot for new listings.
+A `peer_left` room does NOT free the slot — the peer's response stays `accepted` until the room
+fully expires via TTL.
+
+**Enforced:**
+- `internal/worker/ttl_cleaner.go` step 2a — `UPDATE responses SET status='closed' WHERE status='accepted' AND id IN (SELECT response_id FROM chat_rooms WHERE status IN ('expired','closed') AND response_id IS NOT NULL)`
+- `expireHalfClosedRooms()` in same file — transitions `peer_left`/`client_left` → `expired`, which then triggers step 2a on the next cleaner cycle
+
+**Tests:** **037** (T6: expired room → slot freed after TTL clean; T7: idempotent second pass; T8: peer_left room does NOT free slot prematurely)
+**Coverage:** ✅ Covered
+
+---
+
 ## Summary of Coverage Gaps
 
 Sprint 1 changes: ID-3 eliminated (table dropped), SE-3/LS-3/RS-1/RS-4/RS-5(IN-5) newly covered by tests 015-019.
@@ -551,6 +587,7 @@ Sprint 3 changes: CH-4/CH-7/CH-8 newly covered by test 034; docs corrected for d
 Sprint 4 changes: IN-0 (two-step verification model) documented in docs and covered by E2E test 035; PRIVACY_MODEL/SECURITY/THREAT_MODEL updated to correct "/wallet/register = balance pre-check" framing.
 Sprint 5 changes: Test 027 content replaced — old intentionally-failing challenge test → new wallet trust model test (T1-T4). Docs updated: no challenge-signature planned, single-tx requirement, wrong-sender rejection documented in SECURITY.md and PRIVACY_MODEL.md. ID-1 parenthetical fixed (wallet_challenges table no longer exists).
 Sprint 6 changes: RP-4 ban enforcement implemented — `RequireNotBanned` middleware added; applied to create/respond/renew/pollSend/pubkey/close routes; E2E test 036 added (16 steps); INVARIANTS.md and TEST_MATRIX.md updated.
+Sprint 7 changes: WK-4 added — TTL cleaner slot release invariant; E2E test 037 added (8 steps covering slot formula edge cases and TTL cleaner idempotency).
 
 | Invariant | Status | Notes |
 |-----------|--------|-------|
@@ -578,5 +615,6 @@ Sprint 6 changes: RP-4 ban enforcement implemented — `RequireNotBanned` middle
 | RP-4 Abuse ban thresholds | ✅ | Tests 025 + 036 (thresholds + enforcement; Sprint 6) |
 | WK-1 Message TTL cleanup | ✅ | Test 022 added Sprint 2 |
 | WK-3 wallet_sessions TTL cleanup | ✅ | Test 023 added Sprint 2 |
+| WK-4 Expired/closed chat frees peer slot | ✅ | Test 037 added Sprint 7 |
 
-**Totals after Sprint 6:** ✅ 37 covered · ⚠️ 6 partial · ❌ 0 missing
+**Totals after Sprint 7:** ✅ 38 covered · ⚠️ 6 partial · ❌ 0 missing

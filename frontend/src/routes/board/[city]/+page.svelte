@@ -30,16 +30,12 @@
 	}
 </script>
 
-<svelte:head>
-	<link rel="canonical" href="https://naroom.net/board/{data.city}" />
-	<meta property="og:url" content="https://naroom.net/board/{data.city}" />
-</svelte:head>
-
 <div class="page">
 	<!-- Header -->
 	<header>
 		<div class="logo">NA Room</div>
 		<nav>
+			<a href="/resume" class="resume-link">{t('nav.resume_chat')}</a>
 			<a href="/how-it-works">{t('nav.how_it_works')}</a>
 			<a href="/helper">{t('nav.get_notified')}</a>
 		</nav>
@@ -146,6 +142,15 @@
 
 	nav a:hover {
 		color: var(--text);
+	}
+
+	nav a.resume-link {
+		color: var(--accent);
+		font-weight: 600;
+	}
+
+	nav a.resume-link:hover {
+		opacity: 0.8;
 	}
 
 	/* Tabs */

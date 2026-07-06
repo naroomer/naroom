@@ -6,7 +6,7 @@
  *   /how-it-works  — public info page
  *   /board/*       — public city boards
  *
- * Excluded (everything else, including /new, /listing/*, /chat/*, /helper):
+ * Excluded (everything else, including /new, /listing/*, /chat/*, /helper, /resume):
  *   These pages contain wallet, session, chat, listing-private, or payment state.
  *   No analytics script is loaded or invoked on these routes.
  */

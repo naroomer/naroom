@@ -46,7 +46,7 @@
 				name: 'How do I know this works as described?',
 				acceptedAnswer: {
 					'@type': 'Answer',
-					text: 'The full source code is open and available at https://github.com/naroomer/naroom — anyone can verify how encryption works, that messages are not stored, and that there are no hidden functions.'
+					text: 'The full source code is open and available at github.com/naroom — anyone can verify how encryption works, that messages are not stored, and that there are no hidden functions.'
 				}
 			},
 		]
@@ -76,8 +76,6 @@
 </script>
 
 <svelte:head>
-	<link rel="canonical" href="https://naroom.net/how-it-works" />
-	<meta property="og:url" content="https://naroom.net/how-it-works" />
 	{@html `<script type="application/ld+json">${faqSchema}<\/script>`}
 </svelte:head>
 
@@ -192,7 +190,7 @@
 		</div>
 		<div class="qa">
 			<div class="q">{t('hiw.q5')}</div>
-			<div class="a">{t('hiw.a5')} <a href="https://github.com/naroomer/naroom" target="_blank" rel="noopener">github.com/naroomer/naroom</a></div>
+			<div class="a">{t('hiw.a5')} <a href="https://github.com/naroom" target="_blank" rel="noopener">github.com/naroom</a></div>
 		</div>
 	</div>
 </div>

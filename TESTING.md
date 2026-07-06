@@ -5,11 +5,11 @@
 | Type | Location | Runner | Count |
 |------|----------|--------|-------|
 | Go unit tests | `internal/crypto/`, `internal/handler/`, `internal/worker/` | `go test` | 26 |
-| E2E tests (automated) | `e2e/tests/` | Node.js | 35 |
+| E2E tests (automated) | `e2e/tests/` | Node.js | 36 |
 | E2E test (Playwright) | `e2e/tests/026_analytics_privacy.js` | Playwright | 1 |
 | Frontend type check | `frontend/` | `npm run check` | — |
 
-Current status: **35/35 E2E · 26/26 unit — all green**
+Current status: **36/36 E2E · 26/26 unit — all green**
 
 The Playwright test (026) runs separately via `selftest-full.sh` because it requires a running frontend and Playwright installation.
 
@@ -25,7 +25,7 @@ This script:
 1. Builds the Go binary (`go build ./...`)
 2. Runs Go unit tests (`go test ./...`)
 3. Runs `npm run check` + `npm run build` in `/frontend`
-4. Runs all 35 E2E tests (excludes 026 — Playwright)
+4. Runs all 36 E2E tests (excludes 026 — Playwright)
 
 All steps must pass. The script exits non-zero on any failure.
 
@@ -90,6 +90,7 @@ Each test file is a standalone module that boots its own server instance. Tests 
 | `031_concurrent_accept.js` | Two simultaneous accepts on two responses → exactly one accepted (TOCTOU guard) |
 | `032_concurrent_close.js` | Concurrent close attempts on the same room → only one wins; no zombie state |
 | `033_devmode_prod_failsafe.js` | Binary compiled without `-tags dev` rejects `DEV_MODE=true` at startup |
+| `037_slot_release.js` | Slot formula edge cases (devMode=false): $999/$1000/$1999/$2000 correct slot counts; expired chat room frees `accepted` response slot after TTL cleaner; second cleaner pass is idempotent; `peer_left` room does not free slot prematurely |
 
 ---
 

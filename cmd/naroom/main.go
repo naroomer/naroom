@@ -79,6 +79,8 @@ func main() {
 
 	if cfg.DevMode {
 		log.Println("WARNING: DEV_MODE enabled — payments are mocked, do NOT use in production")
+	}
+	if cfg.DevMode || cfg.DevSeedPrices {
 		// Seed fixed prices so tests never hit external price APIs (avoids rate limits/network flakiness).
 		prices.SetDevPrices(100000.0, 100.0) // $100k BTC, $100 LTC
 	}

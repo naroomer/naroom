@@ -1,14 +1,38 @@
 <script>
 	import { onMount } from 'svelte';
-	import { lang, initLang, setLang, SUPPORTED_LANGS } from '$lib/i18n.js';
 	import { page } from '$app/state';
 	import { env } from '$env/dynamic/public';
-	const PUBLIC_GOATCOUNTER_CODE = env.PUBLIC_GOATCOUNTER_CODE ?? '';
+	import { lang, initLang, setLang, SUPPORTED_LANGS } from '$lib/i18n.js';
 	import { isAnalyticsRoute } from '$lib/analytics.js';
+
+	const PUBLIC_GOATCOUNTER_CODE = env.PUBLIC_GOATCOUNTER_CODE ?? '';
 
 	let { children } = $props();
 
 	onMount(initLang);
+
+	// ── Analytics (GoatCounter, public pages only) ──────────────────────────────
+	// Script injected once on first public page; SPA navigations call count() manually.
+	// Private routes (/new, /listing/*, /chat/*, /helper, /resume) are never tracked.
+	let _gcLoaded = false;
+
+	$effect(() => {
+		const pathname = page.url.pathname;
+		if (!PUBLIC_GOATCOUNTER_CODE || !isAnalyticsRoute(pathname)) return;
+
+		if (!_gcLoaded) {
+			_gcLoaded = true;
+			const s = document.createElement('script');
+			s.dataset.goatcounter = `https://${PUBLIC_GOATCOUNTER_CODE}.goatcounter.com/count`;
+			s.async = true;
+			s.src = '//gc.zgo.at/count.js';
+			document.head.appendChild(s);
+			// GoatCounter auto-counts the initial pageview when the script loads.
+		} else if (typeof window?.goatcounter?.count === 'function') {
+			// SPA navigation to another public page.
+			window.goatcounter.count({ path: pathname });
+		}
+	});
 
 	const LANG_LABEL = { en: 'EN', ru: 'RU', es: 'ES', ka: 'ქარ' };
 
@@ -36,30 +60,6 @@
 	};
 
 	let meta = $derived(META[$lang] ?? META.en);
-
-	// ── Analytics (GoatCounter, public pages only) ──────────────────────────────
-	// Script is injected once on the first public page visit; subsequent SPA
-	// navigations to public routes call goatcounter.count() explicitly.
-	// Private routes (/new, /listing/*, /chat/*, /helper, ...) are never tracked.
-	let _gcLoaded = false;
-
-	$effect(() => {
-		const pathname = page.url.pathname;
-		if (!PUBLIC_GOATCOUNTER_CODE || !isAnalyticsRoute(pathname)) return;
-
-		if (!_gcLoaded) {
-			_gcLoaded = true;
-			const s = document.createElement('script');
-			s.dataset.goatcounter = `https://${PUBLIC_GOATCOUNTER_CODE}.goatcounter.com/count`;
-			s.async = true;
-			s.src = '//gc.zgo.at/count.js';
-			document.head.appendChild(s);
-			// GoatCounter auto-counts the initial pageview when the script loads.
-		} else if (typeof window?.goatcounter?.count === 'function') {
-			// SPA navigation to another public page.
-			window.goatcounter.count({ path: pathname });
-		}
-	});
 </script>
 
 <svelte:head>

@@ -49,6 +49,18 @@
 	let walletAddress  = $state('');
 	let currency       = $state('BTC');
 
+	function detectCurrency(addr) {
+		if (!addr || addr.length < 3) return null;
+		const a = addr.trim();
+		if (/^ltc1/i.test(a) || /^[LM]/.test(a)) return 'LTC';
+		if (/^bc1/i.test(a) || /^[13]/.test(a)) return 'BTC';
+		return null;
+	}
+	$effect(() => {
+		const detected = detectCurrency(walletAddress);
+		if (detected) currency = detected;
+	});
+
 	// UI state
 	let step           = $state(1); // 1=form 2=crisis 3=invoice 4=telegram
 	let loading        = $state(false);
@@ -103,6 +115,10 @@
 
 		try {
 			// 1. Проверить баланс → получить session token
+			// Re-detect currency at submit time to avoid race with $effect
+			const detectedOnSubmit = detectCurrency(walletAddress);
+			if (detectedOnSubmit) currency = detectedOnSubmit;
+
 			const verifyRes = await fetch('/api/wallet/register', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
@@ -327,19 +343,13 @@
 
 		<!-- Wallet -->
 		<div class="field">
-			<label>{t('new.wallet_label', {currency})}</label>
+			<label>{t('new.wallet_label')}</label>
 			<p class="hint">{t('new.wallet_hint')}</p>
-			<div class="wallet-row">
-				<input
-					type="text"
-					placeholder={t('new.wallet_ph', {currency})}
-					bind:value={walletAddress}
-				/>
-				<div class="currency-toggle">
-					<button class:active={currency === 'BTC'} onclick={() => currency = 'BTC'}>BTC</button>
-					<button class:active={currency === 'LTC'} onclick={() => currency = 'LTC'}>LTC</button>
-				</div>
-			</div>
+			<input
+				type="text"
+				placeholder={t('new.wallet_ph')}
+				bind:value={walletAddress}
+			/>
 		</div>
 
 		<div class="balance-warning">
@@ -433,7 +443,7 @@
 		</div>
 
 		<p class="fine">
-			<a class="tg-how" href="https://github.com/naroomer/naroom" target="_blank" rel="noopener noreferrer">
+			<a class="tg-how" href="https://github.com/naroom/naroom" target="_blank" rel="noopener noreferrer">
 				{t('new.tg_how')}
 			</a>
 		</p>

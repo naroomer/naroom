@@ -62,7 +62,8 @@ func (h *Handler) Respond(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Check balance covers (activeResponses + 1) * $1000
+		// Slot limit: $1000 balance = 2 simultaneous active responses.
+		// Each additional $1000 grants one more slot (3 slots at $2000, etc.).
 		var activeResponses int
 		h.DB.QueryRow(`
 			SELECT COUNT(*) FROM responses
@@ -73,8 +74,12 @@ func (h *Handler) Respond(w http.ResponseWriter, r *http.Request) {
 		h.DB.QueryRow(`SELECT min_required_usd FROM wallet_sessions WHERE wallet_hash = ?`,
 			counselorHash).Scan(&minRequired)
 
-		needed := float64((activeResponses + 1) * 1000)
-		if minRequired < needed {
+		// maxSlots = floor(minRequired / 1000) * 2, minimum 2 at $1000
+		maxSlots := int(minRequired/1000) * 2
+		if maxSlots < 2 {
+			maxSlots = 2
+		}
+		if activeResponses >= maxSlots {
 			writeError(w, 403, "need higher balance for more response slots")
 			return
 		}
