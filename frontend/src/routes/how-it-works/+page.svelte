@@ -22,7 +22,7 @@
 				name: 'Who are the peers?',
 				acceptedAnswer: {
 					'@type': 'Answer',
-					text: 'People in recovery themselves, or those with lived experience helping others. They are anonymous too — verified only by their wallet balance and track record on the platform.'
+					text: 'People in recovery themselves, or those with lived experience helping others. They are anonymous too — verified only by their wallet balance and track record on the platform. The $15 session fee acts as a commitment and anti-spam filter, not payment for advice.'
 				}
 			},
 			{
@@ -30,7 +30,7 @@
 				name: 'What if a peer was unhelpful or behaved badly?',
 				acceptedAnswer: {
 					'@type': 'Answer',
-					text: 'Leave a thumbs-down rating after the session. Every peer\'s rating is visible to everyone — a low rating means they stop getting chosen. There is no strict moderation: the platform is anonymous and does not read chats.'
+					text: 'Leave a thumbs-down rating after the session. Every peer\'s rating is visible to everyone — a low rating means they stop getting chosen. Chats are private and not read by NA Room. Ratings and abuse reports help reduce bad behavior, but NA Room is not a medical or emergency service.'
 				}
 			},
 			{
@@ -46,7 +46,15 @@
 				name: 'How do I know this works as described?',
 				acceptedAnswer: {
 					'@type': 'Answer',
-					text: 'The full source code is open and available at github.com/naroom — anyone can verify how encryption works, that messages are not stored, and that there are no hidden functions.'
+					text: 'The full source code is open and available at https://github.com/naroomer/naroom — anyone can verify how encryption works, that messages are not stored, and that there are no hidden functions.'
+				}
+			},
+			{
+				'@type': 'Question',
+				name: 'How do I return to my chat?',
+				acceptedAnswer: {
+					'@type': 'Answer',
+					text: 'Go to naroom.net/resume and connect the same wallet you used when the chat started. Your session will be restored as long as it has not expired. Alternatively, return to the board, find the listing, and reconnect using the same wallet.'
 				}
 			},
 		]
@@ -136,8 +144,8 @@
 				</tr>
 				<tr>
 					<td>{t('hiw.privacy_analytics')}</td>
-					<td class="no">{t('hiw.privacy_never')}</td>
-					<td class="dim">—</td>
+					<td class="partial">{t('hiw.privacy_anon_count')}</td>
+					<td class="dim">{t('hiw.privacy_aggregated')}</td>
 				</tr>
 				<tr>
 					<td>{t('hiw.privacy_wallet')}</td>
@@ -190,7 +198,11 @@
 		</div>
 		<div class="qa">
 			<div class="q">{t('hiw.q5')}</div>
-			<div class="a">{t('hiw.a5')} <a href="https://github.com/naroom" target="_blank" rel="noopener">github.com/naroom</a></div>
+			<div class="a">{t('hiw.a5')} <a href="https://github.com/naroomer/naroom" target="_blank" rel="noopener">github.com/naroomer/naroom</a></div>
+		</div>
+		<div class="qa">
+			<div class="q">{t('hiw.q6')}</div>
+			<div class="a">{t('hiw.a6')}</div>
 		</div>
 	</div>
 </div>

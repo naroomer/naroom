@@ -443,7 +443,7 @@
 		</div>
 
 		<p class="fine">
-			<a class="tg-how" href="https://github.com/naroom/naroom" target="_blank" rel="noopener noreferrer">
+			<a class="tg-how" href="https://github.com/naroomer/naroom" target="_blank" rel="noopener noreferrer">
 				{t('new.tg_how')}
 			</a>
 		</p>
