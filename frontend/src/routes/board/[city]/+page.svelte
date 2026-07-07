@@ -30,6 +30,11 @@
 	}
 </script>
 
+<svelte:head>
+	<link rel="canonical" href="https://naroom.net/board/{data.city}" />
+	<meta property="og:url" content="https://naroom.net/board/{data.city}" />
+</svelte:head>
+
 <div class="page">
 	<!-- Header -->
 	<header>

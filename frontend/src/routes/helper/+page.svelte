@@ -116,6 +116,10 @@
 	});
 </script>
 
+<svelte:head>
+	<meta name="robots" content="noindex, nofollow" />
+</svelte:head>
+
 <div class="page">
 	<header>
 		<a class="back" href="/board/tbilisi">{t('helper.back')}</a>

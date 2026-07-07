@@ -2,55 +2,61 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
 
   <url>
-    <loc>https://naroom.io/how-it-works</loc>
+    <loc>https://naroom.net/how-it-works</loc>
     <changefreq>monthly</changefreq>
     <priority>1.0</priority>
   </url>
 
   <url>
-    <loc>https://naroom.io/new</loc>
-    <changefreq>monthly</changefreq>
-    <priority>0.9</priority>
-  </url>
-
-  <url>
-    <loc>https://naroom.io/board/tbilisi</loc>
+    <loc>https://naroom.net/board/buenos_aires</loc>
     <changefreq>hourly</changefreq>
     <priority>0.8</priority>
   </url>
 
   <url>
-    <loc>https://naroom.io/board/batumi</loc>
+    <loc>https://naroom.net/board/sao_paulo</loc>
+    <changefreq>hourly</changefreq>
+    <priority>0.8</priority>
+  </url>
+
+  <url>
+    <loc>https://naroom.net/board/nha_trang</loc>
+    <changefreq>hourly</changefreq>
+    <priority>0.8</priority>
+  </url>
+
+  <url>
+    <loc>https://naroom.net/board/da_nang</loc>
+    <changefreq>hourly</changefreq>
+    <priority>0.8</priority>
+  </url>
+
+  <url>
+    <loc>https://naroom.net/board/tbilisi</loc>
+    <changefreq>hourly</changefreq>
+    <priority>0.8</priority>
+  </url>
+
+  <url>
+    <loc>https://naroom.net/board/batumi</loc>
     <changefreq>hourly</changefreq>
     <priority>0.7</priority>
   </url>
 
   <url>
-    <loc>https://naroom.io/board/almaty</loc>
+    <loc>https://naroom.net/board/almaty</loc>
     <changefreq>hourly</changefreq>
     <priority>0.7</priority>
   </url>
 
   <url>
-    <loc>https://naroom.io/board/yerevan</loc>
+    <loc>https://naroom.net/board/yerevan</loc>
     <changefreq>hourly</changefreq>
     <priority>0.7</priority>
   </url>
 
   <url>
-    <loc>https://naroom.io/board/moscow</loc>
-    <changefreq>hourly</changefreq>
-    <priority>0.7</priority>
-  </url>
-
-  <url>
-    <loc>https://naroom.io/board/nha_trang</loc>
-    <changefreq>hourly</changefreq>
-    <priority>0.7</priority>
-  </url>
-
-  <url>
-    <loc>https://naroom.io/board/da_nang</loc>
+    <loc>https://naroom.net/board/moscow</loc>
     <changefreq>hourly</changefreq>
     <priority>0.7</priority>
   </url>

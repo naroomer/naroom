@@ -10,7 +10,7 @@ NA Room connects people who need help (clients) with peers who have lived experi
 - End-to-end encrypted chat
 - Crypto wallet used only for identity verification (no funds collected from users beyond listing/chat fees)
 - Works on Tor (.onion address available)
-- Open source: github.com/naroom
+- Open source: https://github.com/naroomer/naroom
 
 ## What it is not
 
@@ -48,13 +48,26 @@ English, Russian, Spanish, Georgian
 
 ## Cities
 
-Tbilisi, Batumi, Almaty, Yerevan, Moscow, Nha Trang, Da Nang
+Buenos Aires, São Paulo, Nha Trang, Da Nang, Tbilisi, Batumi, Almaty, Yerevan, Moscow
 
-## Pages
+## Analytics
+
+Public informational pages (/how-it-works, /board/*) use privacy-respecting analytics (anonymous visit counts only, no personal profile, no cross-site tracking). Chat, payment, listing, wallet, and review flows have no analytics.
+
+## Public pages (indexed)
 
 - /how-it-works — full guide with role switcher (client / peer) and FAQ
-- /new — post a listing
-- /board/{city} — browse listings by city
+- /board/{city} — browse listings by city (replace {city} with a city slug above)
+
+## Private / non-indexed flows (not crawled)
+
+- /new — post a listing (requires wallet verification)
+- /helper — peer notification sign-up
+- /resume — return to an active chat session
+- /chat/{room_id} — end-to-end encrypted chat room
+- /listing/{id} — listing detail and accept flow
+- /invoice/{id} — payment invoice
+- /review/{id} — post-session rating
 
 ## Emergency
 

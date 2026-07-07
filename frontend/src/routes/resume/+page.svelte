@@ -72,6 +72,10 @@
 	}
 </script>
 
+<svelte:head>
+	<meta name="robots" content="noindex, nofollow" />
+</svelte:head>
+
 <div class="page">
 	<div class="card">
 		<a href="/board/tbilisi" class="back">{t('back_to_board')}</a>

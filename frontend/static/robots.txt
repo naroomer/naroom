@@ -1,5 +1,11 @@
 User-agent: *
 Disallow: /chat/
 Disallow: /listing/
+Disallow: /new
+Disallow: /helper
+Disallow: /resume
+Disallow: /review
+Disallow: /invoice
+Disallow: /api/
 
-Sitemap: https://naroom.io/sitemap.xml
+Sitemap: https://naroom.net/sitemap.xml

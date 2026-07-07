@@ -84,6 +84,8 @@
 </script>
 
 <svelte:head>
+	<link rel="canonical" href="https://naroom.net/how-it-works" />
+	<meta property="og:url" content="https://naroom.net/how-it-works" />
 	{@html `<script type="application/ld+json">${faqSchema}<\/script>`}
 </svelte:head>
 

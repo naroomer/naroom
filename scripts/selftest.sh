@@ -74,6 +74,15 @@ fi
 if ! $UNIT_ONLY && ! $E2E_ONLY; then
   info "[3/4] Frontend"
 
+  # Discovery file guard — fail fast if static files contain stale content
+  if bash "$REPO_ROOT/scripts/check_discovery_files.sh" "$FRONTEND_DIR/static" > /tmp/naroom-discovery.log 2>&1; then
+    pass "discovery files (robots/sitemap/llms)"
+  else
+    fail "discovery files (robots/sitemap/llms)"
+    cat /tmp/naroom-discovery.log | sed 's/^/    /'
+    FAIL=$((FAIL + 1))
+  fi
+
   if [ ! -d "$FRONTEND_DIR" ]; then
     fail "frontend directory not found: $FRONTEND_DIR"
     FAIL=$((FAIL + 1))
