@@ -1,4 +1,4 @@
-// 011_peer_left_expiry.js — peer_left room expires → listing permanently closed (LI-1)
+// 011_peer_left_expiry.js — peer_left room expires → listing reopens for second peer (new model: count=1 < 2)
 import { TestServer, sleep } from '../lib/server.js';
 import { ApiClient } from '../lib/http.js';
 import { newKeypair } from '../lib/crypto.js';
@@ -9,7 +9,7 @@ const CLIENT_WALLET = '1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf';
 const PEER_WALLET   = '1BoatSLRHtKNngkdXEeobR76b53LETtpyT';
 
 export async function run() {
-  console.log('\n=== 011: peer_left Room Expiry → Listing Permanently Closed (LI-1) ===');
+  console.log('\n=== 011: peer_left Room Expiry → Listing Reopens for Second Peer ===');
   const srv = new TestServer();
   const t = new Runner('011_peer_left_expiry');
 
@@ -62,17 +62,21 @@ export async function run() {
     });
 
     // Wait for TTL cleaner to pick it up (runs every TTL_CLEAN_INTERVAL seconds, default ~30s in dev)
-    // LI-1: paid chat room existed → listing must be permanently closed, never restored.
-    await t.run('TTL cleaner expires peer_left room → listing permanently closed (LI-1)', async () => {
+    // New model: first chat opens (count=1), peer_left expires → listing reopens (count < 2).
+    await t.run('TTL cleaner expires peer_left room → listing reopens (opened_chats_count=1 < 2)', async () => {
       // TTL_CLEAN_INTERVAL=5s in tests, so we should see it within 15s
       await pollUntil(async () => {
         const status = srv.db(`SELECT status FROM chat_rooms WHERE id='${roomId}'`);
         return status === 'expired' ? true : null;
       }, { timeout: 30000, interval: 2000, label: 'room expired by TTL cleaner' });
 
+      // New model: first paid chat expires → count=1 < 2 → listing reopens for second peer
       const r = await api.getListing(listingId);
-      if (r.body.status !== 'closed') {
-        throw new Error(`Listing status=${r.body.status}, expected closed — LI-1 violated`);
+      if (r.body.status !== 'active') {
+        throw new Error(`Listing status=${r.body.status}, expected active (reopened for second peer after first chat expiry)`);
+      }
+      if (r.body.opened_chats_count !== 1) {
+        throw new Error(`Expected opened_chats_count=1, got ${r.body.opened_chats_count}`);
       }
     });
 
@@ -86,10 +90,10 @@ export async function run() {
       if (parseInt(count, 10) > 0) throw new Error('review_token should NOT be issued for peer_left expiry');
     });
 
-    await t.run('listing NOT on board after peer_left expiry (LI-1)', async () => {
+    await t.run('listing IS on board after peer_left expiry (reopened for second peer)', async () => {
       const r = await api.getBoard('new_york');
       const found = r.body.find(l => l.id === listingId);
-      if (found) throw new Error('Listing returned to board after peer_left expiry — LI-1 violated');
+      if (!found) throw new Error('Listing not on board after peer_left expiry — should reopen for second peer (count=1 < 2)');
     });
 
   } finally {
