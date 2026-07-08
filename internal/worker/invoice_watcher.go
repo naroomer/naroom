@@ -121,7 +121,7 @@ func (iw *InvoiceWatcher) watch(ctx context.Context) {
 		// Dev mode or SkipPayments: автоматически подтверждаем все pending invoices
 		if iw.DevMode || iw.SkipPayments {
 			iw.confirmInvoice(inv.id, inv.typ, "dev_txid_"+inv.id, 1000000,
-				inv.listingID.String, inv.responseID.String, inv.clientPubkey.String)
+				inv.listingID.String, inv.responseID.String, inv.clientPubkey.String, "")
 			continue
 		}
 
@@ -147,11 +147,12 @@ func (iw *InvoiceWatcher) watch(ctx context.Context) {
 				if !inv.paymentDetectedAt.Valid {
 					iw.DB.Exec(`UPDATE invoices SET payment_detected_at = ? WHERE id = ? AND payment_detected_at IS NULL`, now, inv.id)
 				}
-				if !iw.verifySenderAndBalance(inv.id, inv.typ, inv.currency, inv.payerAddress.String, senders, inv.priceAtCreation.Float64) {
+				senderHash, ok := iw.resolveSender(inv.id, inv.typ, inv.currency, inv.payerAddress.String, senders, inv.priceAtCreation.Float64)
+				if !ok {
 					continue
 				}
 				iw.confirmInvoice(inv.id, inv.typ, tx.TxID, amount,
-					inv.listingID.String, inv.responseID.String, inv.clientPubkey.String)
+					inv.listingID.String, inv.responseID.String, inv.clientPubkey.String, senderHash)
 			}
 		} else {
 			tx, amount, senders, err := iw.Blockcypher.FindPayment(inv.address, minRequired)
@@ -164,11 +165,12 @@ func (iw *InvoiceWatcher) watch(ctx context.Context) {
 				if !inv.paymentDetectedAt.Valid {
 					iw.DB.Exec(`UPDATE invoices SET payment_detected_at = ? WHERE id = ? AND payment_detected_at IS NULL`, now, inv.id)
 				}
-				if !iw.verifySenderAndBalance(inv.id, inv.typ, inv.currency, inv.payerAddress.String, senders, inv.priceAtCreation.Float64) {
+				senderHash, ok := iw.resolveSender(inv.id, inv.typ, inv.currency, inv.payerAddress.String, senders, inv.priceAtCreation.Float64)
+				if !ok {
 					continue
 				}
 				iw.confirmInvoice(inv.id, inv.typ, tx.Hash, amount,
-					inv.listingID.String, inv.responseID.String, inv.clientPubkey.String)
+					inv.listingID.String, inv.responseID.String, inv.clientPubkey.String, senderHash)
 			}
 		}
 	}
@@ -185,7 +187,7 @@ func satoshisFromCryptoStr(s string) int64 {
 }
 
 func (iw *InvoiceWatcher) confirmInvoice(invoiceID, typ, txid string, amount int64,
-	listingID, responseID, clientPubkey string) {
+	listingID, responseID, clientPubkey string, senderHash string) {
 
 	// Fetch expected amount and currency before confirming.
 	var amountCrypto, currency string
@@ -245,14 +247,27 @@ func (iw *InvoiceWatcher) confirmInvoice(invoiceID, typ, txid string, amount int
 			if ttl == 0 {
 				ttl = 86400
 			}
-			res, err := tx.Exec(`
-				UPDATE listings
-				SET status = 'active', visible_until = ?, payment_txid = ?,
-				    first_activated_at = COALESCE(first_activated_at, ?)
-				WHERE id = ? AND status = 'pending'
-			`, now+ttl, txid, now, listingID)
-			if err != nil {
-				log.Printf("invoice_watcher: activate listing %s: %v", listingID, err)
+			var listingErr error
+			if senderHash != "" {
+				res, err = tx.Exec(`
+					UPDATE listings
+					SET status = 'active', visible_until = ?, payment_txid = ?,
+					    first_activated_at = COALESCE(first_activated_at, ?),
+					    wallet_hash = ?
+					WHERE id = ? AND status = 'pending'
+				`, now+ttl, txid, now, senderHash, listingID)
+				listingErr = err
+			} else {
+				res, err = tx.Exec(`
+					UPDATE listings
+					SET status = 'active', visible_until = ?, payment_txid = ?,
+					    first_activated_at = COALESCE(first_activated_at, ?)
+					WHERE id = ? AND status = 'pending'
+				`, now+ttl, txid, now, listingID)
+				listingErr = err
+			}
+			if listingErr != nil {
+				log.Printf("invoice_watcher: activate listing %s: %v", listingID, listingErr)
 				return
 			}
 			if n, _ := res.RowsAffected(); n > 0 {
@@ -314,6 +329,14 @@ func (iw *InvoiceWatcher) confirmInvoice(invoiceID, typ, txid string, amount int
 			return
 		}
 
+		// Actual payment sender is the authority for who the counselor is.
+		// If senderHash is set and differs from session wallet, rebind.
+		counselorHashForRoom := counselorHash
+		if senderHash != "" && senderHash != counselorHash {
+			log.Printf("invoice_watcher: chat invoice %s: rebinding counselor from session wallet to payment sender", invoiceID)
+			counselorHashForRoom = senderHash
+		}
+
 		// Получить хеш клиента и счётчик открытых чатов из listing
 		var clientHash string
 		var openedChatsCount int
@@ -335,9 +358,9 @@ func (iw *InvoiceWatcher) confirmInvoice(invoiceID, typ, txid string, amount int
 		tx.QueryRow(`
 			SELECT COUNT(*) FROM chat_rooms
 			WHERE counselor_hash = ? AND status IN ('active', 'peer_left', 'client_left')
-		`, counselorHash).Scan(&peerActiveChatCount)
+		`, counselorHashForRoom).Scan(&peerActiveChatCount)
 		var peerMinRequired float64
-		tx.QueryRow(`SELECT COALESCE(min_required_usd, 1000) FROM wallet_sessions WHERE wallet_hash = ?`, counselorHash).Scan(&peerMinRequired)
+		tx.QueryRow(`SELECT COALESCE(min_required_usd, 1000) FROM wallet_sessions WHERE wallet_hash = ?`, counselorHashForRoom).Scan(&peerMinRequired)
 		peerMaxSlots := int(peerMinRequired/1000) * 2
 		if peerMaxSlots < 2 {
 			peerMaxSlots = 2
@@ -359,7 +382,7 @@ func (iw *InvoiceWatcher) confirmInvoice(invoiceID, typ, txid string, amount int
 			                        client_pubkey, counselor_pubkey, started_at, expires_at, status, listing_counted)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 1)
 		`, roomID, listingIDFromResp, responseID,
-			clientHash, counselorHash,
+			clientHash, counselorHashForRoom,
 			clientPubkey, counselorPubkey,
 			now, now+chatTTL)
 		if err != nil {
@@ -409,53 +432,52 @@ func (iw *InvoiceWatcher) confirmInvoice(invoiceID, typ, txid string, amount int
 	}
 }
 
-// verifySenderAndBalance checks that the payment came from the registered wallet address
-// and that the sender's balance still meets the minimum threshold (with $10 buffer for price swings).
+// resolveSender determines the actual payer for an invoice and checks their balance.
 //
-// BTC/LTC transactions can have multiple inputs from different addresses.
-// We accept the payment if ANY of the senders matches the registered wallet hash.
+// The actual blockchain sender IS the authority — no rejection for "wrong sender".
+// If the registered wallet is among the senders it is preferred (no rebind).
+// If not, the first sender is used as the actual payer.
 //
-// Error handling:
-//   - Confirmed mismatch (wrong sender, wrong hash, no senders): reject invoice
-//   - API error (balance check, price feed): leave invoice pending — will retry next cycle
-//   - Empty payerAddress: reject — indicates a data integrity problem
-// verifySenderAndBalance checks sender identity and post-payment balance.
+// Returns (actualSenderHash, true) on success.
+// Returns ("", false) if the invoice should be rejected (no senders, bad balance, API error).
+//
+// In DevMode: returns (payerAddress, true) — use registered hash, no rebind.
+//
 // priceAtCreation: USD/coin rate stored when the invoice was created (0 if unknown).
 // At confirmation we use the more user-favorable of creation price and current price,
 // so a price drop between creation and confirmation does not incorrectly fail the gate.
-func (iw *InvoiceWatcher) verifySenderAndBalance(invoiceID, typ, currency, payerAddress string, senders []string, priceAtCreation float64) bool {
-	// DevMode: skip all verification, confirm everything
+func (iw *InvoiceWatcher) resolveSender(invoiceID, typ, currency, payerAddress string, senders []string, priceAtCreation float64) (string, bool) {
+	// DevMode: skip all verification, use registered hash
 	if iw.DevMode {
-		return true
+		return payerAddress, true
 	}
 
 	// Empty payerAddress means the invoice was created without a registered wallet — data integrity error
 	if payerAddress == "" {
 		log.Printf("invoice_watcher: empty payer_address for invoice %s — rejecting", invoiceID)
 		iw.DB.Exec(`UPDATE invoices SET status = 'rejected' WHERE id = ?`, invoiceID)
-		return false
+		return "", false
 	}
 
 	// No senders in transaction inputs — unreadable tx, reject
 	if len(senders) == 0 {
 		log.Printf("invoice_watcher: no sender addresses in tx for invoice %s — rejecting", invoiceID)
 		iw.DB.Exec(`UPDATE invoices SET status = 'rejected' WHERE id = ?`, invoiceID)
-		return false
+		return "", false
 	}
 
-	// Verify at least one sender matches the registered wallet — compare hashes, never plain addresses
-	var matchedSender string
+	// Determine actual sender: prefer registered wallet if present among senders.
+	// Otherwise use the first sender as the actual payer (rebind).
+	actualSender := senders[0]
 	for _, s := range senders {
 		if ncrypto.WalletHash(iw.HashKey, s) == payerAddress {
-			matchedSender = s
+			// Registered wallet found — prefer it, no rebind needed
+			actualSender = s
 			break
 		}
 	}
-	if matchedSender == "" {
-		log.Printf("invoice_watcher: no sender hash matches payer for invoice %s — rejecting", invoiceID)
-		iw.DB.Exec(`UPDATE invoices SET status = 'rejected' WHERE id = ?`, invoiceID)
-		return false
-	}
+
+	actualSenderHash := ncrypto.WalletHash(iw.HashKey, actualSender)
 
 	// Balance check: sender must still hold the required minimum AFTER paying the invoice.
 	//
@@ -466,7 +488,7 @@ func (iw *InvoiceWatcher) verifySenderAndBalance(invoiceID, typ, currency, payer
 	// The lower post-payment threshold is by design — we do not penalize users for the platform fee itself.
 	// The $10 buffer covers price volatility in the ~30s poll interval. This is a heuristic, not a hard guarantee.
 	if iw.Prices == nil {
-		return true // no price client configured, skip balance check
+		return actualSenderHash, true // no price client configured, skip balance check
 	}
 
 	invoiceCost := 5.0
@@ -479,15 +501,15 @@ func (iw *InvoiceWatcher) verifySenderAndBalance(invoiceID, typ, currency, payer
 
 	var balanceUSD float64
 	if currency == "BTC" {
-		sat, err := iw.Mempool.GetBalance(matchedSender)
+		sat, err := iw.Mempool.GetBalance(actualSender)
 		if err != nil {
 			log.Printf("invoice_watcher: BTC balance check failed for invoice %s: %v — leaving pending", invoiceID, err)
-			return false // leave pending, retry next cycle
+			return "", false // leave pending, retry next cycle
 		}
 		currentPrice, err := iw.Prices.BTCPrice()
 		if err != nil {
 			log.Printf("invoice_watcher: BTC price unavailable for invoice %s: %v — leaving pending", invoiceID, err)
-			return false // leave pending, retry next cycle
+			return "", false // leave pending, retry next cycle
 		}
 		// Use the more favorable price (higher = more USD per coin = higher apparent balance).
 		// This protects users from price drops between invoice creation and confirmation.
@@ -497,15 +519,15 @@ func (iw *InvoiceWatcher) verifySenderAndBalance(invoiceID, typ, currency, payer
 		}
 		balanceUSD = float64(sat) / 1e8 * price
 	} else {
-		lit, err := iw.Blockcypher.GetBalance(matchedSender)
+		lit, err := iw.Blockcypher.GetBalance(actualSender)
 		if err != nil {
 			log.Printf("invoice_watcher: LTC balance check failed for invoice %s: %v — leaving pending", invoiceID, err)
-			return false // leave pending, retry next cycle
+			return "", false // leave pending, retry next cycle
 		}
 		currentPrice, err := iw.Prices.LTCPrice()
 		if err != nil {
 			log.Printf("invoice_watcher: LTC price unavailable for invoice %s: %v — leaving pending", invoiceID, err)
-			return false // leave pending, retry next cycle
+			return "", false // leave pending, retry next cycle
 		}
 		price := currentPrice
 		if priceAtCreation > price {
@@ -518,9 +540,9 @@ func (iw *InvoiceWatcher) verifySenderAndBalance(invoiceID, typ, currency, payer
 		log.Printf("invoice_watcher: insufficient balance for invoice %s: sender has $%.2f, need $%.2f — rejecting",
 			invoiceID, balanceUSD, minUSD)
 		iw.DB.Exec(`UPDATE invoices SET status = 'rejected' WHERE id = ?`, invoiceID)
-		return false
+		return "", false
 	}
 
-	log.Printf("invoice_watcher: sender verified for invoice %s: balance $%.2f ≥ $%.2f", invoiceID, balanceUSD, minUSD)
-	return true
+	log.Printf("invoice_watcher: sender resolved for invoice %s: balance $%.2f ≥ $%.2f", invoiceID, balanceUSD, minUSD)
+	return actualSenderHash, true
 }

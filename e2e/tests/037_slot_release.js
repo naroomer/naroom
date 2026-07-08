@@ -266,6 +266,49 @@ export async function run() {
       if (closedCount < 1) throw new Error(`T7: expected >=1 closed response, got ${closedCount}`);
     });
 
+    // T7b (Test C): TTL cleaner runs twice on expired peer_left room → opened_chats_count stays 1
+    // The cleaner READS opened_chats_count to decide listing status but NEVER increments it.
+    // A second pass must leave the count unchanged.
+    await t.run('T7b: TTL cleaner runs twice on expired peer_left room → opened_chats_count stays 1', async () => {
+      const now7b = Math.floor(Date.now() / 1000);
+      const listId7b = `lst_t7b_${now7b}`;
+      const rspId7b  = `rsp_t7b_${now7b}`;
+      const roomId7b = `room_t7b_${now7b}`;
+
+      // Listing with opened_chats_count=1 (one paid chat already created), status='matched'
+      srv.db(
+        `INSERT INTO listings (id, city, dependency_type, help_type, urgency, languages, wallet_hash, visible_until, created_at, status, is_sample, opened_chats_count) ` +
+        `VALUES ('${listId7b}', 'tbilisi', 'alcohol', 'crisis', 'urgent', '["en"]', 'hash_t7b', ${now7b+3600}, ${now7b}, 'matched', 0, 1)`
+      );
+      // Accepted response linked to this listing
+      srv.db(
+        `INSERT INTO responses (id, listing_id, counselor_hash, counselor_pubkey, status, created_at) ` +
+        `VALUES ('${rspId7b}', '${listId7b}', 'counselor_hash_t7b', 'ppub_t7b', 'accepted', ${now7b - 100000})`
+      );
+      // peer_left room that already expired (peer_left_at 30h ago — past the 24h grace)
+      srv.db(
+        `INSERT INTO chat_rooms (id, listing_id, response_id, client_hash, counselor_hash, client_pubkey, counselor_pubkey, status, started_at, expires_at, peer_left_at) ` +
+        `VALUES ('${roomId7b}', '${listId7b}', '${rspId7b}', 'client_hash_t7b', 'counselor_hash_t7b', 'cpub_t7b', 'ppub_t7b', 'peer_left', ${now7b - 100000}, ${now7b - 1}, ${now7b - 110000})`
+      );
+
+      // Wait for first TTL cleaner pass (5s interval, wait 7s)
+      await sleep(7000);
+
+      // Listing must reopen (count=1 < 2) and room must expire
+      const listStatus = srv.db(`SELECT status FROM listings WHERE id='${listId7b}'`);
+      if (listStatus !== 'active') throw new Error(`T7b first pass: expected listing=active, got ${listStatus}`);
+
+      const count1 = parseInt(srv.db(`SELECT COALESCE(opened_chats_count,0) FROM listings WHERE id='${listId7b}'`), 10);
+      if (count1 !== 1) throw new Error(`T7b first pass: expected opened_chats_count=1, got ${count1}`);
+
+      // Wait for second TTL cleaner pass
+      await sleep(7000);
+
+      // opened_chats_count must STILL be 1 — cleaner never increments it
+      const count2 = parseInt(srv.db(`SELECT COALESCE(opened_chats_count,0) FROM listings WHERE id='${listId7b}'`), 10);
+      if (count2 !== 1) throw new Error(`T7b second pass: expected opened_chats_count still=1, got ${count2} (double-count bug!)`);
+    });
+
     // T8: peer_left room (NOT expired/closed) does NOT trigger step 2a — slot stays occupied
     await t.run('T8: peer_left room keeps response accepted (slot not freed until room expires)', async () => {
       const PEER_T8   = '1LpjkZMMq9AJJecbZ6WBfevYvFGj4kwmFz';

@@ -85,6 +85,87 @@ func openTestDB(t *testing.T) *sql.DB {
 	return db
 }
 
+// openTestDBFull creates a temporary SQLite database with the full schema needed
+// for chat-related confirmInvoice tests (invoices, listings, responses, chat_rooms, wallet_sessions).
+func openTestDBFull(t *testing.T) *sql.DB {
+	t.Helper()
+	f, err := os.CreateTemp("", "naroom-iw-full-test-*.db")
+	if err != nil {
+		t.Fatalf("create temp db: %v", err)
+	}
+	name := f.Name()
+	f.Close()
+	t.Cleanup(func() { os.Remove(name) })
+
+	db, err := sql.Open("sqlite", name)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { db.Close() })
+
+	_, err = db.Exec(`
+		CREATE TABLE invoices (
+			id                  TEXT PRIMARY KEY,
+			type                TEXT NOT NULL,
+			address             TEXT NOT NULL DEFAULT '',
+			amount_usd          REAL NOT NULL DEFAULT 0,
+			amount_crypto       TEXT NOT NULL DEFAULT '0',
+			currency            TEXT NOT NULL,
+			payer_address       TEXT,
+			txid                TEXT,
+			status              TEXT NOT NULL DEFAULT 'pending',
+			listing_id          TEXT,
+			response_id         TEXT,
+			client_pubkey       TEXT,
+			chat_room_id        TEXT,
+			payment_detected_at INTEGER,
+			price_at_creation   REAL,
+			created_at          INTEGER NOT NULL
+		);
+		CREATE TABLE listings (
+			id                 TEXT PRIMARY KEY,
+			city               TEXT NOT NULL DEFAULT 'tbilisi',
+			dependency_type    TEXT NOT NULL DEFAULT 'alcohol',
+			help_type          TEXT NOT NULL DEFAULT 'crisis',
+			urgency            TEXT NOT NULL DEFAULT 'urgent',
+			languages          TEXT NOT NULL DEFAULT 'en',
+			wallet_hash        TEXT NOT NULL DEFAULT 'test-hash',
+			visible_until      INTEGER NOT NULL DEFAULT 0,
+			created_at         INTEGER NOT NULL DEFAULT 0,
+			status             TEXT NOT NULL DEFAULT 'pending',
+			opened_chats_count INTEGER NOT NULL DEFAULT 0
+		);
+		CREATE TABLE responses (
+			id               TEXT PRIMARY KEY,
+			listing_id       TEXT NOT NULL,
+			counselor_hash   TEXT NOT NULL,
+			counselor_pubkey TEXT NOT NULL DEFAULT ''
+		);
+		CREATE TABLE chat_rooms (
+			id               TEXT PRIMARY KEY,
+			listing_id       TEXT NOT NULL,
+			response_id      TEXT NOT NULL,
+			client_hash      TEXT NOT NULL,
+			counselor_hash   TEXT NOT NULL,
+			client_pubkey    TEXT NOT NULL DEFAULT '',
+			counselor_pubkey TEXT NOT NULL DEFAULT '',
+			started_at       INTEGER NOT NULL DEFAULT 0,
+			expires_at       INTEGER NOT NULL DEFAULT 0,
+			status           TEXT NOT NULL DEFAULT 'active',
+			listing_counted  INTEGER NOT NULL DEFAULT 0
+		);
+		CREATE TABLE wallet_sessions (
+			wallet_hash      TEXT PRIMARY KEY,
+			min_required_usd REAL
+		);
+	`)
+	if err != nil {
+		t.Fatalf("create full schema: %v", err)
+	}
+	return db
+}
+
 // insertInvoice inserts a minimal invoice row for testing.
 func insertInvoice(t *testing.T, db *sql.DB, id, currency, payerAddress, status string) {
 	t.Helper()
@@ -148,7 +229,7 @@ func newEmptyTxServer(t *testing.T) *httptest.Server {
 
 const testHashKey = "test-hash-key-for-invoice-watcher"
 
-// ── verifySenderAndBalance tests (DevMode=false) ─────────────────────────────
+// ── resolveSender tests (DevMode=false) ──────────────────────────────────────
 
 // IN-3: Empty payer_address → invoice immediately rejected, no blockchain call.
 func TestVerify_EmptyPayerAddress(t *testing.T) {
@@ -159,9 +240,12 @@ func TestVerify_EmptyPayerAddress(t *testing.T) {
 		DB: db, HashKey: []byte(testHashKey), DevMode: false,
 	}
 
-	got := iw.verifySenderAndBalance("inv-empty-payer", "listing", "BTC", "", []string{"some-addr"}, 0)
-	if got {
-		t.Fatal("expected false for empty payer_address")
+	got, ok := iw.resolveSender("inv-empty-payer", "listing", "BTC", "", []string{"some-addr"}, 0)
+	if ok {
+		t.Fatal("expected ok=false for empty payer_address")
+	}
+	if got != "" {
+		t.Fatalf("expected empty hash on failure, got %q", got)
 	}
 	if s := invoiceStatus(t, db, "inv-empty-payer"); s != "rejected" {
 		t.Fatalf("expected status=rejected, got %q", s)
@@ -179,36 +263,79 @@ func TestVerify_NoSenders(t *testing.T) {
 		DB: db, HashKey: key, DevMode: false,
 	}
 
-	got := iw.verifySenderAndBalance("inv-no-senders", "listing", "BTC", payerHash, []string{}, 0)
-	if got {
-		t.Fatal("expected false for empty senders list")
+	got, ok := iw.resolveSender("inv-no-senders", "listing", "BTC", payerHash, []string{}, 0)
+	if ok {
+		t.Fatal("expected ok=false for empty senders list")
+	}
+	if got != "" {
+		t.Fatalf("expected empty hash on failure, got %q", got)
 	}
 	if s := invoiceStatus(t, db, "inv-no-senders"); s != "rejected" {
 		t.Fatalf("expected status=rejected, got %q", s)
 	}
 }
 
-// IN-3: Sender hash does not match registered wallet → invoice rejected.
-func TestVerify_WrongWallet(t *testing.T) {
+// TestResolve_DifferentSender_Accepted: payment from unregistered wallet B
+// → accepted, returns hash(B).
+func TestResolve_DifferentSender_Accepted(t *testing.T) {
+	mempoolSrv := newMempoolServer(t, 10_000_000_000) // ample balance
 	db := openTestDB(t)
 	key := []byte(testHashKey)
 	payerHash := ncrypto.WalletHash(key, "addr-A")
-	insertInvoice(t, db, "inv-wrong-wallet", "BTC", payerHash, "pending")
+	insertInvoice(t, db, "inv-rebind", "BTC", payerHash, "pending")
 
 	iw := &InvoiceWatcher{
-		DB: db, HashKey: key, DevMode: false,
+		DB:      db,
+		HashKey: key,
+		Mempool: ncrypto.NewMempoolClient(mempoolSrv.URL),
+		Prices:  &mockPrices{btc: 50_000},
+		DevMode: false,
 	}
 
-	got := iw.verifySenderAndBalance("inv-wrong-wallet", "listing", "BTC", payerHash, []string{"addr-B"}, 0)
-	if got {
-		t.Fatal("expected false: sender addr-B does not match registered addr-A")
+	expectedHash := ncrypto.WalletHash(key, "addr-B")
+	got, ok := iw.resolveSender("inv-rebind", "listing", "BTC", payerHash,
+		[]string{"addr-B"}, 50_000)
+	if !ok {
+		t.Fatal("expected ok=true: different sender with good balance should be accepted")
 	}
-	if s := invoiceStatus(t, db, "inv-wrong-wallet"); s != "rejected" {
-		t.Fatalf("expected status=rejected, got %q", s)
+	if got != expectedHash {
+		t.Fatalf("expected hash(addr-B)=%q, got %q", expectedHash, got)
+	}
+	// Invoice must NOT be rejected
+	if s := invoiceStatus(t, db, "inv-rebind"); s == "rejected" {
+		t.Fatal("invoice was rejected for different sender — should be accepted under new model")
 	}
 }
 
-// IN-3: Multi-input tx — only one of multiple senders matches → accepted.
+// TestResolve_RegisteredWalletPreferred: when registered wallet is among multiple senders,
+// prefer it (return registered hash, no rebind).
+func TestResolve_RegisteredWalletPreferred(t *testing.T) {
+	mempoolSrv := newMempoolServer(t, 10_000_000_000) // ample balance
+	db := openTestDB(t)
+	key := []byte(testHashKey)
+	payerHash := ncrypto.WalletHash(key, "addr-A") // registered wallet
+	insertInvoice(t, db, "inv-prefer-registered", "BTC", payerHash, "pending")
+
+	iw := &InvoiceWatcher{
+		DB:      db,
+		HashKey: key,
+		Mempool: ncrypto.NewMempoolClient(mempoolSrv.URL),
+		Prices:  &mockPrices{btc: 50_000},
+		DevMode: false,
+	}
+
+	// senders = [addr-B, addr-A] — addr-A is registered, should be preferred
+	got, ok := iw.resolveSender("inv-prefer-registered", "listing", "BTC", payerHash,
+		[]string{"addr-B", "addr-A"}, 50_000)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if got != payerHash {
+		t.Fatalf("expected registered wallet hash to be preferred, got %q", got)
+	}
+}
+
+// IN-3: Multi-input tx — only one of multiple senders matches registered wallet → accepted with registered hash.
 func TestVerify_MultiInputOneMatches(t *testing.T) {
 	mempoolSrv := newMempoolServer(t, 10_000_000_000) // 100 BTC — well above $135 threshold
 
@@ -225,19 +352,22 @@ func TestVerify_MultiInputOneMatches(t *testing.T) {
 		DevMode: false,
 	}
 
-	// addr-B first (no match), addr-A second (matches). Any match → accept.
-	got := iw.verifySenderAndBalance("inv-multi-input", "listing", "BTC", payerHash,
+	// addr-B first (no match), addr-A second (matches). Registered wallet preferred.
+	got, ok := iw.resolveSender("inv-multi-input", "listing", "BTC", payerHash,
 		[]string{"addr-B", "addr-A"}, 50_000)
-	if !got {
-		t.Fatal("expected true: addr-A is a valid registered sender")
+	if !ok {
+		t.Fatal("expected ok=true: addr-A is a valid registered sender")
 	}
-	// verifySenderAndBalance returns true without setting 'confirmed' — that is confirmInvoice's job.
+	if got != payerHash {
+		t.Fatalf("expected registered wallet hash %q, got %q", payerHash, got)
+	}
+	// resolveSender returns hash without confirming — status stays pending.
 	if s := invoiceStatus(t, db, "inv-multi-input"); s != "pending" {
-		t.Fatalf("expected status=pending after successful verify, got %q", s)
+		t.Fatalf("expected status=pending after successful resolve, got %q", s)
 	}
 }
 
-// IN-5, IN-6: Balance API returns 503 → false returned, invoice stays 'pending' (not 'rejected').
+// IN-5, IN-6: Balance API returns 503 → ("", false) returned, invoice stays 'pending' (not 'rejected').
 // API outage must not permanently fail a payment that was already found on-chain.
 func TestVerify_APIError_LeavesPending(t *testing.T) {
 	errSrv := newErrorServer(t)
@@ -255,10 +385,13 @@ func TestVerify_APIError_LeavesPending(t *testing.T) {
 		DevMode: false,
 	}
 
-	got := iw.verifySenderAndBalance("inv-api-error", "listing", "BTC", payerHash,
+	got, ok := iw.resolveSender("inv-api-error", "listing", "BTC", payerHash,
 		[]string{"addr-A"}, 50_000)
-	if got {
-		t.Fatal("expected false: API error should not confirm the invoice")
+	if ok {
+		t.Fatal("expected ok=false: API error should not confirm the invoice")
+	}
+	if got != "" {
+		t.Fatalf("expected empty hash on API error, got %q", got)
 	}
 	// MUST be 'pending', not 'rejected'. Rejected is permanent; pending allows retry.
 	if s := invoiceStatus(t, db, "inv-api-error"); s != "pending" {
@@ -304,7 +437,7 @@ func TestDoubleConfirmGuard(t *testing.T) {
 	}
 
 	// Simulate a second watcher tick trying to confirm the same invoice.
-	iw.confirmInvoice("inv-dupe", "listing", "duplicate-txid", 0, "list-1", "", "")
+	iw.confirmInvoice("inv-dupe", "listing", "duplicate-txid", 0, "list-1", "", "", "")
 
 	// 1. txid must not be overwritten.
 	var txid sql.NullString
@@ -335,10 +468,11 @@ func TestDoubleConfirmGuard(t *testing.T) {
 // ── IN-5: Balance math threshold tests ───────────────────────────────────────
 //
 // Formula: minUSD = minHold - invoiceCost - 10
-//   listing: 150 - 5  - 10 = $135  (client must have at least $135 remaining)
-//   chat:    1000 - 15 - 10 = $975  (peer must have at least $975 remaining)
 //
-// Threshold is strict: balance < minUSD → rejected; balance >= minUSD → true (caller confirms).
+//	listing: 150 - 5  - 10 = $135  (client must have at least $135 remaining)
+//	chat:    1000 - 15 - 10 = $975  (peer must have at least $975 remaining)
+//
+// Threshold is strict: balance < minUSD → rejected; balance >= minUSD → ("hash", true).
 // Test price: $100,000/BTC. Satoshi conversions: $135 = 135000 sat, $134.999 = 134999 sat.
 
 // IN-5: listing invoice; sender balance exactly at threshold ($135) → passes.
@@ -361,14 +495,17 @@ func TestBalanceThreshold_ListingPassesAt135(t *testing.T) {
 		DevMode: false,
 	}
 
-	got := iw.verifySenderAndBalance("inv-balance-pass", "listing", "BTC", payerHash,
+	got, ok := iw.resolveSender("inv-balance-pass", "listing", "BTC", payerHash,
 		[]string{"addr-exact"}, btcPrice)
-	if !got {
-		t.Fatalf("IN-5 FAIL: expected true at exactly $135 (balance=minUSD), got false")
+	if !ok {
+		t.Fatalf("IN-5 FAIL: expected ok=true at exactly $135 (balance=minUSD), got false")
 	}
-	// verifySenderAndBalance returns true but does not confirm — status stays pending.
+	if got != payerHash {
+		t.Fatalf("expected hash of addr-exact (%q), got %q", payerHash, got)
+	}
+	// resolveSender returns hash but does not confirm — status stays pending.
 	if s := invoiceStatus(t, db, "inv-balance-pass"); s != "pending" {
-		t.Fatalf("unexpected status after verify-pass: %q", s)
+		t.Fatalf("unexpected status after resolve-pass: %q", s)
 	}
 }
 
@@ -392,10 +529,13 @@ func TestBalanceThreshold_ListingFailsAt134(t *testing.T) {
 		DevMode: false,
 	}
 
-	got := iw.verifySenderAndBalance("inv-balance-fail", "listing", "BTC", payerHash,
+	got, ok := iw.resolveSender("inv-balance-fail", "listing", "BTC", payerHash,
 		[]string{"addr-low"}, btcPrice)
-	if got {
-		t.Fatalf("IN-5 FAIL: expected false at $134.999 (1 sat below $135 threshold), got true")
+	if ok {
+		t.Fatalf("IN-5 FAIL: expected ok=false at $134.999 (1 sat below $135 threshold), got true")
+	}
+	if got != "" {
+		t.Fatalf("expected empty hash on failure, got %q", got)
 	}
 	if s := invoiceStatus(t, db, "inv-balance-fail"); s != "rejected" {
 		t.Fatalf("IN-5 FAIL: expected status=rejected, got %q", s)
@@ -431,10 +571,13 @@ func TestBalanceThreshold_ChatPassesAt975(t *testing.T) {
 		DevMode: false,
 	}
 
-	got := iw.verifySenderAndBalance("inv-chat-pass", "chat", "BTC", payerHash,
+	got, ok := iw.resolveSender("inv-chat-pass", "chat", "BTC", payerHash,
 		[]string{"peer-addr-exact"}, btcPrice)
-	if !got {
-		t.Fatalf("IN-5 FAIL: expected true at exactly $975 (chat threshold), got false")
+	if !ok {
+		t.Fatalf("IN-5 FAIL: expected ok=true at exactly $975 (chat threshold), got false")
+	}
+	if got != payerHash {
+		t.Fatalf("expected hash of peer-addr-exact (%q), got %q", payerHash, got)
 	}
 }
 
@@ -466,27 +609,63 @@ func TestBalanceThreshold_ChatFailsAt974(t *testing.T) {
 		DevMode: false,
 	}
 
-	got := iw.verifySenderAndBalance("inv-chat-fail", "chat", "BTC", payerHash,
+	got, ok := iw.resolveSender("inv-chat-fail", "chat", "BTC", payerHash,
 		[]string{"peer-addr-low"}, btcPrice)
-	if got {
-		t.Fatalf("IN-5 FAIL: expected false at $974.999 (1 sat below $975 chat threshold), got true")
+	if ok {
+		t.Fatalf("IN-5 FAIL: expected ok=false at $974.999 (1 sat below $975 chat threshold), got true")
+	}
+	if got != "" {
+		t.Fatalf("expected empty hash on failure, got %q", got)
 	}
 	if s := invoiceStatus(t, db, "inv-chat-fail"); s != "rejected" {
 		t.Fatalf("IN-5 FAIL: expected status=rejected, got %q", s)
 	}
 }
 
+// TestResolve_DifferentSender_InsufficientBalance: payment from unregistered wallet B
+// with insufficient balance → rejected.
+func TestResolve_DifferentSender_InsufficientBalance(t *testing.T) {
+	const btcPrice = 100_000.0
+	const sat134_999 = int64(134_999) // $134.999 — below $135 listing threshold
+	mempoolSrv := newMempoolServer(t, sat134_999)
+	db := openTestDB(t)
+	key := []byte(testHashKey)
+	payerHash := ncrypto.WalletHash(key, "addr-A")
+	insertInvoice(t, db, "inv-rebind-lowbal", "BTC", payerHash, "pending")
+
+	iw := &InvoiceWatcher{
+		DB:      db,
+		HashKey: key,
+		Mempool: ncrypto.NewMempoolClient(mempoolSrv.URL),
+		Prices:  &mockPrices{btc: btcPrice},
+		DevMode: false,
+	}
+
+	got, ok := iw.resolveSender("inv-rebind-lowbal", "listing", "BTC", payerHash,
+		[]string{"addr-B"}, btcPrice)
+	if ok {
+		t.Fatalf("expected ok=false: addr-B has insufficient balance, got hash=%q", got)
+	}
+	if got != "" {
+		t.Fatalf("expected empty hash on failure, got %q", got)
+	}
+	if s := invoiceStatus(t, db, "inv-rebind-lowbal"); s != "rejected" {
+		t.Fatalf("expected status=rejected for insufficient balance, got %q", s)
+	}
+}
+
 // ── IN-6: Grace-window expiry tests ──────────────────────────────────────────
 //
-// These tests exercise the expiry logic inside watch(), not verifySenderAndBalance.
+// These tests exercise the expiry logic inside watch(), not resolveSender.
 // watch() applies the deadline BEFORE calling any blockchain API.
 //
 // Deadline rules (from invoice_watcher.go):
-//   expiryDeadline = created_at + 3600           (1-hour normal TTL)
-//   if payment_detected_at valid:
-//       grace = payment_detected_at + 86400       (24-hour grace from detection)
-//       expiryDeadline = max(expiryDeadline, grace)
-//   if now > expiryDeadline → mark 'expired' and continue
+//
+//	expiryDeadline = created_at + 3600           (1-hour normal TTL)
+//	if payment_detected_at valid:
+//	    grace = payment_detected_at + 86400       (24-hour grace from detection)
+//	    expiryDeadline = max(expiryDeadline, grace)
+//	if now > expiryDeadline → mark 'expired' and continue
 
 // IN-6a: Normal TTL has passed, but payment was detected and grace window is still open.
 // Invoice must NOT be expired.
@@ -566,5 +745,92 @@ func TestGraceWindow_ExpiredAfterGrace(t *testing.T) {
 
 	if s := invoiceStatus(t, db, "inv-grace-expired"); s != "expired" {
 		t.Fatalf("IN-6 FAIL: expected expired (grace window passed), got %q", s)
+	}
+}
+
+// ── Test D: Double-confirm chat — opened_chats_count idempotency ──────────────
+
+// TestDoubleConfirm_OpenedChatsCountNotDoubled (Test D):
+// Simulates a watcher retry — confirmInvoice called twice for the same chat invoice.
+// The first call creates the chat room and increments opened_chats_count.
+// The second call must be a no-op: opened_chats_count stays at 1.
+func TestDoubleConfirm_OpenedChatsCountNotDoubled(t *testing.T) {
+	db := openTestDBFull(t)
+	now := time.Now().Unix()
+
+	// Insert counselor wallet session
+	_, err := db.Exec(`INSERT INTO wallet_sessions (wallet_hash, min_required_usd) VALUES ('counselor-hash-1', 2000)`)
+	if err != nil {
+		t.Fatalf("insert wallet_session: %v", err)
+	}
+
+	// Insert listing for the client
+	_, err = db.Exec(`INSERT INTO listings (id, wallet_hash, status, visible_until, created_at, opened_chats_count)
+		VALUES ('list-chat-1', 'client-hash-1', 'active', ?, ?, 0)`, now+86400, now)
+	if err != nil {
+		t.Fatalf("insert listing: %v", err)
+	}
+
+	// Insert response from counselor
+	_, err = db.Exec(`INSERT INTO responses (id, listing_id, counselor_hash, counselor_pubkey)
+		VALUES ('resp-1', 'list-chat-1', 'counselor-hash-1', 'counselor-pubkey-1')`)
+	if err != nil {
+		t.Fatalf("insert response: %v", err)
+	}
+
+	// Insert pending chat invoice
+	_, err = db.Exec(`INSERT INTO invoices
+		(id, type, address, amount_crypto, currency, payer_address, status, response_id, client_pubkey, created_at)
+		VALUES ('inv-chat-double', 'chat', 'test-addr', '0', 'BTC', 'counselor-hash-1', 'pending', 'resp-1', 'client-pubkey-1', ?)`,
+		now)
+	if err != nil {
+		t.Fatalf("insert chat invoice: %v", err)
+	}
+
+	iw := &InvoiceWatcher{
+		DB:      db,
+		HashKey: []byte(testHashKey),
+		DevMode: true, // DevMode so amount check is skipped
+	}
+
+	// First call: should create chat room and increment opened_chats_count to 1
+	iw.confirmInvoice("inv-chat-double", "chat", "txid-1", 1000000, "", "resp-1", "client-pubkey-1", "")
+
+	// Verify first call worked: opened_chats_count should be 1
+	var count int
+	if err := db.QueryRow(`SELECT opened_chats_count FROM listings WHERE id = 'list-chat-1'`).Scan(&count); err != nil {
+		t.Fatalf("read opened_chats_count: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected opened_chats_count=1 after first confirm, got %d", count)
+	}
+
+	// Verify invoice is confirmed and has chat_room_id
+	var chatRoomID sql.NullString
+	if err := db.QueryRow(`SELECT chat_room_id FROM invoices WHERE id = 'inv-chat-double'`).Scan(&chatRoomID); err != nil {
+		t.Fatalf("read chat_room_id: %v", err)
+	}
+	if !chatRoomID.Valid || chatRoomID.String == "" {
+		t.Fatal("expected chat_room_id to be set after first confirm")
+	}
+
+	// Second call: invoice is now 'confirmed', must be a no-op
+	iw.confirmInvoice("inv-chat-double", "chat", "txid-2", 1000000, "", "resp-1", "client-pubkey-1", "")
+
+	// opened_chats_count must still be 1 — not doubled
+	if err := db.QueryRow(`SELECT opened_chats_count FROM listings WHERE id = 'list-chat-1'`).Scan(&count); err != nil {
+		t.Fatalf("read opened_chats_count after second confirm: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("Test D FAIL: opened_chats_count doubled to %d after duplicate confirmInvoice", count)
+	}
+
+	// chat_rooms must have exactly one row for this invoice
+	var roomCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM chat_rooms WHERE response_id = 'resp-1'`).Scan(&roomCount); err != nil {
+		t.Fatalf("count chat_rooms: %v", err)
+	}
+	if roomCount != 1 {
+		t.Fatalf("Test D FAIL: expected 1 chat room, got %d", roomCount)
 	}
 }

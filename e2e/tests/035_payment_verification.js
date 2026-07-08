@@ -11,7 +11,7 @@
 // T3: Underpayment (60% of invoice) → listing stays pending, not active
 // T4: Correct payment + correct sender + balance passes → listing activates OR
 //     stays pending due to missing price feed (documented — see note below)
-// T5: Payment from wrong sender → invoice rejected, listing NOT activated
+// T5: Payment from different wallet (sufficient balance) → invoice confirmed, listing rebound to that wallet
 //
 // Note on price feed in tests:
 //   The invoice watcher calls iw.Prices.BTCPrice() for post-payment balance check.
@@ -253,8 +253,10 @@ export async function run() {
       }
     });
 
-    // ── T5: Wrong sender → invoice rejected, listing NOT activated ───────────
-    await t.run('T5: payment from wrong sender → invoice rejected, listing stays pending', async () => {
+    // ── T5: Payment from different wallet (WRONG_WALLET) → accepted, listing rebound ─
+    // New model: actual payment sender is the authority.
+    // WRONG_WALLET has generous balance → invoice confirmed, listing.wallet_hash = hash(WRONG_WALLET).
+    await t.run('T5: payment from different wallet (sufficient balance) → listing activated for that wallet', async () => {
       const ts = now();
       const listingId = 'lst-t5-' + ts;
       const invoiceId = 'inv-t5-' + ts;
@@ -262,7 +264,7 @@ export async function run() {
       const amountSats = 50000;
 
       // payer_address = hash of CLIENT_WALLET (registered wallet).
-      // Payment will come from WRONG_WALLET (never registered, different hash).
+      // Payment will come from WRONG_WALLET (sufficient balance) — different wallet.
       srv.db(
         `INSERT INTO listings (id, city, dependency_type, help_type, urgency, languages, ` +
         `wallet_hash, visible_until, created_at, status) VALUES ` +
@@ -276,38 +278,36 @@ export async function run() {
         `'${walletHash(CLIENT_WALLET)}', 'pending', '${listingId}', 50000.0, ${ts})`
       );
 
-      // Payment comes from WRONG_WALLET — hash(WRONG_WALLET) ≠ hash(CLIENT_WALLET).
+      // Payment comes from WRONG_WALLET with generous balance (above $135 threshold).
       await stub.setAddressState(invoiceAddr, {
         txs: [{ txid: 'tx-t5', value_sats: amountSats, confirmations: 2, senders: [WRONG_WALLET] }],
         balance_sats: GENEROUS_SATS,
       });
       await stub.setAddressState(WRONG_WALLET, { balance_sats: GENEROUS_SATS });
 
-      // Wait for watcher to process (sender check fires before balance check → fast reject).
-      await sleep(5000);
+      // Wait for watcher to process and activate listing.
+      const deadline = Date.now() + 10000;
+      let activated = false;
+      while (Date.now() < deadline) {
+        if (srv.db(`SELECT status FROM listings WHERE id='${listingId}'`) === 'active') {
+          activated = true; break;
+        }
+        await sleep(1000);
+      }
+      if (!activated) {
+        const st = srv.db(`SELECT status FROM listings WHERE id='${listingId}'`);
+        const inv = srv.db(`SELECT status FROM invoices WHERE id='${invoiceId}'`);
+        throw new Error(`T5 FAIL: listing not activated (listing=${st}, invoice=${inv})`);
+      }
 
-      const invStatus = srv.db(`SELECT status FROM invoices WHERE id='${invoiceId}'`);
-      const listingStatus = srv.db(`SELECT status FROM listings WHERE id='${listingId}'`);
-
-      // Invoice must be rejected (sender mismatch detected immediately, before price API call).
-      if (invStatus === 'confirmed') {
+      // Listing owner must be hash(WRONG_WALLET), not hash(CLIENT_WALLET)
+      const owner = srv.db(`SELECT wallet_hash FROM listings WHERE id='${listingId}'`);
+      const expectedHash = walletHash(WRONG_WALLET);
+      if (owner !== expectedHash) {
         throw new Error(
-          `T5 FAIL: invoice confirmed despite wrong sender! ` +
-          `payer_hash=${walletHash(CLIENT_WALLET)}, actual_sender=${WRONG_WALLET}`
+          `T5 FAIL: listing.wallet_hash not rebound to actual sender. ` +
+          `expected=${expectedHash}, got=${owner}`
         );
-      }
-      if (listingStatus === 'active') {
-        throw new Error('T5 FAIL: listing activated despite wrong-sender payment');
-      }
-
-      if (invStatus === 'rejected') {
-        // Ideal outcome: watcher detected mismatch, marked rejected.
-      } else {
-        // 'pending' is also acceptable if watcher hasn't run yet — but with 5s and 1s interval
-        // it should have run 5 times. Log for visibility.
-        console.log(`  [info] T5: invoice status=${invStatus} (expected 'rejected'; ` +
-          `pending means watcher hasn't processed yet — listing status=${listingStatus})`);
-        // Still a pass as long as confirmed + active are both false.
       }
     });
 
