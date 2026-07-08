@@ -1,21 +1,21 @@
-// 039_listing_completed.js — listing lifecycle after paid chat
+// 039_listing_completed.js — listing lifecycle after paid chat (new entitlement model)
 //
-// Product invariant (LI-1): once a paid chat room has been created for a listing,
-// that listing must NEVER return to the public board regardless of how the chat ends.
-// Only if the peer accepted but never paid (chat invoice expired/rejected) may the
-// listing return to 'active' so a new peer can respond.
+// New model: $5 → 24h + up to 2 paid chats. opened_chats_count tracks how many.
+// - After 1st paid chat closes: listing reopens (active) if count < 2.
+// - After 2nd paid chat closes: listing permanently closed (count >= 2).
+// - T3: accepted response + chat invoice expires (no payment) → listing returns to 'active'.
+// - T5: TTL expires half-closed room. If count < 2 → listing reopens.
 //
-// Bugs fixed:
-//   chat_ws.go CloseChat: SET status='active' → 'closed'
-//   ttl_cleaner.go expireHalfClosedRooms: SET status='active' → 'closed'
-//   ttl_cleaner.go step 2d: close accepted responses on expired chat invoice, restore listing
+// Product invariants:
+//   LI-1: once opened_chats_count >= 2, listing never returns to board.
+//   LI-2: first paid chat close (count=1) reopens listing for a second peer.
 //
 // Tests:
-//   T1: paid chat created → both sides close → listing NOT on board, status='closed'
-//   T2: paid chat created → both sides close → peer cannot respond again (404)
+//   T1: 2 paid chats created → both close → listing permanently closed (LI-1)
+//   T2: after 2nd chat closes → peer cannot respond again (404)
 //   T3: accepted response + chat invoice expires (no payment) → listing returns to 'active', peer slot freed
-//   T4: very short paid chat → listing still closed (duration does not matter)
-//   T5: paid chat created → TTL expires half-closed room → listing still 'closed'
+//   T4: first paid chat closes (count=1) → listing reopens (active); second closes (count=2) → listing closed
+//   T5: peer closes, TTL expires half-closed room at count=1 → listing reopens (active)
 
 import { TestServer, sleep } from '../lib/server.js';
 import { ApiClient } from '../lib/http.js';
@@ -26,12 +26,32 @@ import { Runner } from '../lib/runner.js';
 const CLIENT_WALLET = '1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf';
 const PEER_WALLET   = '1BoatSLRHtKNngkdXEeobR76b53LETtpyT';
 const PEER2_WALLET  = '1CounterpartyXXXXXXXXXXXXXXXUWLpVr';
+const PEER3_WALLET  = '1EHNa6Q4Jz2uvNExL497mE43ikXhwF6kZm';
 
-// Full flow helper: returns { listingId, roomId }
-async function openPaidChat(api, t, label = '') {
+// Full flow helper: opens one paid chat for an existing listing.
+// Requires listing to be in 'active' status.
+// Returns { roomId }.
+async function openPaidChatForListing(api, listingId, peerWallet, label = '') {
   const clientKeys = newKeypair();
   const peerKeys   = newKeypair();
 
+  const pr = await api.respond(listingId, peerWallet, peerKeys.pub);
+  assertStatus(pr, 201, `${label} respond`);
+  const responseId = pr.body.response_id;
+
+  const ar = await api.acceptResponse(responseId, CLIENT_WALLET, clientKeys.pub);
+  assertStatus(ar, 200, `${label} acceptResponse`);
+
+  const room = await pollUntil(async () => {
+    const r = await api.get('/peer/chatroom?listing_id=' + encodeURIComponent(listingId), peerWallet);
+    return r.status === 200 ? r.body : null;
+  }, { timeout: 30000, label: `${label} chat room opened` });
+
+  return { roomId: room.room_id };
+}
+
+// Helper: create a fresh listing and open first paid chat. Returns { listingId, roomId }
+async function openFirstPaidChat(api, label = '') {
   const cr = await api.createListing(CLIENT_WALLET);
   assertStatus(cr, 201, `${label} createListing`);
   const listingId = cr.body.listing_id;
@@ -41,26 +61,15 @@ async function openPaidChat(api, t, label = '') {
     return r.body.status === 'active' ? true : null;
   }, { timeout: 30000, label: `${label} listing active` });
 
-  const pr = await api.respond(listingId, PEER_WALLET, peerKeys.pub);
-  assertStatus(pr, 201, `${label} respond`);
-  const responseId = pr.body.response_id;
-
-  const ar = await api.acceptResponse(responseId, CLIENT_WALLET, clientKeys.pub);
-  assertStatus(ar, 200, `${label} acceptResponse`);
-
-  const room = await pollUntil(async () => {
-    const r = await api.get('/peer/chatroom?listing_id=' + encodeURIComponent(listingId), PEER_WALLET);
-    return r.status === 200 ? r.body : null;
-  }, { timeout: 30000, label: `${label} chat room opened` });
-
-  return { listingId, roomId: room.room_id };
+  const { roomId } = await openPaidChatForListing(api, listingId, PEER_WALLET, label + ' chat1');
+  return { listingId, roomId };
 }
 
 export async function run() {
-  console.log('\n=== 039: Listing Lifecycle After Paid Chat ===');
+  console.log('\n=== 039: Listing Lifecycle After Paid Chat (New Entitlement Model) ===');
   const t = new Runner('039_listing_completed');
 
-  // ── T1 + T2: both sides close → listing permanently closed ──────────────────
+  // ── T1 + T2: two paid chats close → listing permanently closed ──────────────────
   {
     const srv = new TestServer({ devMode: true });
     try {
@@ -70,40 +79,73 @@ export async function run() {
       await api.verifyWallet(CLIENT_WALLET, 'BTC', 'client');
       await api.verifyWallet(PEER_WALLET,   'BTC', 'peer');
       await api.verifyWallet(PEER2_WALLET,  'BTC', 'peer');
+      await api.verifyWallet(PEER3_WALLET,  'BTC', 'peer');
 
-      let listingId, roomId;
+      let listingId, roomId1, roomId2;
 
-      await t.run('setup: open paid chat room', async () => {
-        ({ listingId, roomId } = await openPaidChat(api, t, 'T1'));
+      await t.run('setup T1: open first paid chat room', async () => {
+        ({ listingId, roomId: roomId1 } = await openFirstPaidChat(api, 'T1-chat1'));
       });
 
-      await t.run('T1: both sides close → listing NOT on board and status=closed', async () => {
+      await t.run('T1a: first chat closes → listing reopens (count=1 < 2)', async () => {
         // Peer closes first
-        const pc = await api.closeChat(roomId, PEER_WALLET);
-        assertStatus(pc, 200, 'peer close');
-
+        const pc = await api.closeChat(roomId1, PEER_WALLET);
+        assertStatus(pc, 200, 'T1a peer close');
         // Client closes (final close)
-        const cc = await api.closeChat(roomId, CLIENT_WALLET);
-        assertStatus(cc, 200, 'client close');
+        const cc = await api.closeChat(roomId1, CLIENT_WALLET);
+        assertStatus(cc, 200, 'T1a client close');
 
-        // Listing must be 'closed' now
+        // Listing should be 'active' now (count=1 < 2 → reopened for second peer)
+        const listing = await api.getListing(listingId);
+        if (listing.body.status !== 'active') {
+          throw new Error(`T1a: Expected listing status=active after first chat closed, got ${listing.body.status}`);
+        }
+        // Listing must appear on board (second peer can respond)
+        const board = await api.getBoard('new_york');
+        if (!Array.isArray(board.body) || !board.body.find(l => l.id === listingId)) {
+          throw new Error('T1a: Listing not on board after first chat closed — should reopen for second peer');
+        }
+        // opened_chats_count must be 1
+        const count = parseInt(srv.db(`SELECT opened_chats_count FROM listings WHERE id='${listingId}'`), 10);
+        if (count !== 1) throw new Error(`T1a: Expected opened_chats_count=1, got ${count}`);
+      });
+
+      await t.run('T1b: open second paid chat room', async () => {
+        ({ roomId: roomId2 } = await openPaidChatForListing(api, listingId, PEER2_WALLET, 'T1-chat2'));
+      });
+
+      await t.run('T1c: listing status=matched while second chat active (count=2)', async () => {
         const listing = await api.getListing(listingId);
         if (listing.body.status !== 'closed') {
-          throw new Error(`Expected listing status=closed after paid chat, got ${listing.body.status}`);
+          throw new Error(`T1c: Expected listing closed after second chat opened, got ${listing.body.status}`);
+        }
+        const count = parseInt(srv.db(`SELECT opened_chats_count FROM listings WHERE id='${listingId}'`), 10);
+        if (count !== 2) throw new Error(`T1c: Expected opened_chats_count=2, got ${count}`);
+      });
+
+      await t.run('T1d: second chat closes → listing permanently closed (LI-1)', async () => {
+        const pc = await api.closeChat(roomId2, PEER2_WALLET);
+        assertStatus(pc, 200, 'T1d peer2 close');
+        const cc = await api.closeChat(roomId2, CLIENT_WALLET);
+        assertStatus(cc, 200, 'T1d client close');
+
+        const listing = await api.getListing(listingId);
+        if (listing.body.status !== 'closed') {
+          throw new Error(`T1d: Expected listing status=closed after second chat closed, got ${listing.body.status}`);
         }
 
-        // Listing must NOT appear on the board (board.body is a raw array)
+        // Listing must NOT appear on board
         const board = await api.getBoard('new_york');
         if (Array.isArray(board.body) && board.body.find(l => l.id === listingId)) {
-          throw new Error('Listing returned to board after paid chat was closed — LI-1 violated');
+          throw new Error('T1d: Listing returned to board after 2 paid chats — LI-1 violated');
         }
       });
 
       await t.run('T2: peer cannot respond to a closed listing (404)', async () => {
-        const peerKeys2 = newKeypair();
-        const rr = await api.respond(listingId, PEER2_WALLET, peerKeys2.pub);
+        const peerKeys3 = newKeypair();
+        const rr = await api.respond(listingId, PEER3_WALLET, peerKeys3.pub);
         if (rr.status !== 404) {
-          throw new Error(`Expected 404 responding to closed listing, got ${rr.status}`);
+          throw new Error(`T2: Expected 404 responding to closed listing, got ${rr.status}`);
         }
       });
 
@@ -113,8 +155,6 @@ export async function run() {
   }
 
   // ── T3: accepted response + chat invoice expires → listing restored to active ──
-  // devMode auto-confirms invoices, so we inject DB state directly rather than
-  // racing the invoice watcher.
   {
     const srv = new TestServer({ devMode: true });
     try {
@@ -129,7 +169,6 @@ export async function run() {
 
         const now = Math.floor(Date.now() / 1000);
 
-        // Retrieve wallet hashes from sessions table (registerDirect just created them)
         const clientHash = srv.db(
           `SELECT wallet_hash FROM sessions WHERE role='client' ORDER BY created_at DESC LIMIT 1`
         );
@@ -141,10 +180,10 @@ export async function run() {
         const responseId = `rsp_039_t3_${now}`;
         const invoiceId  = `inv_039_t3_${now}`;
 
-        // Inject: listing (matched) ← response (accepted) ← invoice (expired, no chat room)
+        // Inject: listing (matched, count=0) ← response (accepted) ← invoice (expired, no chat room)
         srv.db(
-          `INSERT INTO listings (id, city, dependency_type, help_type, urgency, languages, wallet_hash, visible_until, created_at, status, is_sample) ` +
-          `VALUES ('${listingId}', 'new_york', 'alcohol', 'crisis', 'urgent', '["en"]', '${clientHash}', ${now + 3600}, ${now}, 'matched', 0)`
+          `INSERT INTO listings (id, city, dependency_type, help_type, urgency, languages, wallet_hash, visible_until, created_at, status, is_sample, opened_chats_count) ` +
+          `VALUES ('${listingId}', 'new_york', 'alcohol', 'crisis', 'urgent', '["en"]', '${clientHash}', ${now + 3600}, ${now}, 'matched', 0, 0)`
         );
         srv.db(
           `INSERT INTO responses (id, listing_id, counselor_hash, counselor_pubkey, status, created_at) ` +
@@ -164,13 +203,13 @@ export async function run() {
         // Response must be closed (peer slot freed)
         const respStatus = srv.db(`SELECT status FROM responses WHERE id = '${responseId}'`);
         if (respStatus !== 'closed') {
-          throw new Error(`Expected response status=closed after invoice expired, got ${respStatus}`);
+          throw new Error(`T3: Expected response status=closed after invoice expired, got ${respStatus}`);
         }
 
         // Listing must appear on board (a new peer can now respond)
         const board = await api.getBoard('new_york');
         if (!Array.isArray(board.body) || !board.body.find(l => l.id === listingId)) {
-          throw new Error('Listing not on board after unpaid invoice expired — client is stuck');
+          throw new Error('T3: Listing not on board after unpaid invoice expired — client is stuck');
         }
       });
 
@@ -179,7 +218,7 @@ export async function run() {
     }
   }
 
-  // ── T4: very short paid chat → listing still closed ──────────────────────────
+  // ── T4: first paid chat closes → listing reopens; second paid chat closes → listing closed ──────
   {
     const srv = new TestServer({ devMode: true });
     try {
@@ -188,28 +227,45 @@ export async function run() {
 
       await api.verifyWallet(CLIENT_WALLET, 'BTC', 'client');
       await api.verifyWallet(PEER_WALLET,   'BTC', 'peer');
+      await api.verifyWallet(PEER2_WALLET,  'BTC', 'peer');
 
-      let listingId, roomId;
+      let listingId, roomId1, roomId2;
 
-      await t.run('setup T4: open paid chat', async () => {
-        ({ listingId, roomId } = await openPaidChat(api, t, 'T4'));
+      await t.run('setup T4: open first paid chat', async () => {
+        ({ listingId, roomId: roomId1 } = await openFirstPaidChat(api, 'T4'));
       });
 
-      await t.run('T4: immediate close (0-duration paid chat) → listing still closed', async () => {
-        // Close immediately — devMode allows 0-duration (minDuration=0)
-        const pc = await api.closeChat(roomId, PEER_WALLET);
-        assertStatus(pc, 200, 'T4 peer close');
-        const cc = await api.closeChat(roomId, CLIENT_WALLET);
-        assertStatus(cc, 200, 'T4 client close');
+      await t.run('T4a: immediate close of first paid chat → listing reopens (count=1 < 2)', async () => {
+        // devMode allows 0-duration (minDuration=0)
+        const pc = await api.closeChat(roomId1, PEER_WALLET);
+        assertStatus(pc, 200, 'T4a peer close');
+        const cc = await api.closeChat(roomId1, CLIENT_WALLET);
+        assertStatus(cc, 200, 'T4a client close');
+
+        const listing = await api.getListing(listingId);
+        if (listing.body.status !== 'active') {
+          throw new Error(`T4a: Expected listing active after first chat closed, got ${listing.body.status}`);
+        }
+      });
+
+      await t.run('T4b: open second paid chat', async () => {
+        ({ roomId: roomId2 } = await openPaidChatForListing(api, listingId, PEER2_WALLET, 'T4-chat2'));
+      });
+
+      await t.run('T4c: immediate close of second paid chat → listing closed (count=2)', async () => {
+        const pc = await api.closeChat(roomId2, PEER2_WALLET);
+        assertStatus(pc, 200, 'T4c peer2 close');
+        const cc = await api.closeChat(roomId2, CLIENT_WALLET);
+        assertStatus(cc, 200, 'T4c client close');
 
         const listing = await api.getListing(listingId);
         if (listing.body.status !== 'closed') {
-          throw new Error(`T4: Expected listing closed even after very short chat, got ${listing.body.status}`);
+          throw new Error(`T4c: Expected listing closed after both paid chats ended, got ${listing.body.status}`);
         }
 
         const board = await api.getBoard('new_york');
         if (Array.isArray(board.body) && board.body.find(l => l.id === listingId)) {
-          throw new Error('T4: Listing returned to board after very short paid chat — LI-1 violated');
+          throw new Error('T4c: Listing returned to board after 2 paid chats — LI-1 violated');
         }
       });
 
@@ -218,7 +274,7 @@ export async function run() {
     }
   }
 
-  // ── T5: TTL expires half-closed room → listing still 'closed' ────────────────
+  // ── T5: TTL expires half-closed room at count=1 → listing reopens ────────────
   {
     const srv = new TestServer({ devMode: true });
     try {
@@ -230,11 +286,11 @@ export async function run() {
 
       let listingId, roomId;
 
-      await t.run('setup T5: open paid chat', async () => {
-        ({ listingId, roomId } = await openPaidChat(api, t, 'T5'));
+      await t.run('setup T5: open first paid chat', async () => {
+        ({ listingId, roomId } = await openFirstPaidChat(api, 'T5'));
       });
 
-      await t.run('T5: peer closes, TTL expires half-closed room → listing stays closed', async () => {
+      await t.run('T5: peer closes → TTL expires half-closed room (count=1) → listing reopens', async () => {
         // Peer leaves — room becomes peer_left (half-closed)
         const pc = await api.closeChat(roomId, PEER_WALLET);
         assertStatus(pc, 200, 'T5 peer close');
@@ -248,15 +304,16 @@ export async function run() {
           return status === 'expired' ? true : null;
         }, { timeout: 30000, label: 'T5 room expired by TTL' });
 
-        // Listing must NOT be restored to active
+        // Listing should be 'active' (count=1 < 2 → reopened)
         const listing = await api.getListing(listingId);
-        if (listing.body.status !== 'closed') {
-          throw new Error(`T5: Expected listing closed after TTL expiry of half-closed paid room, got ${listing.body.status}`);
+        if (listing.body.status !== 'active') {
+          throw new Error(`T5: Expected listing active after TTL expiry of half-closed room (count=1), got ${listing.body.status}`);
         }
 
+        // Listing SHOULD be on board (second peer can respond)
         const board = await api.getBoard('new_york');
-        if (Array.isArray(board.body) && board.body.find(l => l.id === listingId)) {
-          throw new Error('T5: Listing returned to board after TTL-expired half-closed paid room — LI-1 violated');
+        if (!Array.isArray(board.body) || !board.body.find(l => l.id === listingId)) {
+          throw new Error('T5: Listing not on board after TTL-expired half-closed room with count=1 — should reopen');
         }
       });
 

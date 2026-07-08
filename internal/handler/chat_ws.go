@@ -477,10 +477,11 @@ func (h *Handler) CloseChat(w http.ResponseWriter, r *http.Request) {
 	var clientPubkey, counselorPubkey, clientHash, counselorHash, responseID string
 	var startedAt int64
 	var status string
+	var listingIDForClose sql.NullString
 	err := h.DB.QueryRow(`
-		SELECT status, client_pubkey, counselor_pubkey, client_hash, counselor_hash, started_at, response_id
+		SELECT status, client_pubkey, counselor_pubkey, client_hash, counselor_hash, started_at, response_id, listing_id
 		FROM chat_rooms WHERE id = ?
-	`, roomID).Scan(&status, &clientPubkey, &counselorPubkey, &clientHash, &counselorHash, &startedAt, &responseID)
+	`, roomID).Scan(&status, &clientPubkey, &counselorPubkey, &clientHash, &counselorHash, &startedAt, &responseID, &listingIDForClose)
 	if err == sql.ErrNoRows {
 		writeError(w, 404, "room not found")
 		return
@@ -562,12 +563,26 @@ func (h *Handler) CloseChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tx.Exec(`UPDATE responses SET status = 'closed' WHERE id = ?`, responseID)
-	// Paid chat completed — listing is permanently closed, never returns to the board.
-	tx.Exec(`
-		UPDATE listings SET status = 'closed'
-		WHERE id = (SELECT listing_id FROM chat_rooms WHERE id = ?)
-		  AND status = 'matched'
-	`, roomID)
+
+	// Determine new listing status based on opened_chats_count.
+	// Do NOT increment here — count was already incremented when chat_room was created.
+	// If < 2 chats opened: reopen listing so a second peer can respond.
+	// If >= 2 chats opened: listing stays closed permanently.
+	if listingIDForClose.Valid && listingIDForClose.String != "" {
+		var openedChatsCount int
+		tx.QueryRow(`SELECT COALESCE(opened_chats_count, 0) FROM listings WHERE id = ?`, listingIDForClose.String).Scan(&openedChatsCount)
+		if openedChatsCount < 2 {
+			// First chat closed and count < 2 — reopen listing so a second peer can respond
+			tx.Exec(`UPDATE listings SET status = 'active' WHERE id = ? AND status = 'matched'`, listingIDForClose.String)
+			log.Printf("chat_ws: room %s closed, listing %s reopened for second peer (opened_chats_count=%d)",
+				roomID, listingIDForClose.String, openedChatsCount)
+		} else {
+			// Second (or more) chat closed — listing permanently closed
+			tx.Exec(`UPDATE listings SET status = 'closed' WHERE id = ? AND status IN ('matched', 'active')`, listingIDForClose.String)
+			log.Printf("chat_ws: room %s closed, listing %s permanently closed (opened_chats_count=%d)",
+				roomID, listingIDForClose.String, openedChatsCount)
+		}
+	}
 
 	chatDuration := now - startedAt
 	minDuration := int64(6 * 3600)

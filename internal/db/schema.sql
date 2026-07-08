@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS listings (
     status TEXT DEFAULT 'active',
     is_sample INTEGER DEFAULT 0,        -- 1 = demo listing shown to new visitors
     renewal_count INTEGER DEFAULT 0,    -- how many times renewed
-    first_activated_at INTEGER          -- set on first payment, used for 30-day renewal window
+    first_activated_at INTEGER,         -- set on first payment, used for 30-day renewal window
+    opened_chats_count INTEGER NOT NULL DEFAULT 0  -- number of paid chat_rooms created for this listing (max 2)
 );
 
 -- Отклики психологов
@@ -126,7 +127,9 @@ CREATE TABLE IF NOT EXISTS chat_rooms (
     closed_at INTEGER,
     closed_by TEXT,
     peer_left_at INTEGER,
-    status TEXT DEFAULT 'active'
+    client_left_at INTEGER,
+    status TEXT DEFAULT 'active',
+    listing_counted INTEGER NOT NULL DEFAULT 0  -- 1 = opened_chats_count already incremented for this room
 );
 
 -- Зашифрованные сообщения (TTL 24ч)

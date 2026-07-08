@@ -112,6 +112,14 @@ func (h *Handler) AcceptResponse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Guard: listing must have fewer than 2 opened paid chats
+	var openedChatsCount int
+	tx.QueryRow(`SELECT COALESCE(opened_chats_count, 0) FROM listings WHERE id = ?`, listingID).Scan(&openedChatsCount)
+	if openedChatsCount >= 2 {
+		writeError(w, 409, "listing already has 2 opened chats — no more peers can be accepted")
+		return
+	}
+
 	// Guard: no other accepted response for this listing (TOCTOU protection)
 	var alreadyAccepted int
 	tx.QueryRow(`
@@ -130,6 +138,23 @@ func (h *Handler) AcceptResponse(w http.ResponseWriter, r *http.Request) {
 	`, clientHash).Scan(&activeChatCount)
 	if activeChatCount > 0 {
 		writeError(w, 409, "already have active chat")
+		return
+	}
+
+	// Peer capacity check based on active chat_rooms (not pending responses)
+	var peerActiveChatCount int
+	tx.QueryRow(`
+		SELECT COUNT(*) FROM chat_rooms
+		WHERE counselor_hash = ? AND status IN ('active', 'peer_left', 'client_left')
+	`, counselorHash).Scan(&peerActiveChatCount)
+	var peerMinRequired float64
+	tx.QueryRow(`SELECT COALESCE(min_required_usd, 1000) FROM wallet_sessions WHERE wallet_hash = ?`, counselorHash).Scan(&peerMinRequired)
+	peerMaxSlots := int(peerMinRequired/1000) * 2
+	if peerMaxSlots < 2 {
+		peerMaxSlots = 2
+	}
+	if peerActiveChatCount >= peerMaxSlots {
+		writeError(w, 409, "Peer is currently at chat capacity. Choose another peer or try later.")
 		return
 	}
 

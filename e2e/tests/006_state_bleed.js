@@ -59,26 +59,32 @@ export async function run() {
     });
 
     // Close flow 1 (symmetric: both sides must close)
-    // Peer closes first, then client completes the full close → listing restored
+    // Peer closes first, then client completes the full close
+    // Under new model: after first chat closes with opened_chats_count=1 < 2 → listing reopens to 'active'
     await api.closeChat(roomId1, PEER_WALLET);
     await api.closeChat(roomId1, CLIENT_WALLET);
 
-    // ── Flow 2: listing permanently closed after paid chat (LI-1) ─────────
-    await t.run('listing permanently closed after paid chat (LI-1)', async () => {
+    // ── Flow 2: after first paid chat closes, listing REOPENS (new entitlement model) ─────────
+    // opened_chats_count=1 < 2 → listing goes back to 'active' for a potential second peer
+    await t.run('listing reopens after first paid chat (new model: count=1 < 2)', async () => {
       const r = await api.getListing(listingId1);
-      if (r.body.status !== 'closed') throw new Error(`Listing status=${r.body.status}, expected closed`);
+      if (r.body.status !== 'active') throw new Error(`Listing status=${r.body.status}, expected active (count=1 < 2 allows second chat)`);
     });
 
-    await t.run('closed listing does not appear on board', async () => {
+    await t.run('reopened listing appears on board', async () => {
       const r = await api.getBoard('new_york');
       const found = r.body.find(l => l.id === listingId1);
-      if (found) throw new Error('Closed listing returned to board — LI-1 violated');
+      if (!found) throw new Error('Listing not on board after first chat closed — should reopen for second peer');
     });
 
-    await t.run('client can create new listing after paid session completes', async () => {
-      await api.verifyWallet(CLIENT_WALLET, 'BTC', 'client');
-      const r = await api.createListing(CLIENT_WALLET, 'london');
-      assertStatus(r, 201, 'new listing after paid session');
+    await t.run('DB: only one active chat_room total (no state bleed)', async () => {
+      const count = parseInt(srv.db(`SELECT COUNT(*) FROM chat_rooms WHERE status='active'`), 10);
+      if (count !== 0) throw new Error(`Expected 0 active rooms after first chat close, got ${count}`);
+    });
+
+    await t.run('DB: opened_chats_count=1 after first paid chat closed', async () => {
+      const count = parseInt(srv.db(`SELECT COALESCE(opened_chats_count,0) FROM listings WHERE id='${listingId1}'`), 10);
+      if (count !== 1) throw new Error(`Expected opened_chats_count=1, got ${count}`);
     });
 
     await t.run('peer poll for closed room returns no active room', async () => {
@@ -88,23 +94,12 @@ export async function run() {
       }
     });
 
-    await t.run('peer cannot respond to permanently closed listing (404)', async () => {
+    // Peer CAN now respond (listing is reopened for second slot)
+    await t.run('peer can respond to reopened listing (second slot)', async () => {
       await api.verifyWallet(PEER_WALLET, 'BTC', 'peer');
-      const r = await api.respond(listingId1, PEER_WALLET, peerKeys.pub);
-      if (r.status !== 404) throw new Error(`Expected 404 responding to closed listing, got ${r.status}`);
-    });
-
-    await t.run('DB: only one active chat_room total (no state bleed)', async () => {
-      const count = parseInt(srv.db(`SELECT COUNT(*) FROM chat_rooms WHERE status='active'`), 10);
-      if (count !== 0) throw new Error(`Expected 0 active rooms after close, got ${count}`);
-    });
-
-    await t.run('listing status=closed and not on board (LI-1)', async () => {
-      const status = srv.db(`SELECT status FROM listings WHERE id='${listingId1}'`);
-      if (status !== 'closed') throw new Error(`Listing status=${status}, expected closed (LI-1)`);
-      const r = await api.getBoard('new_york');
-      const found = r.body.find(l => l.id === listingId1);
-      if (found) throw new Error('Closed listing on board — LI-1 violated');
+      const peerKeys2 = newKeypair();
+      const r = await api.respond(listingId1, PEER_WALLET, peerKeys2.pub);
+      if (r.status !== 201) throw new Error(`Expected 201 for second peer response, got ${r.status}`);
     });
 
   } finally {

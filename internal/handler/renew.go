@@ -10,8 +10,8 @@ import (
 )
 
 // RenewListing handles POST /listing/{id}/renew.
-// Renewal is FREE until the listing has 2 responses — clients already paid $5 upfront.
-// Once 2 pending responses exist the client must choose a peer instead of renewing.
+// Renewal is FREE as long as opened_chats_count < 2.
+// Once 2 paid chats have been opened the listing cannot be renewed (it is permanently closed).
 func (h *Handler) RenewListing(w http.ResponseWriter, r *http.Request) {
 	listingID := chi.URLParam(r, "id")
 
@@ -24,11 +24,12 @@ func (h *Handler) RenewListing(w http.ResponseWriter, r *http.Request) {
 	// Load listing and verify ownership via hash
 	var ownerHash, status string
 	var firstActivatedAt int64
-	var renewalCount int
+	var renewalCount, openedChatsCount int
 	err := h.DB.QueryRow(`
-		SELECT wallet_hash, status, COALESCE(first_activated_at, created_at), COALESCE(renewal_count, 0)
+		SELECT wallet_hash, status, COALESCE(first_activated_at, created_at), COALESCE(renewal_count, 0),
+		       COALESCE(opened_chats_count, 0)
 		FROM listings WHERE id = ? AND is_sample = 0
-	`, listingID).Scan(&ownerHash, &status, &firstActivatedAt, &renewalCount)
+	`, listingID).Scan(&ownerHash, &status, &firstActivatedAt, &renewalCount, &openedChatsCount)
 	if err != nil {
 		writeError(w, 404, "listing not found")
 		return
@@ -44,18 +45,16 @@ func (h *Handler) RenewListing(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().Unix()
 
-	// Block renewal if already has 2 responses — client must choose a peer
-	var pendingCount int
-	h.DB.QueryRow(`SELECT COUNT(*) FROM responses WHERE listing_id = ? AND status = 'pending'`, listingID).Scan(&pendingCount)
-	if pendingCount >= 2 {
-		writeError(w, 409, "listing has 2 responses — please choose a peer instead of renewing")
+	// Block renewal if 2 paid chats already opened — listing is permanently consumed
+	if openedChatsCount >= 2 {
+		writeError(w, 409, "listing has 2 opened chats — renewal not allowed")
 		return
 	}
 
-	// Free renewal: extend listing and Telegram notification by ListingTTL (6h)
+	// Free renewal: extend listing and Telegram notification by ListingTTL (24h)
 	ttl := int64(h.ListingTTL)
 	if ttl == 0 {
-		ttl = 21600
+		ttl = 86400
 	}
 	newExpiry := now + ttl
 

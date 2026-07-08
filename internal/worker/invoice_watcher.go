@@ -243,7 +243,7 @@ func (iw *InvoiceWatcher) confirmInvoice(invoiceID, typ, txid string, amount int
 		{
 			ttl := int64(iw.ListingTTL)
 			if ttl == 0 {
-				ttl = 21600
+				ttl = 86400
 			}
 			res, err := tx.Exec(`
 				UPDATE listings
@@ -270,7 +270,7 @@ func (iw *InvoiceWatcher) confirmInvoice(invoiceID, typ, txid string, amount int
 		{
 			ttl := int64(iw.ListingTTL)
 			if ttl == 0 {
-				ttl = 21600
+				ttl = 86400
 			}
 			res, err := tx.Exec(`
 				UPDATE listings
@@ -314,11 +314,37 @@ func (iw *InvoiceWatcher) confirmInvoice(invoiceID, typ, txid string, amount int
 			return
 		}
 
-		// Получить хеш клиента из listing — wallet_hash уже хранится хешем
+		// Получить хеш клиента и счётчик открытых чатов из listing
 		var clientHash string
-		err = tx.QueryRow(`SELECT wallet_hash FROM listings WHERE id = ?`, listingIDFromResp).Scan(&clientHash)
+		var openedChatsCount int
+		err = tx.QueryRow(`SELECT wallet_hash, COALESCE(opened_chats_count, 0) FROM listings WHERE id = ?`, listingIDFromResp).Scan(&clientHash, &openedChatsCount)
 		if err != nil {
 			log.Printf("invoice_watcher: listing %s not found: %v", listingIDFromResp, err)
+			return
+		}
+
+		// Entitlement guard: listing allows at most 2 paid chats
+		if openedChatsCount >= 2 {
+			log.Printf("invoice_watcher: listing %s already has %d opened chats (max 2), aborting chat room creation for invoice %s",
+				listingIDFromResp, openedChatsCount, invoiceID)
+			return
+		}
+
+		// Проверить вместимость пира: считаем активные chat_rooms (не pending responses)
+		var peerActiveChatCount int
+		tx.QueryRow(`
+			SELECT COUNT(*) FROM chat_rooms
+			WHERE counselor_hash = ? AND status IN ('active', 'peer_left', 'client_left')
+		`, counselorHash).Scan(&peerActiveChatCount)
+		var peerMinRequired float64
+		tx.QueryRow(`SELECT COALESCE(min_required_usd, 1000) FROM wallet_sessions WHERE wallet_hash = ?`, counselorHash).Scan(&peerMinRequired)
+		peerMaxSlots := int(peerMinRequired/1000) * 2
+		if peerMaxSlots < 2 {
+			peerMaxSlots = 2
+		}
+		if peerActiveChatCount >= peerMaxSlots {
+			log.Printf("invoice_watcher: peer at capacity (%d/%d active chats), aborting chat room creation for invoice %s",
+				peerActiveChatCount, peerMaxSlots, invoiceID)
 			return
 		}
 
@@ -330,8 +356,8 @@ func (iw *InvoiceWatcher) confirmInvoice(invoiceID, typ, txid string, amount int
 		}
 		_, err = tx.Exec(`
 			INSERT INTO chat_rooms (id, listing_id, response_id, client_hash, counselor_hash,
-			                        client_pubkey, counselor_pubkey, started_at, expires_at, status)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+			                        client_pubkey, counselor_pubkey, started_at, expires_at, status, listing_counted)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 1)
 		`, roomID, listingIDFromResp, responseID,
 			clientHash, counselorHash,
 			clientPubkey, counselorPubkey,
@@ -341,9 +367,23 @@ func (iw *InvoiceWatcher) confirmInvoice(invoiceID, typ, txid string, amount int
 			return
 		}
 
-		// Убрать листинг с борда — чат уже найден
-		if _, err = tx.Exec(`UPDATE listings SET status = 'matched' WHERE id = ?`, listingIDFromResp); err != nil {
-			log.Printf("invoice_watcher: mark listing matched %s: %v", listingIDFromResp, err)
+		// Increment opened_chats_count and determine new listing status
+		newOpenedCount := openedChatsCount + 1
+		var newListingStatus string
+		if newOpenedCount >= 2 {
+			// Second chat opened — listing is now fully matched, close it
+			newListingStatus = "closed"
+			log.Printf("invoice_watcher: listing %s reached 2 opened chats, closing (room=%s)", listingIDFromResp, roomID)
+		} else {
+			// First chat opened — listing stays 'matched' until this chat closes (may reopen for second peer)
+			newListingStatus = "matched"
+		}
+
+		if _, err = tx.Exec(`
+			UPDATE listings SET opened_chats_count = opened_chats_count + 1, status = ?
+			WHERE id = ?
+		`, newListingStatus, listingIDFromResp); err != nil {
+			log.Printf("invoice_watcher: update listing %s: %v", listingIDFromResp, err)
 			return
 		}
 
@@ -353,8 +393,8 @@ func (iw *InvoiceWatcher) confirmInvoice(invoiceID, typ, txid string, amount int
 			return
 		}
 
-		log.Printf("invoice_watcher: chat room %s created (listing=%s, response=%s)",
-			roomID, listingIDFromResp, responseID)
+		log.Printf("invoice_watcher: chat room %s created (listing=%s, response=%s, opened_chats_count=%d)",
+			roomID, listingIDFromResp, responseID, newOpenedCount)
 	}
 
 	if err := tx.Commit(); err != nil {

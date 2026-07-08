@@ -36,6 +36,9 @@ func Open(path string) (*sql.DB, error) {
 	db.Exec(`ALTER TABLE chat_rooms ADD COLUMN client_left_at INTEGER`)
 	db.Exec(`ALTER TABLE invoices ADD COLUMN payment_detected_at INTEGER`)
 	db.Exec(`ALTER TABLE invoices ADD COLUMN price_at_creation REAL`)
+	// New entitlement model: track opened paid chats per listing (max 2), idempotency flag per room
+	db.Exec(`ALTER TABLE listings ADD COLUMN opened_chats_count INTEGER NOT NULL DEFAULT 0`)
+	db.Exec(`ALTER TABLE chat_rooms ADD COLUMN listing_counted INTEGER NOT NULL DEFAULT 0`)
 
 	// Schema cleanup migrations (must not silently fail if column/table is present)
 	// reconnection_hashes was a stub feature never read by any handler or frontend.

@@ -1,4 +1,14 @@
-// 019_renewal_blocked.js — renewal blocked when listing already has 2 pending responses (LS-3)
+// 019_renewal_blocked.js — renewal blocked when listing.opened_chats_count >= 2 (new entitlement model)
+//
+// Old model: blocked at 2 pending responses.
+// New model: renewal is always free while opened_chats_count < 2.
+// At opened_chats_count = 2 (two paid chats created) renewal returns 409.
+//
+// Tests:
+//   - renewal always succeeds at count=0 (no matter how many pending responses)
+//   - renewal succeeds at count=1 (first paid chat created, second not yet)
+//   - renewal blocked at count=2 → 409
+//   - can_renew=false exposed in GET /listing/{id} when count >= 2
 import { TestServer } from '../lib/server.js';
 import { ApiClient } from '../lib/http.js';
 import { newKeypair } from '../lib/crypto.js';
@@ -10,8 +20,8 @@ const PEER_A  = '1BoatSLRHtKNngkdXEeobR76b53LETtpyT';
 const PEER_B  = '1CounterpartyXXXXXXXXXXXXXXXUWLpVr';
 
 export async function run() {
-  console.log('\n=== 019: Renewal Blocked at 2 Responses (LS-3) ===');
-  const srv = new TestServer();
+  console.log('\n=== 019: Renewal Blocked at opened_chats_count >= 2 (New Entitlement Model) ===');
+  const srv = new TestServer({ devMode: true });
   const t = new Runner('019_renewal_blocked');
 
   try {
@@ -37,35 +47,44 @@ export async function run() {
       }, { timeout: 30000, label: 'listing active' });
     });
 
-    await t.run('renewal succeeds when 0 responses', async () => {
+    await t.run('renewal succeeds when 0 opened chats', async () => {
       const r = await api.post(`/listing/${listingId}/renew`, {}, CLIENT);
-      assertStatus(r, 200, 'renew with 0 responses');
+      assertStatus(r, 200, 'renew with 0 opened chats');
       if (r.body.status !== 'renewed') throw new Error(`expected status=renewed, got ${r.body.status}`);
+      if (r.body.free !== true) throw new Error(`expected free=true, got ${r.body.free}`);
     });
 
-    await t.run('peer A responds (1st slot)', async () => {
-      const r = await api.respond(listingId, PEER_A, newKeypair().pub);
-      assertStatus(r, 201, 'peer A respond');
-    });
-
-    await t.run('renewal succeeds when 1 response', async () => {
+    // Inject opened_chats_count=1 directly (simulates first paid chat opened)
+    await t.run('inject opened_chats_count=1, renewal still allowed', async () => {
+      srv.db(`UPDATE listings SET opened_chats_count = 1, status = 'active' WHERE id = '${listingId}'`);
       const r = await api.post(`/listing/${listingId}/renew`, {}, CLIENT);
-      assertStatus(r, 200, 'renew with 1 response');
+      assertStatus(r, 200, 'renew with opened_chats_count=1');
+      if (r.body.free !== true) throw new Error(`expected free=true, got ${r.body.free}`);
     });
 
-    await t.run('peer B responds (2nd slot)', async () => {
-      const r = await api.respond(listingId, PEER_B, newKeypair().pub);
-      assertStatus(r, 201, 'peer B respond');
-    });
-
-    await t.run('renewal blocked at 2 responses → 409', async () => {
+    // Inject opened_chats_count=2 directly (simulates second paid chat opened)
+    await t.run('inject opened_chats_count=2, renewal blocked → 409', async () => {
+      srv.db(`UPDATE listings SET opened_chats_count = 2, status = 'active' WHERE id = '${listingId}'`);
       const r = await api.post(`/listing/${listingId}/renew`, {}, CLIENT);
       if (r.status !== 409) throw new Error(`expected 409 renewal blocked, got ${r.status}: ${JSON.stringify(r.body)}`);
     });
 
-    await t.run('GET /listing/{id} shows can_renew=false', async () => {
+    await t.run('GET /listing/{id} shows can_renew=false when opened_chats_count=2', async () => {
       const r = await api.getListing(listingId);
       if (r.body.can_renew !== false) throw new Error(`expected can_renew=false, got ${r.body.can_renew}`);
+      if (r.body.opened_chats_count !== 2) throw new Error(`expected opened_chats_count=2, got ${r.body.opened_chats_count}`);
+    });
+
+    await t.run('GET /listing/{id} shows can_renew=true when opened_chats_count=1', async () => {
+      srv.db(`UPDATE listings SET opened_chats_count = 1, status = 'active' WHERE id = '${listingId}'`);
+      const r = await api.getListing(listingId);
+      if (r.body.can_renew !== true) throw new Error(`expected can_renew=true when count=1, got ${r.body.can_renew}`);
+    });
+
+    await t.run('GET /listing/{id} shows can_renew=true when opened_chats_count=0', async () => {
+      srv.db(`UPDATE listings SET opened_chats_count = 0, status = 'active' WHERE id = '${listingId}'`);
+      const r = await api.getListing(listingId);
+      if (r.body.can_renew !== true) throw new Error(`expected can_renew=true when count=0, got ${r.body.can_renew}`);
     });
 
   } finally {

@@ -65,7 +65,7 @@ func Load() *Config {
 		DevMode:       envOr("DEV_MODE", "") == "true",
 		DevSeedPrices: envOr("DEV_SEED_PRICES", "") == "true",
 
-		ListingTTL: envInt("LISTING_TTL", 21600),  // 6h
+		ListingTTL: envInt("LISTING_TTL", 86400),  // 24h
 		ChatTTL:    envInt("CHAT_TTL", 86400),     // 24h
 		ChatMinTTL: envInt("CHAT_MIN_TTL", 21600), // 6h minimum for rating
 
