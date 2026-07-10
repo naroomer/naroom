@@ -175,6 +175,17 @@ func (tc *TTLCleaner) clean() {
 		totalCleaned += n
 	}
 
+	// 9a. Telegram: deactivate expired helper board subscriptions (24h TTL).
+	// counselor_hash is stored in active rows; deactivating removes it from the live query path.
+	res, _ = tc.DB.Exec(`
+		UPDATE helper_board_subscriptions SET active = FALSE
+		WHERE active = TRUE AND expires_at < ?
+	`, now)
+	if n, _ := res.RowsAffected(); n > 0 {
+		totalCleaned += n
+		log.Printf("ttl_cleaner: deactivated %d expired helper subscriptions", n)
+	}
+
 	// 10. Telegram: delete used or expired link tokens
 	res, _ = tc.DB.Exec(`
 		DELETE FROM telegram_link_tokens WHERE used = TRUE OR expires_at < ?

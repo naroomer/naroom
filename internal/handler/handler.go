@@ -23,6 +23,8 @@ type Handler struct {
 	ListingTTL int
 	ChatTTL          int
 	ChatMinTTL       int
+	ClientMinBalanceUSD float64 // default 150; override via CLIENT_MIN_BALANCE_USD
+	PeerMinBalanceUSD   float64 // default 1000; override via PEER_MIN_BALANCE_USD
 	Hub              *ChatHub // for broadcasting room_closed to WS clients
 
 	// Telegram notification bots. Nil when tokens are not configured.
@@ -32,6 +34,20 @@ type Handler struct {
 	TelegramWebhookSecret string
 	PublicBaseURL         string
 	RequireTelegram       bool // true when client bot token is configured
+}
+
+func (h *Handler) clientMinBalance() float64 {
+	if h.ClientMinBalanceUSD > 0 {
+		return h.ClientMinBalanceUSD
+	}
+	return 150.0
+}
+
+func (h *Handler) peerMinBalance() float64 {
+	if h.PeerMinBalanceUSD > 0 {
+		return h.PeerMinBalanceUSD
+	}
+	return 1000.0
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

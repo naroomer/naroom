@@ -32,6 +32,13 @@ type Config struct {
 	ChatTTL    int // default 86400 (24h)
 	ChatMinTTL int // minimum chat duration for rating (default 21600 = 6h)
 
+	// Balance thresholds for wallet registration and post-payment verification.
+	// Defaults: ClientMinBalanceUSD=150, PeerMinBalanceUSD=1000.
+	// Override via CLIENT_MIN_BALANCE_USD / PEER_MIN_BALANCE_USD env vars.
+	// Lower values (e.g. 50) can be set temporarily for smoke-testing with limited funds.
+	ClientMinBalanceUSD float64
+	PeerMinBalanceUSD   float64
+
 	// Telegram notification bots (optional; both must be set to enable)
 	TelegramClientBotToken string
 	TelegramHelperBotToken string
@@ -69,6 +76,9 @@ func Load() *Config {
 		ChatTTL:    envInt("CHAT_TTL", 86400),     // 24h
 		ChatMinTTL: envInt("CHAT_MIN_TTL", 21600), // 6h minimum for rating
 
+		ClientMinBalanceUSD: envFloat("CLIENT_MIN_BALANCE_USD", 150.0),
+		PeerMinBalanceUSD:   envFloat("PEER_MIN_BALANCE_USD", 1000.0),
+
 		TelegramClientBotToken: envOr("TELEGRAM_CLIENT_BOT_TOKEN", ""),
 		TelegramHelperBotToken: envOr("TELEGRAM_HELPER_BOT_TOKEN", ""),
 		TelegramWebhookSecret:  envOr("TELEGRAM_WEBHOOK_SECRET", ""),
@@ -89,6 +99,15 @@ func envInt(key string, fallback int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
+		}
+	}
+	return fallback
+}
+
+func envFloat(key string, fallback float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
+			return f
 		}
 	}
 	return fallback

@@ -13,7 +13,7 @@
 | Invoice payment address | Yes | Plain BTC/LTC invoice address; on-chain transaction is public |
 | IP addresses | No | Rate limiting uses hashed /24 subnet in memory; never written to disk |
 | User accounts, email, phone, username | No | Not collected by design |
-| Telegram identity | Yes, separately | Telegram `chat_id` stored in `client_listing_notifications` and `helper_board_subscriptions`; never cross-referenced with wallet hash |
+| Telegram identity | Yes, separately | Telegram `chat_id` stored in `client_listing_notifications` and `helper_board_subscriptions`; `helper_board_subscriptions` may also store `counselor_hash` (HMAC of helper wallet) when helper links Telegram — see Telegram Integration Privacy section |
 | Pageview analytics | Optional, disabled by default | GoatCounter (self-reported, no cookies, no fingerprinting); only on public pages — see below |
 
 ---
@@ -115,14 +115,21 @@ Messages are deleted from `encrypted_messages` when **both** participants have c
 
 ## Telegram Integration Privacy
 
-Telegram integration is optional and designed so that Telegram identity is never linked to wallet identity.
+Telegram integration is optional.
 
-- `telegram_link_tokens` table stores one-time tokens that bind a Telegram `chat_id` to a listing or helper subscription. The token contains no wallet address or wallet hash.
-- `client_listing_notifications` stores `(listing_id, telegram_chat_id)`. No wallet fields.
-- `helper_board_subscriptions` stores filter preferences per `telegram_chat_id`. No wallet fields.
-- There is no table or query that joins `telegram_chat_id` to `wallet_hash`. A server operator cannot determine which wallet belongs to which Telegram account.
+- `telegram_link_tokens` — one-time tokens that bind a Telegram `chat_id` to a listing or helper subscription. Token type `helper` also carries `counselor_hash` (HMAC-SHA256 of the helper's wallet address) to route direct chat-open notifications. Tokens are deleted by the TTL cleaner immediately after use or after a 10-minute expiry — no `counselor_hash` persists in this table beyond token consumption.
+- `client_listing_notifications` — stores `(listing_id, telegram_chat_id)`. No wallet fields. TTL cleaner deactivates rows when the listing window expires (24h).
+- `helper_board_subscriptions` — stores board notification filter preferences per `telegram_chat_id`. Also stores `counselor_hash` (HMAC-SHA256 of the helper's wallet; nullable) when the helper links Telegram. This enables the "chat opened" direct notification. TTL cleaner deactivates rows after the 24h subscription window.
 
-The one-time link token expires in 10 minutes. After the token is used, only the Telegram `chat_id` and listing/subscription references remain — no link back to the wallet that created the listing.
+**Privacy trade-off for `counselor_hash` in `helper_board_subscriptions`:**
+
+Storing `counselor_hash` links a Telegram `chat_id` to a wallet-derived hash for the duration of the subscription. This is an intentional, opt-in association: helpers explicitly trigger the Telegram link. The column is nullable — subscriptions created before this feature was introduced have `counselor_hash = NULL`. The association is temporary (24h TTL, enforced by the TTL cleaner).
+
+With `HASH_KEY`: an attacker who has both the database and `HASH_KEY` can compute `HMAC(HASH_KEY, candidate_address)` for any known address and check whether it matches a stored `counselor_hash` — linking a helper's wallet to their Telegram `chat_id`. This is documented as a residual risk below.
+
+Without `HASH_KEY`: `counselor_hash` is an opaque HMAC value. It cannot be reversed to a wallet address.
+
+A server operator who has live database access can directly observe the `counselor_hash → telegram_chat_id` mapping for active (non-expired, non-deactivated) helper subscriptions.
 
 ---
 
@@ -153,9 +160,9 @@ For WebSocket authentication, the token is passed in the `Sec-WebSocket-Protocol
 | `encrypted_messages` rows | Nonces and ciphertext only. Cannot decrypt. |
 | `wallet_sessions` rows | `wallet_address_enc` — ciphertext only; cannot recover addresses without `WALLET_ENC_KEY`. |
 | `sessions` rows | `token_hash` only; cannot recover raw tokens. |
-| Telegram tables | `telegram_chat_id` values and listing/subscription links. No wallet association. |
+| Telegram tables | `telegram_chat_id` values and listing/subscription links. `helper_board_subscriptions.counselor_hash` present but opaque without `HASH_KEY`. |
 
-**Result:** Listing metadata and Telegram subscriptions are exposed. Wallet identity and chat content are protected.
+**Result:** Listing metadata and Telegram subscriptions are exposed. Wallet identity and chat content are protected. Helper `counselor_hash` values are present but unlinkable to wallet addresses without `HASH_KEY`.
 
 ### Scenario B: Database stolen + `HASH_KEY` known
 
@@ -188,6 +195,8 @@ For WebSocket authentication, the token is passed in the `Sec-WebSocket-Protocol
 4. **Third-party blockchain API visibility.** Balance checks and payment verification send wallet addresses to external APIs (mempool.space, BlockCypher). These providers can observe that the NA Room server is checking specific addresses. Running own nodes or routing through Tor mitigates this but is not implemented by default.
 
 5. **Frontend delivery trust.** E2E encryption protects against server-side storage compromise but not against a malicious operator who ships altered JavaScript. Users who want to verify must inspect and build the frontend from source.
+
+6. **Helper Telegram identity linkage.** When a helper links Telegram for notifications, their `counselor_hash` (HMAC-SHA256 of wallet address) is stored in `helper_board_subscriptions` alongside their Telegram `chat_id` for up to 24 hours. An attacker with both the database and `HASH_KEY` can link a helper's wallet to their Telegram identity for the duration of any active subscription. Mitigation: the subscription TTL is 24h and is enforced by the TTL cleaner; `counselor_hash` is nullable — helpers who do not link Telegram are unaffected; and without `HASH_KEY` the hash is opaque.
 
 ---
 

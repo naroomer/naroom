@@ -25,6 +25,12 @@ type InvoiceWatcher struct {
 	ListingTTL   int
 	ChatTTL      int
 
+	// Balance thresholds for post-payment verification.
+	// Zero means use code defaults (150 client, 1000 peer).
+	// Set via config from CLIENT_MIN_BALANCE_USD / PEER_MIN_BALANCE_USD.
+	ClientMinBalanceUSD float64
+	PeerMinBalanceUSD   float64
+
 	// Telegram support — set when bot tokens are configured.
 	// When RequireTelegram is true, listings only activate after BOTH payment
 	// AND Telegram binding are confirmed. When false, payment alone activates
@@ -32,6 +38,20 @@ type InvoiceWatcher struct {
 	RequireTelegram bool
 	TelegramSender  telegram.Sender
 	PublicBaseURL   string
+}
+
+func (iw *InvoiceWatcher) clientMinBalance() float64 {
+	if iw.ClientMinBalanceUSD > 0 {
+		return iw.ClientMinBalanceUSD
+	}
+	return 150.0
+}
+
+func (iw *InvoiceWatcher) peerMinBalance() float64 {
+	if iw.PeerMinBalanceUSD > 0 {
+		return iw.PeerMinBalanceUSD
+	}
+	return 1000.0
 }
 
 func (iw *InvoiceWatcher) Run(ctx context.Context) {
@@ -233,7 +253,9 @@ func (iw *InvoiceWatcher) confirmInvoice(invoiceID, typ, txid string, amount int
 
 	now := time.Now().Unix()
 
-	var notifyListingID string // set when a listing is activated/renewed; notified after commit
+	var notifyListingID string      // set when a listing is activated/renewed; notified after commit
+	var notifyChatListingID string  // set when a chat room is created; triggers chat opened notification
+	var notifyChatCounselorHash string
 
 	switch typ {
 	case "listing":
@@ -418,6 +440,8 @@ func (iw *InvoiceWatcher) confirmInvoice(invoiceID, typ, txid string, amount int
 
 		log.Printf("invoice_watcher: chat room %s created (listing=%s, response=%s, opened_chats_count=%d)",
 			roomID, listingIDFromResp, responseID, newOpenedCount)
+		notifyChatListingID = listingIDFromResp
+		notifyChatCounselorHash = counselorHashForRoom
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -425,10 +449,30 @@ func (iw *InvoiceWatcher) confirmInvoice(invoiceID, typ, txid string, amount int
 		return
 	}
 
-	// Notify matching helpers after commit (listing must be 'active' in DB)
+	// Notify after commit: listing activated → client + matching helpers
 	if notifyListingID != "" && iw.TelegramSender != nil {
+		lID := notifyListingID
 		boardURL := iw.PublicBaseURL + "/board"
-		go telegram.NotifyMatchingHelpers(context.Background(), iw.DB, iw.TelegramSender, notifyListingID, boardURL)
+		go func() {
+			ctx := context.Background()
+			if err := telegram.NotifyClientListingActivated(ctx, iw.DB, iw.TelegramSender, lID); err != nil {
+				log.Printf("invoice_watcher: notify client listing activated (listing=%s): %v", lID, err)
+			}
+			if err := telegram.NotifyMatchingHelpers(ctx, iw.DB, iw.TelegramSender, lID, boardURL); err != nil {
+				log.Printf("invoice_watcher: notify matching helpers (listing=%s): %v", lID, err)
+			}
+		}()
+	}
+
+	// Notify after commit: chat opened → client + helper
+	if notifyChatListingID != "" && iw.TelegramSender != nil {
+		lID := notifyChatListingID
+		cHash := notifyChatCounselorHash
+		go func() {
+			if err := telegram.NotifyChatOpened(context.Background(), iw.DB, iw.TelegramSender, lID, cHash); err != nil {
+				log.Printf("invoice_watcher: notify chat opened (listing=%s): %v", lID, err)
+			}
+		}()
 	}
 }
 
@@ -492,10 +536,10 @@ func (iw *InvoiceWatcher) resolveSender(invoiceID, typ, currency, payerAddress s
 	}
 
 	invoiceCost := 5.0
-	minHold := 150.0
+	minHold := iw.clientMinBalance()
 	if typ == "chat" {
 		invoiceCost = 15.0
-		minHold = 1000.0
+		minHold = iw.peerMinBalance()
 	}
 	minUSD := minHold - invoiceCost - 10.0 // subtract invoice cost + $10 volatility buffer
 

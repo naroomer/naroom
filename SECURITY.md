@@ -39,12 +39,14 @@ NA Room verifies wallet control in two distinct steps:
 | Live server operator access | The server operator can observe session timing, listing metadata, and current wallet addresses in `wallet_sessions`. They cannot read chat content or reconstruct wallet history from HMAC hashes without the `HASH_KEY`. |
 | Frontend code delivery | E2E encryption protects against passive storage compromise. It does not protect against a malicious operator who ships altered frontend JavaScript or substitutes public keys. |
 | Payment-as-ownership-proof | We verify that the sender of the blockchain transaction matches the registered wallet. BTC/LTC transactions can have multiple inputs from different addresses; we check all of them. However, this is "transaction participation proof," not cryptographic wallet ownership proof. Edge cases: CoinJoin, custodial sends, and exchange withdrawals may involve multiple unrelated addresses in a single transaction. |
+| Helper Telegram linkage | When a helper links Telegram, `counselor_hash` (HMAC-SHA256 of their wallet address) is stored in `helper_board_subscriptions` alongside their Telegram `chat_id` for up to 24h. An attacker with the database and `HASH_KEY` can link a helper's wallet to their Telegram identity for the duration of any active subscription. Subscriptions are automatically deactivated after 24h by the TTL cleaner. Helpers who do not link Telegram are unaffected. |
 
 ## Threat Model Summary
 
 **Against passive database leak (no `HASH_KEY`, no `WALLET_ENC_KEY`):**
 Strong for listings, chats, and responses — wallet hashes are unlinkable.
 Wallet addresses in `wallet_sessions` are AES-256-GCM encrypted — unreadable without `WALLET_ENC_KEY`.
+Helper Telegram subscriptions may contain `counselor_hash` (HMAC of wallet address) — opaque without `HASH_KEY`.
 
 **Against database leak with `HASH_KEY`:**
 Medium. HMAC hashes in listings/chats/responses can be reversed to wallet addresses. Message content is still E2E encrypted and already deleted.

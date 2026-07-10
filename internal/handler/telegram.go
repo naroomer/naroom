@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -82,7 +83,7 @@ func (h *Handler) TelegramClientToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := h.createTelegramToken("client", req.ListingID, "")
+	token, err := h.createTelegramToken("client", req.ListingID, "", "")
 	if err != nil {
 		writeError(w, 500, "db error")
 		return
@@ -146,8 +147,8 @@ func (h *Handler) TelegramHelperToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 403, "wallet not verified as peer")
 		return
 	}
-	if balanceStatus != "ok" || minRequiredUSD < 1000 {
-		writeError(w, 403, "peer balance verification required (min $1000)")
+	if balanceStatus != "ok" || minRequiredUSD < h.peerMinBalance() {
+		writeError(w, 403, fmt.Sprintf("peer balance verification required (min $%.0f)", h.peerMinBalance()))
 		return
 	}
 
@@ -159,7 +160,7 @@ func (h *Handler) TelegramHelperToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "encode error")
 		return
 	}
-	token, err := h.createTelegramToken("helper", "", string(filtersJSON))
+	token, err := h.createTelegramToken("helper", "", string(filtersJSON), walletHash)
 	if err != nil {
 		writeError(w, 500, "db error")
 		return
@@ -234,7 +235,9 @@ func (h *Handler) TelegramClientWebhook(w http.ResponseWriter, r *http.Request) 
 
 	// Send confirmation to user
 	if h.Telegram != nil {
-		_ = h.Telegram.SendClientMessage(r.Context(), chatID, telegram.ClientConfirmText)
+		if err := h.Telegram.SendClientMessage(r.Context(), chatID, telegram.ClientConfirmText); err != nil {
+			log.Printf("telegram webhook: send client confirm (listing=%s): %v", listingID, err)
+		}
 	}
 
 	// Try to activate the listing now that both gates may be satisfied
@@ -259,8 +262,14 @@ func (h *Handler) TelegramClientWebhook(w http.ResponseWriter, r *http.Request) 
 				return
 			}
 			if (activated || renewed) && h.Telegram != nil {
+				ctx := context.Background()
 				boardURL := h.PublicBaseURL + "/board"
-				_ = telegram.NotifyMatchingHelpers(context.Background(), db, h.Telegram, listingID, boardURL)
+				if err := telegram.NotifyClientListingActivated(ctx, db, h.Telegram, listingID); err != nil {
+					log.Printf("telegram webhook: notify client listing activated (listing=%s): %v", listingID, err)
+				}
+				if err := telegram.NotifyMatchingHelpers(ctx, db, h.Telegram, listingID, boardURL); err != nil {
+					log.Printf("telegram webhook: notify matching helpers (listing=%s): %v", listingID, err)
+				}
 			}
 		}
 	}()
@@ -292,14 +301,17 @@ func (h *Handler) TelegramHelperWebhook(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if h.Telegram != nil {
-		_ = h.Telegram.SendHelperMessage(r.Context(), chatID, telegram.HelperConfirmText)
+		if err := h.Telegram.SendHelperMessage(r.Context(), chatID, telegram.HelperConfirmText); err != nil {
+			log.Printf("telegram webhook: send helper confirm: %v", err)
+		}
 	}
 	writeJSON(w, 200, map[string]string{"status": "ok"})
 }
 
 // createTelegramToken generates and stores a one-time linking token.
-// wallet_hash is intentionally NOT stored — storing it would link Telegram identity to a wallet.
-func (h *Handler) createTelegramToken(tokenType, listingID, filtersJSON string) (string, error) {
+// wallet_address is never stored. counselorHash is stored for helper tokens only — it enables
+// direct "chat opened" notifications without exposing the wallet address.
+func (h *Handler) createTelegramToken(tokenType, listingID, filtersJSON, counselorHash string) (string, error) {
 	now := time.Now().Unix()
 	token := crypto.RandomToken()
 
@@ -311,11 +323,15 @@ func (h *Handler) createTelegramToken(tokenType, listingID, filtersJSON string) 
 	if filtersJSON != "" {
 		nullFilters = sql.NullString{String: filtersJSON, Valid: true}
 	}
+	var nullCounselor sql.NullString
+	if counselorHash != "" {
+		nullCounselor = sql.NullString{String: counselorHash, Valid: true}
+	}
 	_, err := h.DB.Exec(`
 		INSERT INTO telegram_link_tokens
-			(id, token, token_type, listing_id, helper_filters_json, created_at, expires_at, used)
-		VALUES (?, ?, ?, ?, ?, ?, ?, FALSE)
-	`, crypto.NewID("tgl"), token, tokenType, nullListing, nullFilters, now, now+telegramTokenTTL)
+			(id, token, token_type, listing_id, helper_filters_json, counselor_hash, created_at, expires_at, used)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, FALSE)
+	`, crypto.NewID("tgl"), token, tokenType, nullListing, nullFilters, nullCounselor, now, now+telegramTokenTTL)
 	return token, err
 }
 
@@ -391,8 +407,9 @@ func (h *Handler) consumeHelperToken(token, chatID string) error {
 	}
 
 	var filtersRaw sql.NullString
-	if err = tx.QueryRow(`SELECT helper_filters_json FROM telegram_link_tokens WHERE token = ?`,
-		token).Scan(&filtersRaw); err != nil {
+	var counselorHashRaw sql.NullString
+	if err = tx.QueryRow(`SELECT helper_filters_json, counselor_hash FROM telegram_link_tokens WHERE token = ?`,
+		token).Scan(&filtersRaw, &counselorHashRaw); err != nil {
 		return fmt.Errorf("db error")
 	}
 
@@ -402,20 +419,25 @@ func (h *Handler) consumeHelperToken(token, chatID string) error {
 	}
 
 	// Deactivate any existing subscription for this chat_id (same Telegram account, new subscribe).
-	// wallet_hash is not stored — we cannot deactivate across different Telegram accounts for the
-	// same wallet, but that edge case is outweighed by not linking Telegram identity to a wallet.
 	_, _ = tx.Exec(`
 		UPDATE helper_board_subscriptions SET active = FALSE
 		WHERE telegram_chat_id = ? AND active = TRUE
 	`, chatID)
 
+	// counselor_hash is stored to enable direct "chat opened" notifications. It is derived
+	// from the helper's wallet and set when the link token was created (see TelegramHelperToken).
+	var nullCounselor sql.NullString
+	if counselorHashRaw.Valid && counselorHashRaw.String != "" {
+		nullCounselor = counselorHashRaw
+	}
+
 	// expires_at: 24h TTL as documented in schema.
 	_, err = tx.Exec(`
 		INSERT INTO helper_board_subscriptions
-			(id, telegram_chat_id, city, language, problem, help_type, urgency,
+			(id, telegram_chat_id, counselor_hash, city, language, problem, help_type, urgency,
 			 created_at, expires_at, active)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE)
-	`, crypto.NewID("tgh"), chatID,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE)
+	`, crypto.NewID("tgh"), chatID, nullCounselor,
 		nullStr(filters.City), nullStr(filters.Language), nullStr(filters.Problem),
 		nullStr(filters.HelpType), nullStr(filters.Urgency),
 		now, now+86400)

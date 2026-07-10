@@ -41,9 +41,9 @@ func (h *Handler) upsertWalletSession(walletAddress, role, currency string) erro
 	var minRequired float64
 	switch role {
 	case "client":
-		minRequired = 150.0
+		minRequired = h.clientMinBalance()
 	default: // peer
-		minRequired = 1000.0
+		minRequired = h.peerMinBalance()
 	}
 
 	walletHash := crypto.WalletHash(h.HashKey, walletAddress)

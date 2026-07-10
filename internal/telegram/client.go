@@ -6,15 +6,19 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
 )
 
 const (
-	ClientReplyMessage = "NA Room: someone replied to your request. Open NA Room to continue."
-	HelperConfirmText  = "NA Room: board notifications enabled for 24 hours."
-	ClientConfirmText  = "NA Room: notifications connected. You will receive a notification if someone replies."
+	ClientReplyMessage           = "NA Room: someone replied to your request. Open NA Room to continue."
+	HelperConfirmText            = "NA Room: board notifications enabled for 24 hours."
+	ClientConfirmText            = "NA Room: notifications connected. You will receive a notification if someone replies."
+	ClientListingActivatedMessage = "NA Room: your request is now live for 24 hours. Helpers can respond now."
+	ChatOpenedClientMessage      = "NA Room: your chat is open. Return to NA Room to continue."
+	ChatOpenedHelperMessage      = "NA Room: your chat is open. Return to NA Room to continue."
 )
 
 // Sender is implemented by the real Telegram client and by tests.
@@ -96,9 +100,93 @@ func NotifyClientReply(ctx context.Context, db *sql.DB, sender Sender, listingID
 		if err := rows.Scan(&chatID); err != nil {
 			continue
 		}
-		_ = sender.SendClientMessage(ctx, chatID, ClientReplyMessage)
+		if err := sender.SendClientMessage(ctx, chatID, ClientReplyMessage); err != nil {
+			log.Printf("telegram: notify client reply (listing=%s): %v", listingID, err)
+		}
 	}
 	return rows.Err()
+}
+
+// NotifyClientListingActivated sends a notification to the client when their listing goes live.
+func NotifyClientListingActivated(ctx context.Context, db *sql.DB, sender Sender, listingID string) error {
+	if sender == nil {
+		return nil
+	}
+	now := time.Now().Unix()
+	rows, err := db.Query(`
+		SELECT telegram_chat_id
+		FROM client_listing_notifications
+		WHERE listing_id = ? AND active = TRUE AND expires_at > ?
+	`, listingID, now)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var chatID string
+		if err := rows.Scan(&chatID); err != nil {
+			continue
+		}
+		if err := sender.SendClientMessage(ctx, chatID, ClientListingActivatedMessage); err != nil {
+			log.Printf("telegram: notify client listing activated (listing=%s): %v", listingID, err)
+		}
+	}
+	return rows.Err()
+}
+
+// NotifyChatOpened sends "chat opened" notifications to both the client and the helper.
+// The client is found via client_listing_notifications for the listing.
+// The helper is found via helper_board_subscriptions by counselor_hash (nullable — helpers
+// who linked Telegram before the counselor_hash feature was added will not be notified).
+func NotifyChatOpened(ctx context.Context, db *sql.DB, sender Sender, listingID, counselorHash string) error {
+	if sender == nil {
+		return nil
+	}
+	now := time.Now().Unix()
+
+	// Notify client
+	rows, err := db.Query(`
+		SELECT telegram_chat_id
+		FROM client_listing_notifications
+		WHERE listing_id = ? AND active = TRUE AND expires_at > ?
+	`, listingID, now)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var chatID string
+		if err := rows.Scan(&chatID); err != nil {
+			continue
+		}
+		if err := sender.SendClientMessage(ctx, chatID, ChatOpenedClientMessage); err != nil {
+			log.Printf("telegram: notify chat opened to client (listing=%s): %v", listingID, err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	// Notify helper (by counselor_hash stored at Telegram link time)
+	if counselorHash == "" {
+		return nil
+	}
+	var helperChatID string
+	err = db.QueryRow(`
+		SELECT telegram_chat_id
+		FROM helper_board_subscriptions
+		WHERE counselor_hash = ? AND active = TRUE AND expires_at > ?
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, counselorHash, now).Scan(&helperChatID)
+	if err != nil {
+		// No active subscription — helper did not link Telegram or subscription expired.
+		return nil
+	}
+	if err := sender.SendHelperMessage(ctx, helperChatID, ChatOpenedHelperMessage); err != nil {
+		log.Printf("telegram: notify chat opened to helper: %v", err)
+	}
+	return nil
 }
 
 // NotifyMatchingHelpers sends board notifications to active helper subscriptions matching the listing.
@@ -155,7 +243,9 @@ func NotifyMatchingHelpers(ctx context.Context, db *sql.DB, sender Sender, listi
 		}
 		msg := fmt.Sprintf("New request on NA Room\n\nCity: %s\nLanguage: %s\nTopic: %s\nNeed: %s\nUrgency: %s\n\nOpen board: %s",
 			city, lang, problem, helpType, urgency, boardURL)
-		_ = sender.SendHelperMessage(ctx, chatID, msg)
+		if err := sender.SendHelperMessage(ctx, chatID, msg); err != nil {
+			log.Printf("telegram: notify matching helper (listing=%s): %v", listingID, err)
+		}
 	}
 	return rows.Err()
 }

@@ -110,6 +110,8 @@ func main() {
 		ListingTTL: cfg.ListingTTL,
 		ChatTTL:          cfg.ChatTTL,
 		ChatMinTTL:       cfg.ChatMinTTL,
+		ClientMinBalanceUSD: cfg.ClientMinBalanceUSD,
+		PeerMinBalanceUSD:   cfg.PeerMinBalanceUSD,
 		Hub:              hub,
 
 		Telegram:              tgClient,
@@ -237,6 +239,9 @@ func main() {
 		RequireTelegram: requireTelegram,
 		TelegramSender:  tgClient,
 		PublicBaseURL:   cfg.PublicBaseURL,
+
+		ClientMinBalanceUSD: cfg.ClientMinBalanceUSD,
+		PeerMinBalanceUSD:   cfg.PeerMinBalanceUSD,
 	}
 
 	go balanceChecker.Run(ctx)

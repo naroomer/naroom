@@ -81,9 +81,9 @@ func (h *Handler) WalletRegister(w http.ResponseWriter, r *http.Request) {
 	var minUSD float64
 	switch req.Role {
 	case "client":
-		minUSD = 150.0
+		minUSD = h.clientMinBalance()
 	default: // peer
-		minUSD = 1000.0
+		minUSD = h.peerMinBalance()
 	}
 
 	// Use cached balance if wallet was verified within the last 5 minutes.

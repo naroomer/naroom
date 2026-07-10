@@ -40,6 +40,11 @@ func Open(path string) (*sql.DB, error) {
 	db.Exec(`ALTER TABLE listings ADD COLUMN opened_chats_count INTEGER NOT NULL DEFAULT 0`)
 	db.Exec(`ALTER TABLE chat_rooms ADD COLUMN listing_counted INTEGER NOT NULL DEFAULT 0`)
 
+	// P0 Telegram notifications: counselor_hash enables direct "chat opened" helper notification.
+	// Helpers opt into this by linking Telegram; no wallet_address is stored.
+	db.Exec(`ALTER TABLE helper_board_subscriptions ADD COLUMN counselor_hash TEXT`)
+	db.Exec(`ALTER TABLE telegram_link_tokens ADD COLUMN counselor_hash TEXT`)
+
 	// Schema cleanup migrations (must not silently fail if column/table is present)
 	// reconnection_hashes was a stub feature never read by any handler or frontend.
 	// ALTER TABLE … DROP COLUMN IF EXISTS is not valid SQLite syntax — check first.
@@ -50,8 +55,9 @@ func Open(path string) (*sql.DB, error) {
 		}
 	}
 
-	// wallet_hash was mistakenly added to Telegram tables — it links Telegram identity
-	// to wallet_hash, which violates the privacy model. Remove if present.
+	// The generic wallet_hash column was once mistakenly added to Telegram tables without
+	// a specific purpose. Remove if present on old databases. Note: counselor_hash is a
+	// different, intentional column added above for the "chat opened" notification feature.
 	if columnExists(db, "helper_board_subscriptions", "wallet_hash") {
 		if _, err := db.Exec(`ALTER TABLE helper_board_subscriptions DROP COLUMN wallet_hash`); err != nil {
 			db.Close()
