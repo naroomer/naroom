@@ -18,19 +18,23 @@ import (
 )
 
 // ChatHub manages active WebSocket connections per room.
+// Multiple connections for the same wallet (e.g. multiple browser tabs) are each
+// stored under a unique connID so they never overwrite each other.
 type ChatHub struct {
 	mu    sync.RWMutex
-	rooms map[string]map[string]*wsConn // room_id → wallet_hash → conn
+	rooms map[string]map[string]*roomConn // room_id → conn_id → roomConn
 }
 
-type wsConn struct {
-	conn   *websocket.Conn
-	cancel context.CancelFunc
+// roomConn holds one WebSocket connection together with the wallet identity it belongs to.
+type roomConn struct {
+	walletHash string
+	conn       *websocket.Conn
+	cancel     context.CancelFunc
 }
 
 func NewChatHub() *ChatHub {
 	return &ChatHub{
-		rooms: make(map[string]map[string]*wsConn),
+		rooms: make(map[string]map[string]*roomConn),
 	}
 }
 
@@ -127,17 +131,21 @@ func (h *Handler) ChatWS(hub *ChatHub) http.HandlerFunc {
 		ctx, cancel := context.WithCancel(r.Context())
 		defer cancel()
 
-		// Register connection keyed by wallet_hash (never stores plain address in memory map)
+		// Each connection gets a unique ID so multiple tabs for the same wallet
+		// are tracked independently and never overwrite each other.
+		connID := crypto.NewID("ws")
+
 		hub.mu.Lock()
 		if hub.rooms[roomID] == nil {
-			hub.rooms[roomID] = make(map[string]*wsConn)
+			hub.rooms[roomID] = make(map[string]*roomConn)
 		}
-		hub.rooms[roomID][walletHash] = &wsConn{conn: conn, cancel: cancel}
+		hub.rooms[roomID][connID] = &roomConn{walletHash: walletHash, conn: conn, cancel: cancel}
 		hub.mu.Unlock()
 
 		defer func() {
 			hub.mu.Lock()
-			delete(hub.rooms[roomID], walletHash)
+			// Remove only this exact connection — other tabs for the same wallet remain.
+			delete(hub.rooms[roomID], connID)
 			if len(hub.rooms[roomID]) == 0 {
 				delete(hub.rooms, roomID)
 			}
@@ -188,7 +196,9 @@ func (h *Handler) ChatWS(hub *ChatHub) http.HandlerFunc {
 				VALUES (?, ?, ?, ?, ?, ?, ?)
 			`, msgID, roomID, pubkey, msg.Nonce, msg.Ciphertext, msgType, now)
 
-			// Forward to other participant
+			// Forward to all other connections in the room except this one.
+			// Sends to: all tabs of the other participant, and other tabs of the sender.
+			// Does NOT echo back to the sending tab (avoids duplicate display).
 			out := wsOutMessage{
 				ID:           msgID,
 				SenderPubkey: pubkey,
@@ -200,9 +210,9 @@ func (h *Handler) ChatWS(hub *ChatHub) http.HandlerFunc {
 
 			hub.mu.RLock()
 			if room, ok := hub.rooms[roomID]; ok {
-				for pk, wsc := range room {
-					if pk != pubkey {
-						wsjson.Write(ctx, wsc.conn, out)
+				for id, rc := range room {
+					if id != connID {
+						wsjson.Write(ctx, rc.conn, out)
 					}
 				}
 			}
@@ -440,15 +450,15 @@ type wsSystemMsg struct {
 	Event string `json:"event"` // "peer_left" | "room_closed"
 }
 
-// broadcastSystem sends a system event to all WS connections in a room except the sender.
-// senderKey is the wallet_hash of the sender (hub key).
-func (hub *ChatHub) broadcastSystem(roomID, senderKey string, event wsSystemMsg) {
+// broadcastSystem sends a system event to all WS connections in a room except the sender's.
+// senderWalletHash identifies the sending wallet; all other participants' connections receive the event.
+func (hub *ChatHub) broadcastSystem(roomID, senderWalletHash string, event wsSystemMsg) {
 	hub.mu.RLock()
 	defer hub.mu.RUnlock()
 	if room, ok := hub.rooms[roomID]; ok {
-		for key, wsc := range room {
-			if key != senderKey {
-				wsjson.Write(context.Background(), wsc.conn, event)
+		for _, rc := range room {
+			if rc.walletHash != senderWalletHash {
+				wsjson.Write(context.Background(), rc.conn, event)
 			}
 		}
 	}
