@@ -18,18 +18,23 @@ import (
 )
 
 // ChatHub manages active WebSocket connections per room.
-// Multiple connections for the same wallet (e.g. multiple browser tabs) are each
-// stored under a unique connID so they never overwrite each other.
+//
+// Policy: exactly one active connection per (room, wallet).
+//   - Reconnect with the same session token (browser refresh) → takes over, old conn cancelled.
+//   - Connect with a different session token (second browser) → rejected with chat_already_open.
+//   - After the original connection closes the slot is free; any session may reconnect.
 type ChatHub struct {
 	mu    sync.RWMutex
-	rooms map[string]map[string]*roomConn // room_id → conn_id → roomConn
+	rooms map[string]map[string]*roomConn // room_id → wallet_hash → roomConn
 }
 
-// roomConn holds one WebSocket connection together with the wallet identity it belongs to.
+// roomConn holds one WebSocket connection together with identity metadata.
+// sessionTokenHash lets us distinguish a same-session refresh from a second browser.
 type roomConn struct {
-	walletHash string
-	conn       *websocket.Conn
-	cancel     context.CancelFunc
+	walletHash       string
+	sessionTokenHash string // SHA-256(raw session token); used for refresh vs new-browser detection
+	conn             *websocket.Conn
+	cancel           context.CancelFunc
 }
 
 func NewChatHub() *ChatHub {
@@ -89,6 +94,10 @@ func (h *Handler) ChatWS(hub *ChatHub) http.HandlerFunc {
 			return
 		}
 
+		// Compute session identity for same-browser-refresh detection.
+		// ChatWS has no requireSession middleware; auth always flows through Sec-WebSocket-Protocol.
+		sessionTokenHash := middleware.HashToken(wsProtoToken)
+
 		// Determine pubkey from wallet identity via hash comparison
 		var roomStatus string
 		var clientPubkey, counselorPubkey, clientHash, counselorHash string
@@ -131,23 +140,43 @@ func (h *Handler) ChatWS(hub *ChatHub) http.HandlerFunc {
 		ctx, cancel := context.WithCancel(r.Context())
 		defer cancel()
 
-		// Each connection gets a unique ID so multiple tabs for the same wallet
-		// are tracked independently and never overwrite each other.
-		connID := crypto.NewID("ws")
-
+		// ── Single-active-browser policy ─────────────────────────────────────
+		// Check whether another connection for this wallet is already registered.
+		// Must happen AFTER websocket.Accept so we can send a WS-level rejection message
+		// (browser WebSocket API cannot observe pre-upgrade HTTP status codes).
 		hub.mu.Lock()
 		if hub.rooms[roomID] == nil {
 			hub.rooms[roomID] = make(map[string]*roomConn)
 		}
-		hub.rooms[roomID][connID] = &roomConn{walletHash: walletHash, conn: conn, cancel: cancel}
+		if existing, ok := hub.rooms[roomID][walletHash]; ok {
+			if existing.sessionTokenHash != sessionTokenHash {
+				// Different session token → second browser: reject with a system event.
+				hub.mu.Unlock()
+				wsjson.Write(ctx, conn, wsSystemMsg{Type: "system", Event: "chat_already_open"})
+				conn.Close(websocket.StatusPolicyViolation, "chat already open in another browser")
+				return
+			}
+			// Same session token → browser refresh / page reload: cancel the stale connection
+			// so the new one takes over cleanly.
+			existing.cancel()
+		}
+		hub.rooms[roomID][walletHash] = &roomConn{
+			walletHash:       walletHash,
+			sessionTokenHash: sessionTokenHash,
+			conn:             conn,
+			cancel:           cancel,
+		}
 		hub.mu.Unlock()
 
 		defer func() {
 			hub.mu.Lock()
-			// Remove only this exact connection — other tabs for the same wallet remain.
-			delete(hub.rooms[roomID], connID)
-			if len(hub.rooms[roomID]) == 0 {
-				delete(hub.rooms, roomID)
+			// Only deregister if this is still the registered connection for this wallet.
+			// A successful refresh may have already replaced us — don't remove the new conn.
+			if rc, ok := hub.rooms[roomID][walletHash]; ok && rc.conn == conn {
+				delete(hub.rooms[roomID], walletHash)
+				if len(hub.rooms[roomID]) == 0 {
+					delete(hub.rooms, roomID)
+				}
 			}
 			hub.mu.Unlock()
 			conn.Close(websocket.StatusNormalClosure, "")
@@ -196,9 +225,7 @@ func (h *Handler) ChatWS(hub *ChatHub) http.HandlerFunc {
 				VALUES (?, ?, ?, ?, ?, ?, ?)
 			`, msgID, roomID, pubkey, msg.Nonce, msg.Ciphertext, msgType, now)
 
-			// Forward to all other connections in the room except this one.
-			// Sends to: all tabs of the other participant, and other tabs of the sender.
-			// Does NOT echo back to the sending tab (avoids duplicate display).
+			// Forward to the other participant's connection (exactly one per wallet in the room).
 			out := wsOutMessage{
 				ID:           msgID,
 				SenderPubkey: pubkey,
@@ -210,8 +237,8 @@ func (h *Handler) ChatWS(hub *ChatHub) http.HandlerFunc {
 
 			hub.mu.RLock()
 			if room, ok := hub.rooms[roomID]; ok {
-				for id, rc := range room {
-					if id != connID {
+				for wh, rc := range room {
+					if wh != walletHash {
 						wsjson.Write(ctx, rc.conn, out)
 					}
 				}
@@ -450,14 +477,13 @@ type wsSystemMsg struct {
 	Event string `json:"event"` // "peer_left" | "room_closed"
 }
 
-// broadcastSystem sends a system event to all WS connections in a room except the sender's.
-// senderWalletHash identifies the sending wallet; all other participants' connections receive the event.
+// broadcastSystem sends a system event to all connections in the room except the sender's wallet.
 func (hub *ChatHub) broadcastSystem(roomID, senderWalletHash string, event wsSystemMsg) {
 	hub.mu.RLock()
 	defer hub.mu.RUnlock()
 	if room, ok := hub.rooms[roomID]; ok {
-		for _, rc := range room {
-			if rc.walletHash != senderWalletHash {
+		for wh, rc := range room {
+			if wh != senderWalletHash {
 				wsjson.Write(context.Background(), rc.conn, event)
 			}
 		}
