@@ -16,12 +16,15 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	_ "modernc.org/sqlite"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
@@ -37,6 +40,11 @@ func openHubTestDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Force a single connection so all goroutines share the same in-memory database.
+	// Without this, database/sql can open additional connections, each of which
+	// SQLite treats as a completely separate :memory: database — causing queries
+	// from concurrent goroutines (WS handler + HTTP handler) to see empty DBs.
+	db.SetMaxOpenConns(1)
 	for _, q := range []string{
 		`CREATE TABLE sessions (
 			token_hash TEXT PRIMARY KEY,
@@ -613,4 +621,291 @@ func TestChatHub_ExactlyOneSlotPerWallet(t *testing.T) {
 
 	conn1.Close(websocket.StatusNormalClosure, "")
 	conn2.Close(websocket.StatusNormalClosure, "")
+}
+
+// TestChatHub_SecondBrowser_CloseCode_Is4000 verifies that when a second browser
+// (different session token, same wallet) is rejected, the server:
+//  1. sends the JSON system event first (so onmessage fires if it arrives first),
+//  2. closes the connection with WebSocket close code 4000, reason "chat_already_open".
+//
+// Close code 4000 is the reliable rejection signal: the browser's onclose(event)
+// always receives event.code regardless of message/close frame ordering.
+// This prevents the infinite "Reconnecting…" loop seen in production.
+func TestChatHub_SecondBrowser_CloseCode_Is4000(t *testing.T) {
+	db := openHubTestDB(t)
+	defer db.Close()
+	seedHubRoom(t, db)
+
+	hub := NewChatHub()
+	_, url := hubServer(t, db, hub)
+	ctx := context.Background()
+
+	// First browser establishes the session slot.
+	conn1, _ := dialWS(t, ctx, url, testClientToken)
+	defer conn1.Close(websocket.StatusNormalClosure, "")
+	time.Sleep(30 * time.Millisecond)
+
+	// Second browser dials with a different session token (same wallet).
+	conn2, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{
+		Subprotocols: []string{testClientToken2},
+	})
+	if err != nil {
+		t.Fatalf("dial second browser: %v", err)
+	}
+	defer conn2.Close(websocket.StatusNormalClosure, "")
+
+	// First frame: JSON system event {type:"system", event:"chat_already_open"}.
+	readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	_, rawMsg, err := conn2.Read(readCtx)
+	if err != nil {
+		t.Fatalf("expected system JSON message before close, got error: %v", err)
+	}
+	var sysMsg map[string]any
+	if jsonErr := json.Unmarshal(rawMsg, &sysMsg); jsonErr != nil {
+		t.Fatalf("unmarshal system message: %v", jsonErr)
+	}
+	if sysMsg["type"] != "system" || sysMsg["event"] != "chat_already_open" {
+		t.Errorf("system message: want {type:system,event:chat_already_open}, got %v", sysMsg)
+	}
+
+	// Second read: must return a CloseError with code 4000.
+	readCtx2, cancel2 := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel2()
+	_, _, err = conn2.Read(readCtx2)
+	if err == nil {
+		t.Fatal("expected close error from server, got nil")
+	}
+	var closeErr websocket.CloseError
+	if !errors.As(err, &closeErr) {
+		t.Fatalf("expected websocket.CloseError, got: %T: %v", err, err)
+	}
+	if closeErr.Code != websocket.StatusCode(4000) {
+		t.Errorf("close code: got %d, want 4000", closeErr.Code)
+	}
+	if closeErr.Reason != "chat_already_open" {
+		t.Errorf("close reason: got %q, want \"chat_already_open\"", closeErr.Reason)
+	}
+
+	// First browser's slot must still be in the hub, with session A's token hash.
+	time.Sleep(30 * time.Millisecond)
+	hub.mu.RLock()
+	rc := hub.rooms[testRoomID][testClientHash]
+	hub.mu.RUnlock()
+	if rc == nil {
+		t.Error("first browser slot should still be in hub after second-browser rejection")
+	} else if rc.sessionTokenHash != middleware.HashToken(testClientToken) {
+		t.Error("first browser slot should still hold session A's token hash after rejection")
+	}
+}
+
+// hubServerFull creates a test HTTP server with both the WS endpoint and the
+// UpdateChatPubkey endpoint (with requireSession middleware), using chi routing
+// so that chi.URLParam works inside the handler.
+//
+// WebSocket upgrade is a GET request, so we register /chat/ws with r.Get.
+// The pubkey endpoint is POST-only, registered with requireSession middleware.
+func hubServerFull(t *testing.T, db *sql.DB, hub *ChatHub) (*httptest.Server, string) {
+	t.Helper()
+	h := &Handler{DB: db, Hub: hub}
+	requireSess := middleware.RequireSession(db, false, []byte("testhashkey"))
+
+	r := chi.NewRouter()
+	r.Get("/chat/ws", h.ChatWS(hub)) // WebSocket upgrade is always GET
+	r.With(requireSess).Post("/chat/{room_id}/pubkey", h.UpdateChatPubkey)
+
+	srv := httptest.NewServer(r)
+	t.Cleanup(srv.Close)
+	wsURL := "ws" + srv.URL[4:] + "/chat/ws?room_id=" + testRoomID
+	return srv, wsURL
+}
+
+// TestChatHub_ThreeBrowser_ABH_FullSequence is the three-browser regression test.
+//
+// Sequence:
+//   A (session A) + H (helper) are in an active chat.
+//   B (session B, same wallet as A) attempts to enter the same room.
+//
+// Expected invariants:
+//   1. A↔H message delivery works before B arrives.
+//   2. B's pubkey POST is rejected (409) — DB client_pubkey is unchanged.
+//   3. B's WS connection is rejected with {type:system, event:chat_already_open}.
+//   4. Hub still holds exactly 2 entries (A + H) after B's attempt.
+//   5. A↔H message delivery continues uninterrupted after B is rejected.
+//   6. A's hub slot still holds session A's token hash (not replaced by B).
+func TestChatHub_ThreeBrowser_ABH_FullSequence(t *testing.T) {
+	db := openHubTestDB(t)
+	defer db.Close()
+	seedHubRoom(t, db)
+
+	hub := NewChatHub()
+	srv, wsURL := hubServerFull(t, db, hub)
+	ctx := context.Background()
+
+	// ── 1. A and H connect ────────────────────────────────────────────────
+	helperConn, helperMsgs := dialWS(t, ctx, wsURL, testHelperToken)
+	defer helperConn.Close(websocket.StatusNormalClosure, "")
+	time.Sleep(30 * time.Millisecond)
+
+	conn1, conn1Msgs := dialWS(t, ctx, wsURL, testClientToken)
+	defer conn1.Close(websocket.StatusNormalClosure, "")
+	time.Sleep(30 * time.Millisecond)
+
+	if c := hubCount(hub); c != 2 {
+		t.Fatalf("initial hub count: want 2, got %d", c)
+	}
+
+	// ── 2. Verify A↔H messaging works before B ───────────────────────────
+	sendWS(t, ctx, conn1, "pre_b_a2h_n", "pre_b_a2h_c")
+	pre := waitMsg(t, helperMsgs, "H receives A's message before B")
+	if pre.Nonce != "pre_b_a2h_n" {
+		t.Errorf("pre-B A→H nonce: got %q, want pre_b_a2h_n", pre.Nonce)
+	}
+
+	sendWS(t, ctx, helperConn, "pre_b_h2a_n", "pre_b_h2a_c")
+	pre2 := waitMsg(t, conn1Msgs, "A receives H's message before B")
+	if pre2.Nonce != "pre_b_h2a_n" {
+		t.Errorf("pre-B H→A nonce: got %q, want pre_b_h2a_n", pre2.Nonce)
+	}
+
+	// ── 3. B attempts pubkey update — must be denied (409) ───────────────
+	// This simulates Browser B calling loadRoom() which fires the pubkey POST
+	// fire-and-forget. Without the hub check in UpdateChatPubkey, this would
+	// overwrite client_pubkey with B's key and break A↔H encryption silently.
+	pubkeyReq, _ := http.NewRequest("POST",
+		srv.URL+"/chat/"+testRoomID+"/pubkey",
+		strings.NewReader(`{"pubkey":"B_fake_pubkey_hex"}`))
+	pubkeyReq.Header.Set("Content-Type", "application/json")
+	pubkeyReq.Header.Set("Authorization", "Bearer "+testClientToken2) // session B
+	pubkeyResp, err := http.DefaultClient.Do(pubkeyReq)
+	if err != nil {
+		t.Fatalf("pubkey POST failed: %v", err)
+	}
+	pubkeyResp.Body.Close()
+	if pubkeyResp.StatusCode != 409 {
+		t.Errorf("pubkey POST with active A session: got %d, want 409", pubkeyResp.StatusCode)
+	}
+
+	// DB client_pubkey must be unchanged.
+	var storedPubkey string
+	db.QueryRow(`SELECT client_pubkey FROM chat_rooms WHERE id = ?`, testRoomID).Scan(&storedPubkey)
+	if storedPubkey != testClientPub {
+		t.Errorf("client_pubkey after B's POST: got %q, want %q (unchanged)", storedPubkey, testClientPub)
+	}
+
+	// ── 4. B attempts WS connection — must be rejected ────────────────────
+	conn2, conn2Raw := dialWSRaw(t, ctx, wsURL, testClientToken2)
+	rejection := waitRaw(t, conn2Raw, "B receives rejection system message")
+	if rejection["type"] != "system" || rejection["event"] != "chat_already_open" {
+		t.Errorf("B rejection message: got %v, want {type:system,event:chat_already_open}", rejection)
+	}
+	// Channel closes when server closes B's WS.
+	select {
+	case _, ok := <-conn2Raw:
+		if ok {
+			t.Error("expected B's channel closed after rejection, got more messages")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Error("timeout: B's WS not closed after rejection")
+	}
+	conn2.Close(websocket.StatusNormalClosure, "")
+	time.Sleep(30 * time.Millisecond)
+
+	// ── 5. Hub count still 2 (A + H), A's slot unchanged ─────────────────
+	if c := hubCount(hub); c != 2 {
+		t.Errorf("hub count after B: want 2, got %d", c)
+	}
+	hub.mu.RLock()
+	rc := hub.rooms[testRoomID][testClientHash]
+	hub.mu.RUnlock()
+	if rc == nil {
+		t.Error("A's hub slot missing after B's attempt")
+	} else if rc.sessionTokenHash != middleware.HashToken(testClientToken) {
+		t.Errorf("A's hub slot has wrong session hash after B's attempt")
+	}
+
+	// ── 6. A↔H messaging continues uninterrupted after B's attempt ────────
+	sendWS(t, ctx, conn1, "post_b_a2h_n", "post_b_a2h_c")
+	post := waitMsg(t, helperMsgs, "H receives A's message AFTER B rejected")
+	if post.Nonce != "post_b_a2h_n" {
+		t.Errorf("post-B A→H nonce: got %q, want post_b_a2h_n", post.Nonce)
+	}
+
+	sendWS(t, ctx, helperConn, "post_b_h2a_n", "post_b_h2a_c")
+	post2 := waitMsg(t, conn1Msgs, "A receives H's message AFTER B rejected")
+	if post2.Nonce != "post_b_h2a_n" {
+		t.Errorf("post-B H→A nonce: got %q, want post_b_h2a_n", post2.Nonce)
+	}
+}
+
+// TestChatHub_UpdatePubkey_Allowed_WhenNoActiveSession verifies that UpdateChatPubkey
+// succeeds (200) when no WS session is currently active for the wallet — the
+// legitimate reconnect-after-session-loss path.
+func TestChatHub_UpdatePubkey_Allowed_WhenNoActiveSession(t *testing.T) {
+	db := openHubTestDB(t)
+	defer db.Close()
+	seedHubRoom(t, db)
+
+	hub := NewChatHub()
+	srv, _ := hubServerFull(t, db, hub)
+
+	// No WS connections — hub is empty. Session B may update the pubkey freely.
+	req, _ := http.NewRequest("POST",
+		srv.URL+"/chat/"+testRoomID+"/pubkey",
+		strings.NewReader(`{"pubkey":"reconnected_pubkey"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testClientToken2)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("pubkey POST: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("pubkey update with no active session: got %d, want 200", resp.StatusCode)
+	}
+
+	var storedPubkey string
+	db.QueryRow(`SELECT client_pubkey FROM chat_rooms WHERE id = ?`, testRoomID).Scan(&storedPubkey)
+	if storedPubkey != "reconnected_pubkey" {
+		t.Errorf("pubkey not updated: got %q, want reconnected_pubkey", storedPubkey)
+	}
+}
+
+// TestChatHub_UpdatePubkey_Allowed_SameSession verifies that UpdateChatPubkey
+// succeeds (200) when the same session token owns the active WS slot — the
+// normal same-browser page-reload path.
+func TestChatHub_UpdatePubkey_Allowed_SameSession(t *testing.T) {
+	db := openHubTestDB(t)
+	defer db.Close()
+	seedHubRoom(t, db)
+
+	hub := NewChatHub()
+	srv, wsURL := hubServerFull(t, db, hub)
+	ctx := context.Background()
+
+	// Session A holds the WS slot.
+	conn1, _ := dialWS(t, ctx, wsURL, testClientToken)
+	defer conn1.Close(websocket.StatusNormalClosure, "")
+	time.Sleep(30 * time.Millisecond)
+
+	// Same session (A) updates pubkey — must be allowed.
+	req, _ := http.NewRequest("POST",
+		srv.URL+"/chat/"+testRoomID+"/pubkey",
+		strings.NewReader(`{"pubkey":"updated_by_same_session"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testClientToken) // same token as WS
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("pubkey POST: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("same-session pubkey update: got %d, want 200", resp.StatusCode)
+	}
+
+	var storedPubkey string
+	db.QueryRow(`SELECT client_pubkey FROM chat_rooms WHERE id = ?`, testRoomID).Scan(&storedPubkey)
+	if storedPubkey != "updated_by_same_session" {
+		t.Errorf("pubkey not updated: got %q", storedPubkey)
+	}
 }

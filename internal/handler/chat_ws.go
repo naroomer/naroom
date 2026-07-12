@@ -150,10 +150,14 @@ func (h *Handler) ChatWS(hub *ChatHub) http.HandlerFunc {
 		}
 		if existing, ok := hub.rooms[roomID][walletHash]; ok {
 			if existing.sessionTokenHash != sessionTokenHash {
-				// Different session token → second browser: reject with a system event.
+				// Different session token → second browser.
+				// Send a system event so the frontend can show the lock screen if onmessage
+				// fires before onclose (belt-and-suspenders).
+				// Close with code 4000 — the browser's onclose(event) always sees event.code,
+				// so this is the reliable rejection signal regardless of frame ordering.
 				hub.mu.Unlock()
 				wsjson.Write(ctx, conn, wsSystemMsg{Type: "system", Event: "chat_already_open"})
-				conn.Close(websocket.StatusPolicyViolation, "chat already open in another browser")
+				conn.Close(websocket.StatusCode(4000), "chat_already_open")
 				return
 			}
 			// Same session token → browser refresh / page reload: cancel the stale connection
@@ -458,6 +462,25 @@ func (h *Handler) UpdateChatPubkey(w http.ResponseWriter, r *http.Request) {
 	} else {
 		writeError(w, 403, "not a participant")
 		return
+	}
+
+	// Deny the update if a different WS session already owns this wallet's slot in the hub.
+	// Without this check a second browser (fresh keypair, different session token) would
+	// overwrite the legitimate participant's public key and silently break E2E encryption
+	// for the existing pair (A + H) until both sides refresh.
+	if h.Hub != nil {
+		requesterTokenHash := middleware.SessionTokenHash(r.Context())
+		if requesterTokenHash != "" { // non-empty only for Bearer-token auth (not dev bypass)
+			h.Hub.mu.RLock()
+			if room, ok := h.Hub.rooms[roomID]; ok {
+				if rc, ok := room[walletHash]; ok && rc.sessionTokenHash != requesterTokenHash {
+					h.Hub.mu.RUnlock()
+					writeError(w, 409, "another session is active in this room")
+					return
+				}
+			}
+			h.Hub.mu.RUnlock()
+		}
 	}
 
 	if _, err := h.DB.Exec(`UPDATE chat_rooms SET `+col+` = ? WHERE id = ?`, req.Pubkey, roomID); err != nil {
