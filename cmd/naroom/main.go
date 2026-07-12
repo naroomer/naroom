@@ -56,6 +56,9 @@ func main() {
 		log.Fatalf("wallet encryption migration: %v", err)
 	}
 
+	// Correct legacy listing statuses (matched→active/expired, count≥2→closed).
+	db.NormalizeListingStatus(database)
+
 	// Seed demo listings for all cities
 	db.SeedSamples(database)
 

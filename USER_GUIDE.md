@@ -28,7 +28,7 @@ NA Room is an anonymous platform where people struggling with addiction can conn
 ## How the platform works — overview
 
 ```
-Person posts a listing (anonymous, $5, 6 hours)
+Person posts a listing (anonymous, $5, 24 hours)
         ↓
 Peers browse the board and respond (free)
         ↓
@@ -89,7 +89,7 @@ This is not a payment — no funds are moved. The balance check is used only to 
 
 Send exactly the amount shown (in BTC or LTC) to the address on screen. The page checks automatically every few seconds.
 
-After 1 blockchain confirmation your listing appears on the board and stays visible for **6 hours**.
+After 1 blockchain confirmation your listing appears on the board and stays visible for **24 hours**.
 
 You can leave — you do not need to stay online.
 
@@ -121,7 +121,7 @@ The chat is end-to-end encrypted. Messages are unreadable to anyone except you a
 - When the session ends, **all messages are permanently deleted**
 - No logs are kept
 
-If the peer you chose does not pay, you can go back and accept a different peer. If your listing expires, you can renew it for $5 (adds 6 hours, up to the 30-day window).
+If the peer you chose does not pay, you can go back and accept a different peer. If your listing expires, you can renew it for free (adds 24 hours) as long as fewer than 2 paid chats have opened on it — there is no 30-day cutoff.
 
 ### Step 8 — Leave feedback (optional)
 

@@ -114,7 +114,7 @@ export async function run() {
         ({ roomId: roomId2 } = await openPaidChatForListing(api, listingId, PEER2_WALLET, 'T1-chat2'));
       });
 
-      await t.run('T1c: listing status=matched while second chat active (count=2)', async () => {
+      await t.run('T1c: listing status=closed while second chat active (count=2)', async () => {
         const listing = await api.getListing(listingId);
         if (listing.body.status !== 'closed') {
           throw new Error(`T1c: Expected listing closed after second chat opened, got ${listing.body.status}`);
@@ -180,10 +180,12 @@ export async function run() {
         const responseId = `rsp_039_t3_${now}`;
         const invoiceId  = `inv_039_t3_${now}`;
 
-        // Inject: listing (matched, count=0) ← response (accepted) ← invoice (expired, no chat room)
+        // Inject: listing (active, count=0) ← response (accepted) ← invoice (expired, no chat room).
+        // New model: listing is never set to 'matched' when a response is accepted.
+        // It stays 'active'. TTL cleaner step 2d closes the accepted response when invoice expires.
         srv.db(
           `INSERT INTO listings (id, city, dependency_type, help_type, urgency, languages, wallet_hash, visible_until, created_at, status, is_sample, opened_chats_count) ` +
-          `VALUES ('${listingId}', 'new_york', 'alcohol', 'crisis', 'urgent', '["en"]', '${clientHash}', ${now + 3600}, ${now}, 'matched', 0, 0)`
+          `VALUES ('${listingId}', 'new_york', 'alcohol', 'crisis', 'urgent', '["en"]', '${clientHash}', ${now + 3600}, ${now}, 'active', 0, 0)`
         );
         srv.db(
           `INSERT INTO responses (id, listing_id, counselor_hash, counselor_pubkey, status, created_at) ` +
@@ -194,17 +196,13 @@ export async function run() {
           `VALUES ('${invoiceId}', 'chat', 'bc1test', 25.0, 'BTC', '${responseId}', 'expired', ${now})`
         );
 
-        // TTL cleaner runs every 5s — wait for step 2d to fire and restore listing
+        // TTL cleaner runs every 5s — wait for step 2d to close the unpaid accepted response
         await pollUntil(async () => {
-          const r = await api.getListing(listingId);
-          return r.body.status === 'active' ? true : null;
+          const respStatus = srv.db(`SELECT status FROM responses WHERE id = '${responseId}'`);
+          return respStatus === 'closed' ? true : null;
         }, { timeout: 30000, label: 'T3 listing restored to active' });
 
-        // Response must be closed (peer slot freed)
-        const respStatus = srv.db(`SELECT status FROM responses WHERE id = '${responseId}'`);
-        if (respStatus !== 'closed') {
-          throw new Error(`T3: Expected response status=closed after invoice expired, got ${respStatus}`);
-        }
+        // pollUntil above confirmed response is 'closed'; listing was always 'active' (new model).
 
         // Listing must appear on board (a new peer can now respond)
         const board = await api.getBoard('new_york');

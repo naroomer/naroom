@@ -134,10 +134,12 @@ export async function run() {
       roomId = room.room_id;
     });
 
-    await t.run('listing removed from board after chat opens', async () => {
+    await t.run('listing still on board after first chat opens (second slot available)', async () => {
+      // New model: listing stays 'active' while opened_chats_count < 2.
+      // First chat open → count=1 → listing remains visible on board for a second peer.
       const r = await api.getBoard('new_york');
       const found = r.body.find(l => l.id === listingId);
-      if (found) throw new Error('Listing still on board after match');
+      if (!found) throw new Error('Listing disappeared from board after first chat — should stay for second peer');
     });
 
     await t.run('DB: room response_id matches current response', async () => {

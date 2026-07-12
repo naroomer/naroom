@@ -65,6 +65,7 @@
 	let timeLeftSec = $state(0);
 	let closing   = $state(false);
 	let showCloseModal = $state(false);
+	let chatAlreadyOpen = $state(false); // true when another browser has this chat open
 
 	let ws;
 	let keypair;
@@ -177,7 +178,7 @@
 	}
 
 	function connectWS() {
-		if (closed) return;
+		if (closed || chatAlreadyOpen) return;
 		const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
 		const host = location.host;
 		const url = `${proto}//${host}/ws/chat/ws?room_id=${roomId}`;
@@ -196,7 +197,11 @@
 
 				// System event (not encrypted chat message)
 				if (data.type === 'system') {
-					if (data.event === 'peer_left' && room?.role === 'client') {
+					if (data.event === 'chat_already_open') {
+						chatAlreadyOpen = true;
+						clearTimeout(wsReconnectTimer); // cancel any timer set before this message arrived
+						return;
+					} else if (data.event === 'peer_left' && room?.role === 'client') {
 						peerLeft = true;
 					} else if (data.event === 'client_left' && room?.role === 'peer') {
 						peerLeft = true; // reuse same UI — "other side has left"
@@ -233,8 +238,14 @@
 
 		ws.onerror = () => {};
 
-		ws.onclose = async () => {
-			if (closed) return;
+		ws.onclose = async (event) => {
+			// Code 4000 = server rejected this connection as a second browser.
+			// This is reliable even when the close frame arrives before the JSON message.
+			if (event.code === 4000) {
+				chatAlreadyOpen = true;
+				return;
+			}
+			if (closed || chatAlreadyOpen) return;
 			// Check if room was closed by the other side before reconnecting
 			try {
 				const r = await fetch(`/api/chat/${roomId}`, { headers: chatHeaders() });
@@ -434,7 +445,16 @@
 </script>
 
 <div class="page">
-	{#if needsAuth}
+	{#if chatAlreadyOpen}
+		<div class="center" style="flex-direction:column;gap:16px;padding:32px;text-align:center">
+			<div style="font-size:32px">🔒</div>
+			<h2 style="font-size:18px;margin:0">{t('chat.already_open_title')}</h2>
+			<p style="font-size:14px;color:var(--text-dim);max-width:320px;margin:0">
+				{t('chat.already_open_body')}
+			</p>
+		</div>
+
+	{:else if needsAuth}
 		<div class="center" style="flex-direction:column;gap:16px;padding:32px">
 			<div style="font-size:15px;color:var(--text-dim);text-align:center">
 				{t('chat.session_lost') || 'Session not found. Enter your wallet address to reconnect.'}

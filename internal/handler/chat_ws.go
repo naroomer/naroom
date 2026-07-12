@@ -295,18 +295,24 @@ func (h *Handler) ResumeChat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"room_id": roomID})
 		return
 	}
-	// Fallback: matched listing with no chat room yet — peer accepted but chat room not yet open.
-	// Excludes listings that already have a chat room (even closed/peer_left) — those are handled
-	// by the primary query above or by sessionStorage on the client.
-	var listingID string
+	// Fallback: owner's most recent active or expired listing.
+	// Returns listing_id + can_renew + opened_chats_count so the client can decide next action.
+	var listingID, listingStatus string
+	var openedChatsCount int
 	err = h.DB.QueryRow(`
-		SELECT id FROM listings
-		WHERE wallet_hash = ? AND status = 'matched'
-		  AND id NOT IN (SELECT listing_id FROM chat_rooms WHERE listing_id IS NOT NULL)
+		SELECT id, status, COALESCE(opened_chats_count, 0)
+		FROM listings
+		WHERE wallet_hash = ? AND status IN ('active', 'expired') AND is_sample = 0
 		ORDER BY created_at DESC LIMIT 1
-	`, walletHash).Scan(&listingID)
+	`, walletHash).Scan(&listingID, &listingStatus, &openedChatsCount)
 	if err == nil {
-		writeJSON(w, 200, map[string]any{"listing_id": listingID, "listing_status": "matched"})
+		canRenew := openedChatsCount < 2
+		writeJSON(w, 200, map[string]any{
+			"listing_id":         listingID,
+			"listing_status":     listingStatus,
+			"can_renew":          canRenew,
+			"opened_chats_count": openedChatsCount,
+		})
 		return
 	}
 	writeError(w, 404, "no active chat room")
@@ -623,24 +629,19 @@ func (h *Handler) CloseChat(w http.ResponseWriter, r *http.Request) {
 	}
 	tx.Exec(`UPDATE responses SET status = 'closed' WHERE id = ?`, responseID)
 
-	// Determine new listing status based on opened_chats_count.
-	// Do NOT increment here — count was already incremented when chat_room was created.
-	// If < 2 chats opened: reopen listing so a second peer can respond.
-	// If >= 2 chats opened: listing stays closed permanently.
+	// Update listing status when a chat closes.
+	// Do NOT increment opened_chats_count here — it was already incremented at room creation.
+	// Listing stays 'active' (or 'expired') while count < 2; close it only when 2nd chat ends.
 	if listingIDForClose.Valid && listingIDForClose.String != "" {
 		var openedChatsCount int
 		tx.QueryRow(`SELECT COALESCE(opened_chats_count, 0) FROM listings WHERE id = ?`, listingIDForClose.String).Scan(&openedChatsCount)
-		if openedChatsCount < 2 {
-			// First chat closed and count < 2 — reopen listing so a second peer can respond
-			tx.Exec(`UPDATE listings SET status = 'active' WHERE id = ? AND status = 'matched'`, listingIDForClose.String)
-			log.Printf("chat_ws: room %s closed, listing %s reopened for second peer (opened_chats_count=%d)",
-				roomID, listingIDForClose.String, openedChatsCount)
-		} else {
-			// Second (or more) chat closed — listing permanently closed
-			tx.Exec(`UPDATE listings SET status = 'closed' WHERE id = ? AND status IN ('matched', 'active')`, listingIDForClose.String)
+		if openedChatsCount >= 2 {
+			// Second (or more) chat closed — listing permanently consumed
+			tx.Exec(`UPDATE listings SET status = 'closed' WHERE id = ? AND status = 'active'`, listingIDForClose.String)
 			log.Printf("chat_ws: room %s closed, listing %s permanently closed (opened_chats_count=%d)",
 				roomID, listingIDForClose.String, openedChatsCount)
 		}
+		// count < 2: listing is already 'active' (or 'expired') — a second peer may still respond
 	}
 
 	chatDuration := now - startedAt

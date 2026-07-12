@@ -13,7 +13,16 @@
 	let wallet   = $state('');
 	let loading  = $state(false);
 	let error    = $state('');
-	let matchedListingId = $state('');
+	let foundListing = $state(null); // { id, status, can_renew }
+
+	function handleResumeData(data) {
+		if (data.room_id) { goto(`/chat/${data.room_id}`); return true; }
+		if (data.listing_id) {
+			foundListing = { id: data.listing_id, status: data.listing_status, can_renew: data.can_renew };
+			return true;
+		}
+		return false;
+	}
 
 	// On mount: try stored session tokens before showing the wallet input form.
 	// Covers the common case where client has sessionStorage from when they created/accepted.
@@ -26,9 +35,7 @@
 					headers: { 'Authorization': `Bearer ${token}` },
 				});
 				if (pr.ok) {
-					const data = await pr.json();
-					if (data.room_id) { goto(`/chat/${data.room_id}`); return; }
-					if (data.listing_id) { matchedListingId = data.listing_id; return; }
+					if (handleResumeData(await pr.json())) return;
 				}
 			} catch {}
 		}
@@ -36,7 +43,7 @@
 
 	async function resume() {
 		if (!wallet.trim()) return;
-		loading = true; error = ''; matchedListingId = '';
+		loading = true; error = ''; foundListing = null;
 		try {
 			const currency = detectCurrency(wallet.trim());
 			// Try peer first, then client — both use same /resume endpoint
@@ -54,16 +61,7 @@
 					headers: { 'Authorization': `Bearer ${session_token}` },
 				});
 				if (pr.ok) {
-					const data = await pr.json();
-					if (data.room_id) {
-						goto(`/chat/${data.room_id}`);
-						return;
-					}
-					// Fallback: matched listing awaiting peer payment
-					if (data.listing_id) {
-						matchedListingId = data.listing_id;
-						return;
-					}
+					if (handleResumeData(await pr.json())) return;
 				}
 			}
 			error = 'No active session found for this wallet.';
@@ -88,10 +86,14 @@
 			onkeydown={(e) => e.key === 'Enter' && resume()}
 		/>
 		{#if error}<div class="err">{error}</div>{/if}
-		{#if matchedListingId}
+		{#if foundListing}
 			<div class="matched">
-				<p>Your request was matched — waiting for the helper to pay.<br>
-				Check your <a href="/listing/{matchedListingId}">request status</a>.</p>
+				{#if foundListing.status === 'expired' && foundListing.can_renew}
+					<p>{t('listing.resume_expired')}</p>
+				{:else}
+					<p>{t('listing.resume_active')}</p>
+				{/if}
+				<a href="/listing/{foundListing.id}" class="btn-link">{t('listing.resume_view')}</a>
 			</div>
 		{:else}
 			<button disabled={!wallet || loading} onclick={resume}>
@@ -146,7 +148,8 @@
 	}
 	button:disabled { opacity: 0.5; cursor: not-allowed; }
 	.err { color: var(--error, #e55); font-size: 13px; }
-	.matched { background: var(--bg-card2, #1a1a2e); border: 1px solid var(--accent); border-radius: 8px; padding: 14px; font-size: 14px; }
+	.matched { background: var(--bg-card2, #1a1a2e); border: 1px solid var(--accent); border-radius: 8px; padding: 14px; font-size: 14px; display: flex; flex-direction: column; gap: 10px; }
 	.matched p { margin: 0; }
 	.matched a { color: var(--accent); }
+	.btn-link { display: inline-block; padding: 10px 16px; background: var(--accent); color: #fff; border-radius: 8px; font-size: 14px; font-weight: 600; text-decoration: none; text-align: center; }
 </style>

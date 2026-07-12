@@ -1,24 +1,20 @@
 // 038_client_resume.js — regression for production bug:
-// listing disappears from board when peer pays chat invoice (listing → 'matched').
-// Client loses chat entry point.
+// client loses chat entry point after first peer pays (chat room opened).
 //
-// Exact failure proven in production:
-//   - listing page hid all client UI when status === 'matched' (showed expired_note)
-//   - /resume page required manual wallet re-entry, never used stored session token
+// New model (2026-07-12): listing stays 'active' when first chat opens. No 'matched' status.
 //
 // Fixed by:
-//   1. listing page: new {:else if listing.status === 'matched'} branch auto-loads chat via stored session
+//   1. listing page: onMount auto-calls /api/listing/{id}/chatroom; renders chat button when room found
 //   2. resume page: onMount tries stored session tokens before showing wallet form
-//   3. ResumeChat handler: fallback returns listing_id when listing is matched but no chat room yet
+//   3. ResumeChat handler: primary: chat_rooms WHERE active; fallback: listing_id for active/expired listing
 //
 // Tests:
-//   T1: GET /resume with valid client session → returns room_id (listing matched, chat active)
+//   T1: GET /resume with valid client session → returns room_id (listing active, first chat open)
 //       This is the onMount fast-path: client returns to site, session in storage → immediate redirect
 //   T2: GET /listing/{id}/chatroom with client session → returns room_id (listing page recovery path)
-//   T3: /resume returns 404 when listing is matched but already has a chat room and it is closed
-//       (not the fallback — it is the active-room path that doesn't find a closed room)
-//   T4: matched-listing fallback: listing matched, no chat room → /resume returns listing_id
-//   T5: scope: /resume does not leak matched listing to unrelated wallet
+//   T3: /resume returns 404 when listing has a closed chat room and no active room
+//   T4: active listing, no chat room → /resume returns listing_id (fallback state, new model)
+//   T5: scope: /resume does not leak active listing to unrelated wallet
 
 import { TestServer, sleep } from '../lib/server.js';
 import { ApiClient } from '../lib/http.js';
@@ -84,14 +80,11 @@ export async function run() {
         }, { timeout: 30000, label: 'chat room opened' });
         roomId = room.room_id;
 
-        // Verify listing is 'matched' (gone from public board)
+        // In the new model, listing stays 'active' while first chat is open
+        // (no 'matched' status). It stays on the board until opened_chats_count reaches 2.
         const listing = await api.getListing(listingId);
-        if (listing.body.status !== 'matched') {
-          throw new Error(`Expected listing status=matched, got ${listing.body.status}`);
-        }
-        const board = await api.getBoard('new_york');
-        if (board.body.listings?.some(l => l.id === listingId)) {
-          throw new Error('Listing still on board after going matched');
+        if (listing.body.status !== 'active') {
+          throw new Error(`Expected listing status=active (new model), got ${listing.body.status}`);
         }
       });
 
@@ -145,9 +138,10 @@ export async function run() {
 
       let injectedListingId;
 
-      // T4: matched listing with no chat room → /resume returns listing_id (fallback state)
-      await t.run('T4: matched listing, no chat room → /resume returns listing_id as fallback', async () => {
-        injectedListingId = injectListing(srv, clientHash, 'matched');
+      // T4: active listing with no chat room → /resume returns listing_id (fallback state)
+      // In the new model there is no 'matched' status; listings stay 'active' through all chats.
+      await t.run('T4: active listing, no chat room → /resume returns listing_id as fallback', async () => {
+        injectedListingId = injectListing(srv, clientHash, 'active');
 
         const r = await api.get('/resume', CLIENT_WALLET);
         assertStatus(r, 200, '/resume fallback');
@@ -157,8 +151,8 @@ export async function run() {
         if (r.body.listing_id !== injectedListingId) {
           throw new Error(`listing_id mismatch: got ${r.body.listing_id}, expected ${injectedListingId}`);
         }
-        if (r.body.listing_status !== 'matched') {
-          throw new Error(`Expected listing_status=matched, got ${r.body.listing_status}`);
+        if (r.body.listing_status !== 'active') {
+          throw new Error(`Expected listing_status=active (new model), got ${r.body.listing_status}`);
         }
       });
 

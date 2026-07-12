@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS listings (
     status TEXT DEFAULT 'active',
     is_sample INTEGER DEFAULT 0,        -- 1 = demo listing shown to new visitors
     renewal_count INTEGER DEFAULT 0,    -- how many times renewed
-    first_activated_at INTEGER,         -- set on first payment, used for 30-day renewal window
+    first_activated_at INTEGER,         -- set on first payment (retained for analytics; not used for renewal gating)
     opened_chats_count INTEGER NOT NULL DEFAULT 0  -- number of paid chat_rooms created for this listing (max 2)
 );
 

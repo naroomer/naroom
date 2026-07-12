@@ -27,7 +27,7 @@ func (h *Handler) Board(w http.ResponseWriter, r *http.Request) {
 		       l.is_sample
 		FROM listings l
 		WHERE l.city = ? AND l.status = 'active' AND l.visible_until > ?
-		  AND NOT EXISTS (SELECT 1 FROM chat_rooms cr WHERE cr.listing_id = l.id AND cr.status = 'active')
+		  AND COALESCE(l.opened_chats_count, 0) < 2
 		ORDER BY l.is_sample ASC, l.created_at DESC
 		LIMIT 50
 	`, city, now)

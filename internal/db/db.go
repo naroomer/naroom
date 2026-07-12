@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"fmt"
 	"log"
+	"time"
 
 	ncrypto "naroom/internal/crypto"
 
@@ -249,4 +250,32 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// NormalizeListingStatus corrects legacy listing statuses at startup.
+// Idempotent: safe to run on every start.
+//
+//	matched + count<2 + visible_until>now  → active
+//	matched + count<2 + visible_until≤now  → expired
+//	any status + count≥2 + not closed      → closed
+func NormalizeListingStatus(db *sql.DB) {
+	now := time.Now().Unix()
+	if res, err := db.Exec(`UPDATE listings SET status='active'
+		WHERE status='matched' AND COALESCE(opened_chats_count,0) < 2 AND visible_until > ?`, now); err == nil {
+		if n, _ := res.RowsAffected(); n > 0 {
+			log.Printf("db: normalized %d matched→active listings", n)
+		}
+	}
+	if res, err := db.Exec(`UPDATE listings SET status='expired'
+		WHERE status='matched' AND COALESCE(opened_chats_count,0) < 2 AND visible_until <= ?`, now); err == nil {
+		if n, _ := res.RowsAffected(); n > 0 {
+			log.Printf("db: normalized %d matched→expired listings", n)
+		}
+	}
+	if res, err := db.Exec(`UPDATE listings SET status='closed'
+		WHERE COALESCE(opened_chats_count,0) >= 2 AND status != 'closed'`); err == nil {
+		if n, _ := res.RowsAffected(); n > 0 {
+			log.Printf("db: normalized %d listings to closed (count≥2)", n)
+		}
+	}
 }

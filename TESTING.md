@@ -5,13 +5,13 @@
 | Type | Location | Runner | Count |
 |------|----------|--------|-------|
 | Go unit tests | `internal/crypto/`, `internal/handler/`, `internal/worker/` | `go test` | 26 |
-| E2E tests (automated) | `e2e/tests/` | Node.js | 36 |
-| E2E test (Playwright) | `e2e/tests/026_analytics_privacy.js` | Playwright | 1 |
+| E2E tests (automated) | `e2e/tests/` | Node.js | 41 |
+| E2E tests (Playwright) | `e2e/tests/026_analytics_privacy.js`, `e2e/tests/043_browser_renewal.js` | Playwright | 2 |
 | Frontend type check | `frontend/` | `npm run check` | — |
 
-Current status: **36/36 E2E · 26/26 unit — all green**
+Current status: **41/41 E2E · 79/79 unit — all green**
 
-The Playwright test (026) runs separately via `selftest-full.sh` because it requires a running frontend and Playwright installation.
+The Playwright tests (026, 043) run separately because they require Playwright installation and specific port availability. They are excluded from `selftest.sh`.
 
 ---
 
@@ -25,21 +25,26 @@ This script:
 1. Builds the Go binary (`go build ./...`)
 2. Runs Go unit tests (`go test ./...`)
 3. Runs `npm run check` + `npm run build` in `/frontend`
-4. Runs all 36 E2E tests (excludes 026 — Playwright)
+4. Runs all 41 API-level E2E tests (excludes 026 and 043 — Playwright)
 
 All steps must pass. The script exits non-zero on any failure.
 
-### Extended Suite (includes Playwright test 026)
+### Playwright tests (026 and 043)
 
+**026 — analytics privacy (requires running frontend):**
 ```bash
-# Build and serve the frontend first:
 cd frontend && npm run build && npm run preview &
-
-# Then run the full suite:
-FRONTEND_URL=http://localhost:4173 bash scripts/selftest-full.sh
+FRONTEND_URL=http://localhost:4173 node e2e/tests/026_analytics_privacy.js
 ```
 
-Requires: `npm install -D playwright && npx playwright install chromium`
+**043 — browser-level renewal (self-contained, starts its own servers):**
+```bash
+node e2e/tests/043_browser_renewal.js
+```
+
+Both require: `cd e2e && npm install -D playwright && npx playwright install chromium`
+
+Port 8080 and port 5173 must be free before running 043.
 
 ---
 
@@ -75,7 +80,7 @@ Each test file is a standalone module that boots its own server instance. Tests 
 | `016_role_separation_respond.js` | Client role cannot call respond endpoint (403); listing owner with client role also rejected; listing remains active after rejected attempts |
 | `017_max_responses.js` | Two peers respond successfully (slots 1 and 2); third peer returns 409; database asserts exactly 2 pending rows |
 | `018_balance_threshold.js` | Balance gate enforced in `devMode=false`: peer at $1000 fills slot 1 (OK), fails slot 2 (403); after raising to $2000, slot 2 succeeds |
-| `019_renewal_blocked.js` | Renewal allowed at 0 and 1 pending responses; blocked (409) at 2 pending responses; `GET /listing/{id}` shows `can_renew=false` |
+| `019_renewal_blocked.js` | Renewal allowed at opened_chats_count=0/1; blocked (409) at count=2; `GET /listing/{id}` shows `can_renew` correctly |
 | `020_devmode_headers.js` | In `devMode=false`, `X-Dev-Wallet` and `X-Dev-Role` headers are ignored and do not grant access |
 | `021_cancel_cooldown.js` | Peer who cancels a response cannot respond to the same listing for 30 minutes (cooldown_until enforced) |
 | `022_message_ttl.js` | TTL worker deletes encrypted messages older than 24 hours from the database |
@@ -83,6 +88,7 @@ Each test file is a standalone module that boots its own server instance. Tests 
 | `024_log_privacy.js` | Server log output during a full flow contains no raw IP address, wallet address, or session token |
 | `025_abuse_ban.js` | Three abuse reports against a client sets `banned_until = now + 72h`; five reports sets a long-term ban |
 | `026_analytics_privacy.js` | **(Playwright)** Browser-level check that analytics (GoatCounter) does not load on private pages (`/new`, `/helper`, `/chat/*`, `/listing/*`) |
+| `043_browser_renewal.js` | **(Playwright)** Browser-level renewal flow: expired listing page shows wallet auth form; wrong wallet cannot unlock renewal; correct owner wallet → renew button visible → click → success UI; renewed listing appears on board; listing with >1h left does not show renew button |
 | `027_challenge_replay.js` | Wallet trust model: balance pre-check only at register; payment-time sender verification is the ownership proof; `/wallet/challenge` absent by design |
 | `028_payment_edge_cases.js` | Payment watcher edge cases: underpayment not confirmed; API timeout → watcher retries; recovery after API restore |
 | `029_ciphertext_only.js` | Server-side DB contains only ciphertext: canary plaintext not recoverable from `encrypted_messages`, raw DB file, or WAL |
@@ -91,6 +97,7 @@ Each test file is a standalone module that boots its own server instance. Tests 
 | `032_concurrent_close.js` | Concurrent close attempts on the same room → only one wins; no zombie state |
 | `033_devmode_prod_failsafe.js` | Binary compiled without `-tags dev` rejects `DEV_MODE=true` at startup |
 | `037_slot_release.js` | Slot formula edge cases (devMode=false): $999/$1000/$1999/$2000 correct slot counts; expired chat room frees `accepted` response slot after TTL cleaner; second cleaner pass is idempotent; `peer_left` room does not free slot prematurely |
+| `042_free_renewal_e2e.js` | **API E2E** — Free renewal eligibility and atomic guard: 30-day-old listing still renewable (no cutoff); early renewal blocked (>1h left → 409); expired listing → free renewal 200; listing on board; duplicate 409; renewal_count increments; DB invoice count unchanged after renewal (zero new invoices); count=2 → 409; wrong wallet → 403 |
 
 ---
 
@@ -131,9 +138,17 @@ Tests for AES-256-GCM round-trip, wrong-key error, tamper detection (GCM auth ta
 
 Tests the challenge/verify security properties: one-time use (replay rejected), TTL expiry, address binding (challenge for A cannot be used by B), and concurrent-replay atomicity (exactly one winner).
 
-### `internal/worker/invoice_watcher_test.go` (12 tests)
+### `internal/worker/invoice_watcher_test.go` (12+ tests)
 
 Tests for empty payer address rejection, no-senders rejection, wrong-wallet rejection, multi-input match, API error leaving invoice pending, double-confirm guard, grace window (still pending), grace window (expired), and balance threshold math at exact pass/fail boundaries for listing and chat types.
+
+### `internal/handler/listing_visibility_test.go` (17 tests, VIS-1…VIS-17)
+
+Tests for the listing visibility and free-renewal model: board shows listing during first active chat (VIS-1); board hides listing when count=2 (VIS-2, VIS-3); renewal allowed at count=0/1 (VIS-4, VIS-5); renewal blocked at count=2 (VIS-6); wrong wallet → 403 (VIS-7); resume returns expired listing with can_renew (VIS-8, VIS-9); close-chat status transitions (VIS-10, VIS-11); 30-day-old listing still renewable (VIS-12, VIS-13); early renewal blocked (VIS-14); duplicate renewal blocked (VIS-15); full renewal assertions — count unchanged, renewal_count increments once, visible_until ≈ now+86400, zero invoices (VIS-16); Telegram notification exactly once per eligible renewal (VIS-17).
+
+### `internal/handler/accept_concurrent_test.go` (5 tests, ACC-1…ACC-5)
+
+Tests for second-concurrent-chat entitlement: second Helper accepted while Chat A active (ACC-1); blocked by unpaid invoice without chat room (ACC-2); pending responses preserved after first acceptance (ACC-3); blocked when count=2 (ACC-4); blocked by active chat in different listing (ACC-5).
 
 ---
 

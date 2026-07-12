@@ -214,8 +214,16 @@ export async function run() {
         await api.closeChat(roomId, CLIENT_WALLET);
 
         const r = await api.get('/resume', CLIENT_WALLET);
-        if (r.status !== 404) {
-          throw new Error(`Closed room should not appear in /resume, got ${r.status} ${JSON.stringify(r.body)}`);
+        // New model: after first chat closes (count=1 < 2), listing stays 'active'.
+        // /resume returns the listing_id (fallback path), NOT the room_id.
+        // The closed room must NOT appear as a room_id.
+        if (r.status === 200) {
+          if (r.body.room_id === roomId) {
+            throw new Error(`Closed room_id should not appear in /resume — got room_id: ${roomId}`);
+          }
+          // listing_id fallback is correct behavior (listing still active for second peer)
+        } else if (r.status !== 404) {
+          throw new Error(`Unexpected /resume status: ${r.status} ${JSON.stringify(r.body)}`);
         }
       });
 
@@ -226,22 +234,24 @@ export async function run() {
         }
       });
 
-      await t.run('T9c: peer_left room (only peer closed) still returns in /resume for client', async () => {
-        const { roomId: rid2 } = await setupChat(api, srv);
-        // Only peer leaves — room in peer_left state
+      await t.run('T9c: peer_left room (only peer closed) — /resume returns listing fallback for client', async () => {
+        const { roomId: rid2, listingId: lid2 } = await setupChat(api, srv);
+        // Only peer leaves — room enters peer_left state
         await api.closeChat(rid2, PEER_WALLET);
 
-        // Client should still see the room (status=peer_left, accessible to client)
+        // /resume primary path: only returns status='active' rooms.
+        // peer_left room is not active → no room_id.
+        // New model: listing stays 'active' (count=1 < 2), so fallback returns listing_id.
         const r = await api.get('/resume', CLIENT_WALLET);
-        // peer_left is NOT status='active' — /resume only queries status='active'
-        // This is intentional: client should use their stored room_id in sessionStorage.
-        // If sessionStorage was cleared, /resume won't find peer_left rooms.
-        // T9c tests the ACTUAL behavior: /resume returns 404 for peer_left rooms.
-        // This is a known design limitation — document as expected behavior.
-        if (r.status === 200 && r.body.room_id === rid2) {
-          // /resume returned peer_left room — that means the query was expanded. Fine too.
+        if (r.status === 200 && r.body.room_id) {
+          // Acceptable only if it's NOT the peer_left room
+          if (r.body.room_id === rid2) {
+            throw new Error(`peer_left room should not be returned by /resume (status='active' filter)`);
+          }
+        } else if (r.status === 200 && r.body.listing_id) {
+          // Expected new-model behavior: fallback returns listing_id (listing still active)
         } else if (r.status === 404) {
-          // Expected: /resume only returns status='active' rooms
+          // Also acceptable: listing might not be visible (closed for other reason)
         } else {
           throw new Error(`Unexpected /resume status: ${r.status} ${JSON.stringify(r.body)}`);
         }

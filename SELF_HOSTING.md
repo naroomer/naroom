@@ -28,7 +28,7 @@ BLOCKCYPHER_API=https://api.blockcypher.com/v1/ltc/main
 BALANCE_CHECK_INTERVAL=600           # seconds
 TTL_CLEAN_INTERVAL=60
 INVOICE_WATCH_INTERVAL=30
-LISTING_TTL=21600                    # 6 hours
+LISTING_TTL=86400                    # 24 hours (default; override to customise visibility window)
 CHAT_TTL=86400                       # 24 hours
 ```
 

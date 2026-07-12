@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -58,19 +57,18 @@ func (h *Handler) GetListing(w http.ResponseWriter, r *http.Request) {
 	var id, city, depType, helpType, urgency, langsRaw string
 	var visibleUntil, createdAt int64
 	var status string
-	var firstActivatedAt sql.NullInt64
 	var renewalCount, openedChatsCount int
 	var isSample bool
 
 	err := h.DB.QueryRow(`
 		SELECT id, city, dependency_type, help_type, urgency, languages,
 		       visible_until, created_at, status,
-		       first_activated_at, COALESCE(renewal_count, 0), is_sample,
+		       COALESCE(renewal_count, 0), is_sample,
 		       COALESCE(opened_chats_count, 0)
 		FROM listings WHERE id = ?
 	`, listingID).Scan(&id, &city, &depType, &helpType, &urgency,
 		&langsRaw, &visibleUntil, &createdAt, &status,
-		&firstActivatedAt, &renewalCount, &isSample, &openedChatsCount)
+		&renewalCount, &isSample, &openedChatsCount)
 	if err != nil {
 		writeError(w, 404, "listing not found")
 		return
@@ -88,17 +86,9 @@ func (h *Handler) GetListing(w http.ResponseWriter, r *http.Request) {
 		timeLeft = 0
 	}
 
-	// Renewal eligibility: allowed while opened_chats_count < 2 (new entitlement model)
-	daysRemaining := 0
-	canRenew := false
-	if firstActivatedAt.Valid {
-		daysElapsed := (now - firstActivatedAt.Int64) / 86400
-		daysRemaining = 30 - int(daysElapsed)
-		if daysRemaining < 0 {
-			daysRemaining = 0
-		}
-		canRenew = daysRemaining > 0 && openedChatsCount < 2
-	}
+	// Renewal eligibility: free while opened_chats_count < 2 and listing is not a sample.
+	// No time-based cutoff — age of listing does not affect renewal eligibility.
+	canRenew := openedChatsCount < 2 && !isSample
 
 	writeJSON(w, 200, map[string]any{
 		"id":                   id,
@@ -113,7 +103,6 @@ func (h *Handler) GetListing(w http.ResponseWriter, r *http.Request) {
 		"time_left":            timeLeft,
 		"responses_count":      respCount,
 		"renewal_count":        renewalCount,
-		"days_remaining":       daysRemaining,
 		"can_renew":            canRenew,
 		"is_sample":            isSample,
 		"opened_chats_count":   openedChatsCount,

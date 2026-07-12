@@ -179,39 +179,40 @@ Invariant IDs use short category codes: **ID** (Identity/Privacy), **SE** (Sessi
 
 ---
 
-### LS-3: Listing renewal blocked when 2 pending responses exist
-**Rule:** Client must choose a peer instead of renewing.
+### LS-3: Listing renewal free while opened_chats_count < 2; blocked at count = 2
+**Rule:** Renewal is always free. No time-based cutoff (no 30-day limit). Allowed when `status='expired'` OR `status='active' AND visible_until <= now+3600`. Early renewal (listing still fresh) returns 409. Duplicate/blocked calls do NOT increment `renewal_count` or send Telegram notifications.
 
 **Enforced:**
-- `internal/handler/renew.go:RenewListing` — checks `COUNT(*) FROM responses WHERE listing_id=? AND status='pending' >= 2`
+- `internal/handler/renew.go:RenewListing` — checks `opened_chats_count >= 2 → 409`; atomic UPDATE with eligibility WHERE clause; RowsAffected=0 → 409
 
-**Tests:** **019** (renew OK at 0 responses, OK at 1, blocked at 2 → 409; `can_renew=false` in GET /listing response)
+**Tests:** **019** (renew at count=0/1 → 200; count=2 → 409; `can_renew=false` when count=2); **042** (T1–T9: 30-day-old listing OK, early renewal 409, expired→renewed→on board, duplicate 409, count increments once, zero invoices, wrong wallet 403)
 **Coverage:** ✅ Covered
 
 ---
 
-### LS-4: Listing becomes `matched` when chat room is created; removed from board
-**Rule:** Board must not show listings with active chats.
+### LS-4: Listing stays `active` while opened_chats_count < 2; board hides at count = 2
+**Rule:** When the first chat room opens, the listing remains `active` and stays visible on the board (second peer slot is still available). When the second chat room opens (`opened_chats_count` reaches 2), the listing is set to `closed` and removed from the board. The board query enforces `COALESCE(opened_chats_count, 0) < 2` as an additional safety guard.
 
 **Enforced:**
-- `internal/worker/invoice_watcher.go` — `UPDATE listings SET status='matched'` when chat room created
-- `internal/handler/board.go:Board` — `NOT EXISTS (chat_rooms active)`
+- `internal/worker/invoice_watcher.go` — CAS increment of `opened_chats_count`; sets `status='closed'` only when count reaches 2
+- `internal/handler/board.go:Board` — `WHERE status='active' AND visible_until > now AND opened_chats_count < 2`
+- `internal/handler/chat_ws.go:CloseChat` — sets `status='closed'` only when `opened_chats_count >= 2`
 
-**Tests:** 001, 006 (listing disappears from board after chat opens)
+**Tests:** VIS-1 (listing visible with first chat active); VIS-2 (listing hidden after status='closed'); VIS-3 (safety guard: count=2 hides from board even if status='active')
 **Coverage:** ✅ Covered
 
 ---
 
-### LS-5: Listing permanently closed after paid chat — never returns to board (LI-1)
-**Rule:** Once a paid chat room has been created for a listing (`matched` → chat_room exists), the listing transitions to `closed` when the chat ends. It must never return to `active` or appear on the public board. The client can create a new listing after the session completes.
+### LS-5: Listing permanently closed after two paid chats (LI-1)
+**Rule:** Once `opened_chats_count` reaches 2, the listing is set to `closed` and must never return to `active` or appear on the board. After a first chat closes with count=1, the listing returns to visible `active` state (second peer slot still available). After the second chat closes with count=2, the listing is permanently `closed`.
 
 **Enforced:**
-- `internal/handler/chat_ws.go:CloseChat` — `UPDATE listings SET status='closed'` when both sides close (was incorrectly `'active'` — bug fixed 2026-07-06)
-- `internal/worker/ttl_cleaner.go:expireHalfClosedRooms` — `UPDATE listings SET status='closed'` when peer_left/client_left room expires (was incorrectly `'active'` — bug fixed 2026-07-06)
+- `internal/handler/chat_ws.go:CloseChat` — sets `status='closed'` only when `opened_chats_count >= 2`; count=1 → listing stays `active`
+- `internal/worker/ttl_cleaner.go:expireHalfClosedRooms` — sets `status='closed'` only when `opened_chats_count >= 2`; count<2 → listing stays `active`/`expired`
 
 **Exception (unpaid accepted response):** If a peer accepted but never paid (chat invoice expired/rejected, no chat room created), the listing may return to `'active'` so a new peer can respond. Enforced by `ttl_cleaner.go` step 2d.
 
-**Tests:** 039 T1/T2/T4/T5 (listing closed after both-side close, very short chat, TTL half-closed expiry); 011 (peer_left expiry → listing closed, not on board); 001/006 (happy path verifies listing='closed' and client can create new listing)
+**Tests:** VIS-10 (first chat close → listing stays 'active'); VIS-11 (second chat close → listing 'closed'); 039 T1/T2/T4/T5 (listing closed after both-side close, very short chat, TTL half-closed expiry); 011 (peer_left expiry → listing closed when count≥2)
 **Coverage:** ✅ Covered
 
 ---
@@ -373,21 +374,19 @@ Peer is rejected (403) when `activeResponses >= maxSlots`.
 
 ---
 
-### CH-9: Client must have a working path to their chat room when listing is matched
-**Rule:** When `listings.status = 'matched'` (peer paid, chat open), the client must be able to reach their `chat_room` through at least two paths:
-1. `/listing/{id}` — listing page detects `matched` status, auto-loads chat room via stored session token, renders "Go to chat →" button.
+### CH-9: Client must have a working path to their chat room while first chat is active
+**Rule:** When a listing is `active` with an open chat room (first peer, `opened_chats_count=1`), the client must be able to reach their `chat_room` through at least two paths:
+1. `/listing/{id}` — listing page detects active chat room via `/api/listing/{id}/chatroom` and renders "Go to chat →" button.
 2. `GET /resume` — returns `room_id` when a matching active `chat_room` exists for the session's wallet_hash.
 
-Neither path may gate on `listing.status = 'active'`. A `matched` listing is not expired — its associated chat room is still active.
+Note: listings no longer enter `status='matched'`. The first chat opens while the listing remains `active` on the board.
 
 **Enforced:**
-- `frontend/src/routes/listing/[id]/+page.svelte` — `{:else if listing.status === 'matched'}` branch; `onMount` auto-calls `/api/listing/{id}/chatroom` with stored token
-- `internal/handler/chat_ws.go:ResumeChat` — primary query: `chat_rooms WHERE client_hash=? AND status='active'`; fallback: `listings WHERE wallet_hash=? AND status='matched' AND id NOT IN (SELECT listing_id FROM chat_rooms ...)`
+- `frontend/src/routes/listing/[id]/+page.svelte` — `onMount` auto-calls `/api/listing/{id}/chatroom` with stored token; renders chat button when room found
+- `internal/handler/chat_ws.go:ResumeChat` — primary query: `chat_rooms WHERE (client_hash=? OR counselor_hash=?) AND status='active'`
 - `frontend/src/routes/resume/+page.svelte` — `onMount` tries stored session tokens before showing wallet form
 
-**Root cause of production bug (2026-07-06):** listing page had `{#if listing.status === 'active'}` gating all client UI; `matched` fell through to `{:else}` expired-note. Client saw dead-end. Fixed by adding explicit `matched` branch.
-
-**Tests:** 038 T1 (GET /resume → room_id when listing matched), T2 (GET /listing/{id}/chatroom → room_id)
+**Tests:** 038 T1 (GET /resume → room_id when listing active with chat), T2 (GET /listing/{id}/chatroom → room_id)
 **Coverage:** ✅ Covered
 
 ---
@@ -602,6 +601,7 @@ Sprint 4 changes: IN-0 (two-step verification model) documented in docs and cove
 Sprint 5 changes: Test 027 content replaced — old intentionally-failing challenge test → new wallet trust model test (T1-T4). Docs updated: no challenge-signature planned, single-tx requirement, wrong-sender rejection documented in SECURITY.md and PRIVACY_MODEL.md. ID-1 parenthetical fixed (wallet_challenges table no longer exists).
 Sprint 6 changes: RP-4 ban enforcement implemented — `RequireNotBanned` middleware added; applied to create/respond/renew/pollSend/pubkey/close routes; E2E test 036 added (16 steps); INVARIANTS.md and TEST_MATRIX.md updated.
 Sprint 7 changes: WK-4 added — TTL cleaner slot release invariant; E2E test 037 added (8 steps covering slot formula edge cases and TTL cleaner idempotency).
+Sprint 8 changes: LS-3 rewritten — renewal is free, no 30-day cutoff, blocked by count≥2 or early renewal (>1h left); atomic UPDATE prevents duplicate increment; LS-4 rewritten — 'matched' status removed, listing stays 'active' through first chat; LS-5 updated — permanent close at count=2 only; CH-9 updated — no 'matched' status; E2E 042 (9 steps) + unit tests VIS-12…VIS-17 added.
 
 | Invariant | Status | Notes |
 |-----------|--------|-------|
@@ -612,7 +612,7 @@ Sprint 7 changes: WK-4 added — TTL cleaner slot release invariant; E2E test 03
 | ID-5 No IP in logs | ✅ | Test 024 added Sprint 2 |
 | SE-3 Client cannot respond | ✅ | Test 016 added Sprint 1 |
 | SE-4 Dev mode bypass blocked in prod | ✅ | Test 020 added Sprint 2 |
-| LS-3 Renewal blocked at 2 responses | ✅ | Test 019 added Sprint 1 |
+| LS-3 Renewal free (count<2); blocked at count=2 or early | ✅ | Tests 019 + 042 + VIS-12…17 (Sprint 8) |
 | RS-1 Max 2 responses per listing | ✅ | Test 017 added Sprint 1 |
 | RS-3 30-min cooldown after cancel | ✅ | Test 021 added Sprint 2 |
 | RS-4 Region lock cross-city | ✅ | Test 015 added Sprint 1 |
@@ -631,4 +631,4 @@ Sprint 7 changes: WK-4 added — TTL cleaner slot release invariant; E2E test 03
 | WK-3 wallet_sessions TTL cleanup | ✅ | Test 023 added Sprint 2 |
 | WK-4 Expired/closed chat frees peer slot | ✅ | Test 037 added Sprint 7 |
 
-**Totals after Sprint 7:** ✅ 38 covered · ⚠️ 6 partial · ❌ 0 missing
+**Totals after Sprint 8:** ✅ 38 covered · ⚠️ 6 partial · ❌ 0 missing

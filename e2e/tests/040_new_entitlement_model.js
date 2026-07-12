@@ -234,6 +234,8 @@ export async function run() {
       });
 
       await t.run('5. renew at count=0: allowed, free=true', async () => {
+        // Expire the listing first (renewal blocked when active with >1h left)
+        srv.db(`UPDATE listings SET visible_until = strftime('%s','now') - 1, status = 'expired' WHERE id = '${listingId}'`);
         const r = await api.post(`/listing/${listingId}/renew`, {}, CLIENT);
         assertStatus(r, 200, 'renew at count=0');
         if (r.body.free !== true) throw new Error(`Expected free=true, got ${r.body.free}`);
@@ -241,7 +243,8 @@ export async function run() {
       });
 
       await t.run('6. renew at count=1: allowed, free=true', async () => {
-        srv.db(`UPDATE listings SET opened_chats_count = 1, status = 'active' WHERE id = '${listingId}'`);
+        // Expire listing again (step 5 renewal gave it 24h; we need it expired to renew again)
+        srv.db(`UPDATE listings SET opened_chats_count = 1, status = 'expired', visible_until = strftime('%s','now') - 1 WHERE id = '${listingId}'`);
         const r = await api.post(`/listing/${listingId}/renew`, {}, CLIENT);
         assertStatus(r, 200, 'renew at count=1');
         if (r.body.free !== true) throw new Error(`Expected free=true at count=1, got ${r.body.free}`);

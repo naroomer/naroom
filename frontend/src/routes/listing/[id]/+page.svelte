@@ -33,14 +33,6 @@
 		}
 		return t(n === 1 ? 'listing.sessions_one' : 'listing.sessions_other', {n});
 	}
-	function daysRemLabel(days) {
-		if ($lang === 'ru') {
-			const form = pluralRu(days);
-			const key = form === 'one' ? 'listing.days_rem_one' : form === 'few' ? 'listing.days_rem_few' : 'listing.days_rem_other';
-			return t(key, {days});
-		}
-		return t(days === 1 ? 'listing.days_rem_one' : 'listing.days_rem_other', {days});
-	}
 	function shortAddr(addr) {
 		if (!addr) return '';
 		return addr.length > 16 ? addr.slice(0, 8) + '...' + addr.slice(-6) : addr;
@@ -442,21 +434,19 @@
 		const savedCurrency = sessionStorage.getItem('my_currency_' + listing.id);
 		if (savedCurrency) clientCurrency = savedCurrency;
 
-		// If listing is matched, auto-check for open chat room using stored session.
-		// Covers the case where client returns to the listing page after peer paid.
-		if (listing.status === 'matched') {
-			const token = sessionStorage.getItem('naroom_session_client') ?? '';
-			if (token) {
-				try {
-					const res = await fetch(`/api/listing/${listing.id}/chatroom`, {
-						headers: { 'Authorization': `Bearer ${token}` },
-					});
-					if (res.ok) {
-						const d = await res.json();
-						if (d.room_id) existingChatRoom = d;
-					}
-				} catch {}
-			}
+		// Auto-check for an existing chat room using stored session.
+		// Covers the case where the client returns after a peer accepted and paid.
+		const token = sessionStorage.getItem('naroom_session_client') ?? '';
+		if (token && listing.status === 'active') {
+			try {
+				const res = await fetch(`/api/listing/${listing.id}/chatroom`, {
+					headers: { 'Authorization': `Bearer ${token}` },
+				});
+				if (res.ok) {
+					const d = await res.json();
+					if (d.room_id) existingChatRoom = d;
+				}
+			} catch {}
 		}
 	});
 
@@ -509,7 +499,8 @@
 
 	{#if listing.status === 'active' && listing.time_left > 0}
 
-		<!-- ── COUNSELOR SECTION ── -->
+		<!-- ── COUNSELOR SECTION (only when a second peer can still respond) ── -->
+		{#if (listing.opened_chats_count ?? 0) < 2}
 		<div class="section">
 			<div class="section-title">{t('listing.can_help')}</div>
 
@@ -590,6 +581,7 @@
 				</div>
 			{/if}
 		</div>
+		{/if}
 
 		<!-- ── CLIENT SECTION ── -->
 		<div class="section">
@@ -682,37 +674,32 @@
 			{/if}
 		</div>
 
-	{:else if listing.status === 'matched'}
-		<!-- Listing matched: chat is open. Show re-entry point for the client. -->
-		<div class="section">
-			<div class="section-title">{t('listing.i_posted')}</div>
-			{#if existingChatRoom}
-				<div class="invoice-box" style="cursor:pointer" onclick={() => goto(`/chat/${existingChatRoom.room_id}`)}>
-					<div class="invoice-icon">💬</div>
-					<div>
-						<div class="invoice-title">{t('listing.chat_ready') || 'Chat is open'}</div>
-						<div class="invoice-sub">{t('listing.chat_ready_sub') || 'Your session is active. Tap to continue.'}</div>
+	{:else if listing.status === 'expired'}
+		<!-- Expired listing: show owner wallet form to unlock renewal, or a note for others -->
+		{#if listing.can_renew}
+			<div class="section">
+				<div class="section-title">{t('listing.i_posted')}</div>
+				{#if myResponses !== null}
+					<p class="section-desc">{t('listing.chats_used', {n: listing.opened_chats_count ?? 0})}</p>
+				{:else}
+					<p class="section-desc">{t('listing.expired_owner_desc')}</p>
+					<div class="sub-form">
+						<div class="field">
+							<label for="client-wallet">{t('listing.your_wallet')}</label>
+							<input id="client-wallet" type="text" placeholder={t('listing.btc_ltc_ph')} bind:value={clientWallet} />
+						</div>
+						{#if responsesError}<div class="error">{responsesError}</div>{/if}
+						<button class="btn-primary" disabled={!clientWallet || loadingResponses} onclick={loadResponses}>
+							{loadingResponses ? t('listing.loading') : t('listing.view_responses')}
+						</button>
 					</div>
-				</div>
-				<button class="btn-primary" style="margin-top:10px" onclick={() => goto(`/chat/${existingChatRoom.room_id}`)}>
-					{t('listing.go_to_chat') || 'Go to chat →'}
-				</button>
-			{:else}
-				<!-- Session not in storage — ask wallet to re-auth -->
-				<p class="section-desc">{t('listing.matched_reauth') || 'Your request was matched. Enter your wallet address to re-enter your chat.'}</p>
-				<div class="sub-form">
-					<div class="field">
-						<label for="client-wallet-match">{t('listing.your_wallet')}</label>
-						<input id="client-wallet-match" type="text" placeholder={t('listing.btc_ltc_ph')} bind:value={clientWallet} />
-					</div>
-					{#if responsesError}<div class="error">{responsesError}</div>{/if}
-					<button class="btn-primary" disabled={!clientWallet || loadingResponses} onclick={loadResponses}>
-						{loadingResponses ? t('listing.loading') : t('listing.view_responses')}
-					</button>
-				</div>
-			{/if}
-		</div>
-
+				{/if}
+			</div>
+		{:else if listing.opened_chats_count >= 2}
+			<div class="expired-note">{t('listing.fully_used')}</div>
+		{:else}
+			<div class="expired-note">{t('listing.expired_note')}</div>
+		{/if}
 	{:else}
 		<div class="expired-note">{t('listing.expired_note')}</div>
 	{/if}

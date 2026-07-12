@@ -834,3 +834,231 @@ func TestDoubleConfirm_OpenedChatsCountNotDoubled(t *testing.T) {
 		t.Fatalf("Test D FAIL: expected 1 chat room, got %d", roomCount)
 	}
 }
+
+// ── VIS-W: Listing status after first and second chat ────────────────────────
+
+// VIS-W1: After first chat invoice confirmed, listing stays 'active' (NOT 'matched').
+func TestListingStaysActive_AfterFirstChat(t *testing.T) {
+	db := openTestDBFull(t)
+	now := time.Now().Unix()
+
+	_, _ = db.Exec(`INSERT INTO wallet_sessions (wallet_hash, min_required_usd) VALUES ('peer-vis-1', 2000)`)
+	_, _ = db.Exec(`INSERT INTO listings (id, wallet_hash, status, visible_until, created_at, opened_chats_count)
+		VALUES ('vis-list-1', 'client-vis-1', 'active', ?, ?, 0)`, now+86400, now)
+	_, _ = db.Exec(`INSERT INTO responses (id, listing_id, counselor_hash, counselor_pubkey)
+		VALUES ('vis-resp-1', 'vis-list-1', 'peer-vis-1', 'peer-pub-1')`)
+	_, _ = db.Exec(`INSERT INTO invoices
+		(id, type, address, amount_crypto, currency, payer_address, status, response_id, client_pubkey, created_at)
+		VALUES ('vis-inv-1', 'chat', 'addr', '0', 'BTC', 'peer-vis-1', 'pending', 'vis-resp-1', 'client-pub-1', ?)`, now)
+
+	iw := &InvoiceWatcher{DB: db, HashKey: []byte(testHashKey), DevMode: true}
+	iw.confirmInvoice("vis-inv-1", "chat", "txid-1", 1000000, "", "vis-resp-1", "client-pub-1", "")
+
+	var status string
+	db.QueryRow(`SELECT status FROM listings WHERE id = 'vis-list-1'`).Scan(&status)
+	if status != "active" {
+		t.Fatalf("VIS-W1 FAIL: after first chat, listing status must be 'active', got %q", status)
+	}
+
+	var count int
+	db.QueryRow(`SELECT opened_chats_count FROM listings WHERE id = 'vis-list-1'`).Scan(&count)
+	if count != 1 {
+		t.Fatalf("VIS-W1 FAIL: opened_chats_count must be 1, got %d", count)
+	}
+}
+
+// VIS-W2: After second chat invoice confirmed, listing becomes 'closed'.
+func TestListingClosed_AfterSecondChat(t *testing.T) {
+	db := openTestDBFull(t)
+	now := time.Now().Unix()
+
+	_, _ = db.Exec(`INSERT INTO wallet_sessions (wallet_hash, min_required_usd) VALUES ('peer-vis-2a', 2000)`)
+	_, _ = db.Exec(`INSERT INTO wallet_sessions (wallet_hash, min_required_usd) VALUES ('peer-vis-2b', 2000)`)
+	_, _ = db.Exec(`INSERT INTO listings (id, wallet_hash, status, visible_until, created_at, opened_chats_count)
+		VALUES ('vis-list-2', 'client-vis-2', 'active', ?, ?, 1)`, now+86400, now)
+	_, _ = db.Exec(`INSERT INTO responses (id, listing_id, counselor_hash, counselor_pubkey)
+		VALUES ('vis-resp-2b', 'vis-list-2', 'peer-vis-2b', 'peer-pub-2b')`)
+	_, _ = db.Exec(`INSERT INTO invoices
+		(id, type, address, amount_crypto, currency, payer_address, status, response_id, client_pubkey, created_at)
+		VALUES ('vis-inv-2b', 'chat', 'addr', '0', 'BTC', 'peer-vis-2b', 'pending', 'vis-resp-2b', 'client-pub-2', ?)`, now)
+
+	iw := &InvoiceWatcher{DB: db, HashKey: []byte(testHashKey), DevMode: true}
+	iw.confirmInvoice("vis-inv-2b", "chat", "txid-2b", 1000000, "", "vis-resp-2b", "client-pub-2", "")
+
+	var status string
+	db.QueryRow(`SELECT status FROM listings WHERE id = 'vis-list-2'`).Scan(&status)
+	if status != "closed" {
+		t.Fatalf("VIS-W2 FAIL: after second chat, listing status must be 'closed', got %q", status)
+	}
+
+	var count int
+	db.QueryRow(`SELECT opened_chats_count FROM listings WHERE id = 'vis-list-2'`).Scan(&count)
+	if count != 2 {
+		t.Fatalf("VIS-W2 FAIL: opened_chats_count must be 2, got %d", count)
+	}
+}
+
+// openTestDBFullWithStatus is like openTestDBFull but adds status to responses
+// and adds wallet_sessions.wallet_address_enc (not needed here but keeps schema consistent).
+func openTestDBFullWithStatus(t *testing.T) *sql.DB {
+	t.Helper()
+	f, err := os.CreateTemp("", "naroom-iw-status-test-*.db")
+	if err != nil {
+		t.Fatalf("create temp db: %v", err)
+	}
+	name := f.Name()
+	f.Close()
+	t.Cleanup(func() { os.Remove(name) })
+
+	db, err := sql.Open("sqlite", name)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { db.Close() })
+
+	_, err = db.Exec(`
+		CREATE TABLE invoices (
+			id                  TEXT PRIMARY KEY,
+			type                TEXT NOT NULL,
+			address             TEXT NOT NULL DEFAULT '',
+			amount_usd          REAL NOT NULL DEFAULT 0,
+			amount_crypto       TEXT NOT NULL DEFAULT '0',
+			currency            TEXT NOT NULL,
+			payer_address       TEXT,
+			txid                TEXT,
+			status              TEXT NOT NULL DEFAULT 'pending',
+			listing_id          TEXT,
+			response_id         TEXT,
+			client_pubkey       TEXT,
+			chat_room_id        TEXT,
+			payment_detected_at INTEGER,
+			price_at_creation   REAL,
+			created_at          INTEGER NOT NULL
+		);
+		CREATE TABLE listings (
+			id                 TEXT PRIMARY KEY,
+			city               TEXT NOT NULL DEFAULT 'tbilisi',
+			dependency_type    TEXT NOT NULL DEFAULT 'alcohol',
+			help_type          TEXT NOT NULL DEFAULT 'crisis',
+			urgency            TEXT NOT NULL DEFAULT 'urgent',
+			languages          TEXT NOT NULL DEFAULT 'en',
+			wallet_hash        TEXT NOT NULL DEFAULT 'test-hash',
+			visible_until      INTEGER NOT NULL DEFAULT 0,
+			created_at         INTEGER NOT NULL DEFAULT 0,
+			status             TEXT NOT NULL DEFAULT 'pending',
+			opened_chats_count INTEGER NOT NULL DEFAULT 0
+		);
+		CREATE TABLE responses (
+			id               TEXT PRIMARY KEY,
+			listing_id       TEXT NOT NULL,
+			counselor_hash   TEXT NOT NULL,
+			counselor_pubkey TEXT NOT NULL DEFAULT '',
+			status           TEXT NOT NULL DEFAULT 'pending'
+		);
+		CREATE TABLE chat_rooms (
+			id               TEXT PRIMARY KEY,
+			listing_id       TEXT NOT NULL,
+			response_id      TEXT NOT NULL,
+			client_hash      TEXT NOT NULL,
+			counselor_hash   TEXT NOT NULL,
+			client_pubkey    TEXT NOT NULL DEFAULT '',
+			counselor_pubkey TEXT NOT NULL DEFAULT '',
+			started_at       INTEGER NOT NULL DEFAULT 0,
+			expires_at       INTEGER NOT NULL DEFAULT 0,
+			status           TEXT NOT NULL DEFAULT 'active',
+			listing_counted  INTEGER NOT NULL DEFAULT 0
+		);
+		CREATE TABLE wallet_sessions (
+			wallet_hash      TEXT PRIMARY KEY,
+			min_required_usd REAL
+		);
+	`)
+	if err != nil {
+		t.Fatalf("create full schema with status: %v", err)
+	}
+	return db
+}
+
+// ── Atomic guard tests ───────────────────────────────────────────────────────
+
+// ATOM-1: confirmInvoice on a listing already at count=2 must not create a chat room.
+// This tests the CAS guard: UPDATE … WHERE count < 2 returns RowsAffected=0 → abort.
+func TestAtomicGuard_ThirdRoomImpossible(t *testing.T) {
+	db := openTestDBFullWithStatus(t)
+	now := time.Now().Unix()
+
+	_, _ = db.Exec(`INSERT INTO wallet_sessions (wallet_hash, min_required_usd) VALUES ('counselor-atom-1', 2000)`)
+	_, _ = db.Exec(`INSERT INTO listings (id, wallet_hash, status, visible_until, created_at, opened_chats_count)
+		VALUES ('atom-list-1', 'client-atom-1', 'closed', ?, ?, 2)`, now+86400, now)
+	_, _ = db.Exec(`INSERT INTO responses (id, listing_id, counselor_hash, counselor_pubkey, status)
+		VALUES ('atom-resp-c', 'atom-list-1', 'counselor-atom-1', 'pub-c', 'pending')`)
+	_, _ = db.Exec(`INSERT INTO invoices
+		(id, type, address, amount_crypto, currency, payer_address, status, response_id, client_pubkey, created_at)
+		VALUES ('atom-inv-c', 'chat', 'addr', '0', 'BTC', 'counselor-atom-1', 'pending', 'atom-resp-c', 'client-pub-c', ?)`, now)
+
+	iw := &InvoiceWatcher{DB: db, HashKey: []byte(testHashKey), DevMode: true}
+	iw.confirmInvoice("atom-inv-c", "chat", "txid-c", 1000000, "", "atom-resp-c", "client-pub-c", "")
+
+	// No chat room must have been created
+	var roomCount int
+	db.QueryRow(`SELECT COUNT(*) FROM chat_rooms WHERE listing_id = 'atom-list-1'`).Scan(&roomCount)
+	if roomCount != 0 {
+		t.Fatalf("ATOM-1 FAIL: expected 0 chat rooms (CAS guard should have blocked), got %d", roomCount)
+	}
+
+	// Invoice must have no chat_room_id
+	var chatRoomID sql.NullString
+	db.QueryRow(`SELECT chat_room_id FROM invoices WHERE id = 'atom-inv-c'`).Scan(&chatRoomID)
+	if chatRoomID.Valid && chatRoomID.String != "" {
+		t.Fatalf("ATOM-1 FAIL: invoice chat_room_id should be NULL, got %q", chatRoomID.String)
+	}
+
+	// Listing count must remain at 2
+	var count int
+	db.QueryRow(`SELECT opened_chats_count FROM listings WHERE id = 'atom-list-1'`).Scan(&count)
+	if count != 2 {
+		t.Fatalf("ATOM-1 FAIL: opened_chats_count should remain 2, got %d", count)
+	}
+}
+
+// ATOM-2: second payment confirms → listing becomes 'closed', pending response rejected.
+func TestSecondPayment_ClosesListingAndRejectsPending(t *testing.T) {
+	db := openTestDBFullWithStatus(t)
+	now := time.Now().Unix()
+
+	_, _ = db.Exec(`INSERT INTO wallet_sessions (wallet_hash, min_required_usd) VALUES ('counselor-atom-2b', 2000)`)
+	_, _ = db.Exec(`INSERT INTO listings (id, wallet_hash, status, visible_until, created_at, opened_chats_count)
+		VALUES ('atom-list-2', 'client-atom-2', 'active', ?, ?, 1)`, now+86400, now)
+	_, _ = db.Exec(`INSERT INTO responses (id, listing_id, counselor_hash, counselor_pubkey, status)
+		VALUES ('atom-resp-b', 'atom-list-2', 'counselor-atom-2b', 'pub-b', 'accepted')`)
+	_, _ = db.Exec(`INSERT INTO responses (id, listing_id, counselor_hash, counselor_pubkey, status)
+		VALUES ('atom-resp-c2', 'atom-list-2', 'counselor-atom-x', 'pub-x', 'pending')`)
+	_, _ = db.Exec(`INSERT INTO invoices
+		(id, type, address, amount_crypto, currency, payer_address, status, response_id, client_pubkey, created_at)
+		VALUES ('atom-inv-b', 'chat', 'addr', '0', 'BTC', 'counselor-atom-2b', 'pending', 'atom-resp-b', 'client-pub-2', ?)`, now)
+
+	iw := &InvoiceWatcher{DB: db, HashKey: []byte(testHashKey), DevMode: true}
+	iw.confirmInvoice("atom-inv-b", "chat", "txid-b", 1000000, "", "atom-resp-b", "client-pub-2", "")
+
+	// Listing must be 'closed'
+	var listingStatus string
+	db.QueryRow(`SELECT status FROM listings WHERE id = 'atom-list-2'`).Scan(&listingStatus)
+	if listingStatus != "closed" {
+		t.Fatalf("ATOM-2 FAIL: listing must be 'closed' after second payment, got %q", listingStatus)
+	}
+
+	// opened_chats_count must be 2
+	var count int
+	db.QueryRow(`SELECT opened_chats_count FROM listings WHERE id = 'atom-list-2'`).Scan(&count)
+	if count != 2 {
+		t.Fatalf("ATOM-2 FAIL: opened_chats_count must be 2, got %d", count)
+	}
+
+	// Pending response must be 'rejected'
+	var respStatus string
+	db.QueryRow(`SELECT status FROM responses WHERE id = 'atom-resp-c2'`).Scan(&respStatus)
+	if respStatus != "rejected" {
+		t.Fatalf("ATOM-2 FAIL: pending response must be 'rejected', got %q", respStatus)
+	}
+}

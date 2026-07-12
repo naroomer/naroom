@@ -51,9 +51,10 @@ export async function run() {
       if (status !== 'peer_left') throw new Error(`DB status=${status}, expected peer_left`);
     });
 
-    await t.run('listing is still matched (peer_left room open)', async () => {
+    await t.run('listing is still active while peer_left room open (new model — no matched status)', async () => {
+      // New model: listing stays 'active' while opened_chats_count < 2, even during peer_left state.
       const r = await api.getListing(listingId);
-      if (r.body.status !== 'matched') throw new Error(`Listing status=${r.body.status}, expected matched while room peer_left`);
+      if (r.body.status !== 'active') throw new Error(`Listing status=${r.body.status}, expected active while room peer_left (new model)`);
     });
 
     // Manually expire the room by backdating expires_at

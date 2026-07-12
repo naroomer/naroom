@@ -36,7 +36,7 @@ It does **not** mean:
 ## Deletion Guarantees
 
 - Chat messages: deleted immediately when a session is closed by the client. Not recoverable.
-- Expired listings: cleaned up by TTL worker (default 6h visible window).
+- Expired listings: cleaned up by TTL worker (default 24h visible window).
 - Expired sessions: cleaned up by TTL worker after 24h.
 - Expired challenges: cleaned up after 5 min.
 - Peer-left rooms (not explicitly closed): expired after 24h.

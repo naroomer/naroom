@@ -66,8 +66,8 @@ func (tc *TTLCleaner) clean() {
 	}
 
 	// 2d. Close accepted responses whose chat invoice expired and NO chat room was ever created
-	//     (peer accepted but never paid). Then restore those listings to 'active' so a new peer can
-	//     respond. This is the only case where 'matched' → 'active' is valid.
+	//     (peer accepted but never paid). Listing stays 'active' — it was never changed from active
+	//     since we no longer set 'matched' when the first response is accepted.
 	res, _ = tc.DB.Exec(`
 		UPDATE responses SET status = 'closed'
 		WHERE status = 'accepted'
@@ -83,20 +83,6 @@ func (tc *TTLCleaner) clean() {
 	if n, _ := res.RowsAffected(); n > 0 {
 		totalCleaned += n
 		log.Printf("ttl_cleaner: closed %d unpaid accepted responses (invoice expired/rejected)", n)
-		// Restore listings where no chat room ever existed, no remaining accepted response,
-		// and opened_chats_count < 2 (i.e., the listing still has capacity).
-		// These are safe to reopen — the peer never paid, so no paid session occurred.
-		tc.DB.Exec(`
-			UPDATE listings SET status = 'active'
-			WHERE status = 'matched'
-			  AND COALESCE(opened_chats_count, 0) < 2
-			  AND NOT EXISTS (
-			    SELECT 1 FROM chat_rooms WHERE listing_id = listings.id
-			  )
-			  AND NOT EXISTS (
-			    SELECT 1 FROM responses WHERE listing_id = listings.id AND status = 'accepted'
-			  )
-		`)
 	}
 
 	// 2c. Expire half-closed rooms (peer_left / client_left) after 24h.
@@ -251,12 +237,10 @@ func (tc *TTLCleaner) expireHalfClosedRooms(now int64) {
 		tx.Exec(`UPDATE chat_rooms SET status = 'expired', closed_at = ?, closed_by = 'system' WHERE id = ?`, now, rm.id)
 		tx.Exec(`DELETE FROM encrypted_messages WHERE room_id = ?`, rm.id)
 
-		// Reopen listing if this was the first (and only) chat and it expired before closing properly.
-		// If opened_chats_count >= 2, listing stays closed permanently.
-		if openedChatsCount < 2 {
-			tx.Exec(`UPDATE listings SET status = 'active' WHERE id = ? AND status = 'matched'`, rm.listingID)
-		} else {
-			tx.Exec(`UPDATE listings SET status = 'closed' WHERE id = ? AND status = 'matched'`, rm.listingID)
+		// If 2nd chat expired: permanently close the listing.
+		// If 1st chat expired: listing is already 'active' (or 'expired') — no status change needed.
+		if openedChatsCount >= 2 {
+			tx.Exec(`UPDATE listings SET status = 'closed' WHERE id = ? AND status = 'active'`, rm.listingID)
 		}
 
 		if err := tx.Commit(); err != nil {
@@ -264,11 +248,11 @@ func (tc *TTLCleaner) expireHalfClosedRooms(now int64) {
 			log.Printf("ttl_cleaner: peer_left expiry tx failed for room %s: %v", rm.id, err)
 			continue
 		}
-		if openedChatsCount < 2 {
-			log.Printf("ttl_cleaner: expired half-closed room %s, listing %s reopened (opened_chats_count=%d)",
+		if openedChatsCount >= 2 {
+			log.Printf("ttl_cleaner: expired half-closed room %s, listing %s permanently closed (opened_chats_count=%d)",
 				rm.id, rm.listingID, openedChatsCount)
 		} else {
-			log.Printf("ttl_cleaner: expired half-closed room %s, listing %s closed (opened_chats_count=%d)",
+			log.Printf("ttl_cleaner: expired half-closed room %s, listing %s stays active/expired (opened_chats_count=%d)",
 				rm.id, rm.listingID, openedChatsCount)
 		}
 	}

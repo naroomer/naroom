@@ -107,11 +107,12 @@ invoice_watcher (polls blockchain every ~30s)
   +--> RowsAffected guard: UPDATE ... WHERE status='pending' (idempotent)
   |
   type='listing':
-    +--> UPDATE listings SET status='active', visible_until=now+6h
+    +--> UPDATE listings SET status='active', visible_until=now+ListingTTL (default 24h)
   |
   type='chat':
     +--> INSERT INTO chat_rooms (client_hash, counselor_hash, client_pubkey, counselor_pubkey)
-    +--> UPDATE listings SET status='matched'
+    +--> UPDATE listings SET opened_chats_count = opened_chats_count + 1
+         (listing stays status='active' while opened_chats_count < 2; closes permanently at 2)
     +--> UPDATE invoices SET chat_room_id=? (prevents duplicate room creation)
 ```
 

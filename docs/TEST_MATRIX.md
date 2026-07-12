@@ -277,12 +277,12 @@ Note: runs with `devMode: false` specifically for rate limiting to be active.
 
 | Step/Check | Invariant(s) |
 |-----------|-------------|
-| Renew at 0 responses → 200 | LS-3 |
-| Peer A responds (slot 1) | RS-1, LS-3 |
-| Renew at 1 response → 200 | LS-3 |
-| Peer B responds (slot 2) | RS-1, LS-3 |
-| Renew at 2 responses → 409 | LS-3 |
-| GET /listing/{id} shows can_renew=false | LS-3 |
+| Renewal succeeds when opened_chats_count=0 → 200 | LS-3 |
+| Inject opened_chats_count=1; renewal still allowed → 200 | LS-3 |
+| Inject opened_chats_count=2; renewal blocked → 409 | LS-3 |
+| GET /listing/{id} shows can_renew=false when count=2 | LS-3 |
+| GET /listing/{id} shows can_renew=true when count=1 | LS-3 |
+| GET /listing/{id} shows can_renew=true when count=0 | LS-3 |
 
 ---
 
@@ -478,6 +478,37 @@ Note: runs with `devMode: false` specifically for rate limiting to be active.
 
 ---
 
+## New Tests — Sprint 8 (Free Renewal)
+
+### `internal/handler/listing_visibility_test.go` (new tests VIS-12…VIS-17)
+
+| Test | Invariant(s) | What it proves |
+|------|-------------|----------------|
+| `TestRenew_OlderThan30Days_AllowedAtCount0` | LS-3 | 60-day-old listing with count=0 → 200 (no 30-day cutoff) |
+| `TestRenew_OlderThan30Days_AllowedAtCount1` | LS-3 | 45-day-old listing with count=1 → 200 (no 30-day cutoff) |
+| `TestRenew_EarlyRenewalBlocked` | LS-3 | Active listing with 2h left → 409 (>1h remaining) |
+| `TestRenew_DuplicateRenewal` | LS-3 | First renewal 200; immediate second → 409 (listing now fresh) |
+| `TestRenew_Assertions` | LS-3 | renewal_count increments exactly once; opened_chats_count unchanged; visible_until ≈ now+86400; zero invoices |
+| `TestRenew_TelegramNotifiedOnce` | LS-3 | Mock Sender called exactly once after first renewal; blocked duplicate → no extra call |
+
+---
+
+### `tests/042_free_renewal_e2e.js`
+
+| Step/Check | Invariant(s) |
+|-----------|-------------|
+| T1: age listing 60 days then renew → 200 (no 30-day cutoff) | LS-3 |
+| T2: renew immediately after (active, >1h left) → 409 | LS-3 |
+| T3: expire listing, renew as owner → 200 | LS-3 |
+| T4: renewed listing visible on board | LS-3, LS-4 |
+| T5: duplicate immediate renewal → 409 | LS-3 |
+| T6: renewal_count=2, opened_chats_count=0 (unchanged) | LS-3 |
+| T7: no renewal-type invoice created | LS-3 |
+| T8: count=2 listing renewal → 409 | LS-3 |
+| T9: wrong wallet → 403 | LS-3, SE-1 |
+
+---
+
 ## Coverage Summary
 
 | Invariant | Test(s) | Status |
@@ -495,8 +526,8 @@ Note: runs with `devMode: false` specifically for rate limiting to be active.
 | **SE-5** Rate limit 429, body limit 413 | 007, 005 | ✅ |
 | **LS-1** Pending → active after payment | 001, 011 | ✅ |
 | **LS-2** One active listing per client | 001, 006 | ✅ |
-| **LS-3** Renewal blocked at 2 responses | 019 | ✅ Sprint 1 |
-| **LS-4** Listing matched after chat opens | 001, 006 | ✅ |
+| **LS-3** Renewal free (count<2); blocked at count=2 or early | 019 + 042 + VIS-12…17 | ✅ Sprint 8 |
+| **LS-4** Listing active through first chat; closed at count=2 | VIS-1…3, VIS-10, VIS-11, 040 | ✅ Sprint 8 |
 | **RS-1** Max 2 pending responses | 017 | ✅ Sprint 1 |
 | **RS-2** No duplicate respond | 001 | ✅ |
 | **RS-3** 30-min cooldown after cancel | 021 | ✅ Sprint 2 |
@@ -523,6 +554,6 @@ Note: runs with `devMode: false` specifically for rate limiting to be active.
 | **WK-3** wallet_sessions TTL cleanup | 023 | ✅ Sprint 2 |
 | **WK-4** Expired/closed chat frees peer slot | 037 | ✅ Sprint 7 |
 
-**Totals after Sprint 7 (WK-4 slot release):** ✅ 38 covered · ⚠️ 4 partial · ❌ 0 missing  
-_(Sprint 1: 26✅ / 9⚠️ / 5❌ — Sprint 2: +5 — Fable Five: CH-1 ✅, ID-3 ✅ — Sprint 5: IN-0 ✅, CH-7 ✅, CH-8 ✅ — Sprint 6: RP-4 enforcement ✅ — Sprint 7: WK-4 slot release ✅)_  
-E2E: **36/36 PASS** · Unit: **26/26 PASS**
+**Totals after Sprint 8 (free renewal):** ✅ 38 covered · ⚠️ 4 partial · ❌ 0 missing
+_(Sprint 1: 26✅ / 9⚠️ / 5❌ — Sprint 2: +5 — Fable Five: CH-1 ✅, ID-3 ✅ — Sprint 5: IN-0 ✅, CH-7 ✅, CH-8 ✅ — Sprint 6: RP-4 enforcement ✅ — Sprint 7: WK-4 slot release ✅ — Sprint 8: LS-3 free renewal + VIS-12…17 unit + E2E 042 ✅)_
+E2E: **41/41 PASS** · Unit: **79/79 PASS**

@@ -23,7 +23,7 @@ NA Room connects people who need help (clients) with peers who have lived experi
 
 **For clients (people seeking help):**
 1. Verify a BTC or LTC wallet with $150+ balance (no funds moved — balance check only)
-2. Post an anonymous listing for $5 — visible for 6 hours
+2. Post an anonymous listing for $5 — visible for 24 hours
 3. Browse responses from peers
 4. Accept one peer — a $15 invoice is created for the peer to pay
 5. Once peer pays, an end-to-end encrypted chat opens (up to 24 hours)
@@ -39,7 +39,7 @@ NA Room connects people who need help (clients) with peers who have lived experi
 
 ## Fees
 
-- Client: $5 to post a listing (6 hours), $5 to renew (adds 6 hours, up to 30-day window)
+- Client: $5 to post a listing (24 hours); renewal is free while fewer than 2 paid chats have opened (no 30-day cutoff; early renewal allowed only during the final hour or after expiry)
 - Peer: $15 to open a chat after being accepted
 
 ## Languages

@@ -269,16 +269,18 @@ export async function run() {
     // T7b (Test C): TTL cleaner runs twice on expired peer_left room → opened_chats_count stays 1
     // The cleaner READS opened_chats_count to decide listing status but NEVER increments it.
     // A second pass must leave the count unchanged.
+    // New model: listing is 'active' at count=1 (no 'matched' status).
     await t.run('T7b: TTL cleaner runs twice on expired peer_left room → opened_chats_count stays 1', async () => {
       const now7b = Math.floor(Date.now() / 1000);
       const listId7b = `lst_t7b_${now7b}`;
       const rspId7b  = `rsp_t7b_${now7b}`;
       const roomId7b = `room_t7b_${now7b}`;
 
-      // Listing with opened_chats_count=1 (one paid chat already created), status='matched'
+      // Listing with opened_chats_count=1 (one paid chat already created), status='active'
+      // New model: listings stay 'active' while count < 2 — no 'matched' status.
       srv.db(
         `INSERT INTO listings (id, city, dependency_type, help_type, urgency, languages, wallet_hash, visible_until, created_at, status, is_sample, opened_chats_count) ` +
-        `VALUES ('${listId7b}', 'tbilisi', 'alcohol', 'crisis', 'urgent', '["en"]', 'hash_t7b', ${now7b+3600}, ${now7b}, 'matched', 0, 1)`
+        `VALUES ('${listId7b}', 'tbilisi', 'alcohol', 'crisis', 'urgent', '["en"]', 'hash_t7b', ${now7b+3600}, ${now7b}, 'active', 0, 1)`
       );
       // Accepted response linked to this listing
       srv.db(

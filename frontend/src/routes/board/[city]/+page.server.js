@@ -1,4 +1,4 @@
-const BACKEND = 'http://localhost:8080';
+const BACKEND = process.env.BACKEND_URL ?? 'http://localhost:8080';
 
 export async function load({ params }) {
 	const city = params.city;

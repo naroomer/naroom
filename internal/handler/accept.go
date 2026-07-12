@@ -120,24 +120,28 @@ func (h *Handler) AcceptResponse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Guard: no other accepted response for this listing (TOCTOU protection)
-	var alreadyAccepted int
+	// Guard: no other accepted response for this listing with no room yet (unpaid reservation in flight).
+	// A second acceptance is fine if the first already has a chat_room (payment confirmed).
+	var unpaidReservations int
 	tx.QueryRow(`
-		SELECT COUNT(*) FROM responses
-		WHERE listing_id = ? AND id != ? AND status = 'accepted'
-	`, listingID, responseID).Scan(&alreadyAccepted)
-	if alreadyAccepted > 0 {
-		writeError(w, 409, "another response already accepted for this listing")
+		SELECT COUNT(*) FROM responses r
+		WHERE r.listing_id = ? AND r.id != ? AND r.status = 'accepted'
+		  AND NOT EXISTS (SELECT 1 FROM chat_rooms cr WHERE cr.response_id = r.id)
+	`, listingID, responseID).Scan(&unpaidReservations)
+	if unpaidReservations > 0 {
+		writeError(w, 409, "another accepted response has a pending unpaid invoice")
 		return
 	}
 
-	// Check no active chat for this client (peer_left counts — client must close it first).
-	var activeChatCount int
+	// Check no active chat for this client in a DIFFERENT listing.
+	// A client may accept a second helper for the same listing (two-helper model).
+	var activeChatElsewhere int
 	tx.QueryRow(`
-		SELECT COUNT(*) FROM chat_rooms WHERE client_hash = ? AND status IN ('active', 'peer_left')
-	`, clientHash).Scan(&activeChatCount)
-	if activeChatCount > 0 {
-		writeError(w, 409, "already have active chat")
+		SELECT COUNT(*) FROM chat_rooms
+		WHERE client_hash = ? AND listing_id != ? AND status IN ('active', 'peer_left')
+	`, clientHash, listingID).Scan(&activeChatElsewhere)
+	if activeChatElsewhere > 0 {
+		writeError(w, 409, "already have active chat in another listing")
 		return
 	}
 
@@ -157,12 +161,6 @@ func (h *Handler) AcceptResponse(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 409, "Peer is currently at chat capacity. Choose another peer or try later.")
 		return
 	}
-
-	// Reject other pending responses for this listing.
-	tx.Exec(`
-		UPDATE responses SET status = 'rejected'
-		WHERE listing_id = ? AND id != ? AND status = 'pending'
-	`, listingID, responseID)
 
 	// Create invoice ($15) for counselor.
 	invoiceID := crypto.NewID("inv")
