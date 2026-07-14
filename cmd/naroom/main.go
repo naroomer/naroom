@@ -135,7 +135,6 @@ func main() {
 	rlRespond       := middleware.NewRateLimiter(3.0/60, 3)    // 3/min/IP
 	rlBoard         := middleware.NewRateLimiter(1.0, 60)      // 60/min/IP
 	rlInvoice       := middleware.NewRateLimiter(30.0/60, 30)  // 30/min/IP
-	rlAbuse         := middleware.NewRateLimiter(5.0/3600, 5)  // 5/hour/IP
 	rlGeneral       := middleware.NewRateLimiter(30.0/60, 30)  // 30/min/IP — всё остальное
 
 	// In dev mode: bypass all rate limits so E2E tests aren't throttled.
@@ -161,9 +160,14 @@ func main() {
 	// Public — no session required
 	r.With(rlBoard.Limit(rateFn)).Get("/board/{city}", h.Board)
 	r.With(rlGeneral.Limit(rateFn)).Get("/listing/{id}", h.GetListing)
-	r.With(middleware.LimitBody(64*1024), rlWalletVerify.Limit(rateFn)).Post("/wallet/register", h.WalletRegister)
 	r.With(requireSession, rlInvoice.Limit(rateFn)).Get("/invoice/{id}/status", h.InvoiceStatus)
 	r.Get("/api/balance-status", h.BalanceStatus)
+
+	// Principal/capability model: init session before wallet registration
+	r.With(middleware.LimitBody(64*1024), rlWalletVerify.Limit(rateFn)).Post("/session/init", h.SessionInit)
+	r.With(middleware.LimitBody(64*1024), rlWalletVerify.Limit(rateFn)).Post("/session/recover", h.SessionRecover)
+	// /wallet/register now requires an existing session (from /session/init or /session/recover)
+	r.With(requireSession, middleware.LimitBody(64*1024), rlWalletVerify.Limit(rateFn)).Post("/wallet/register", h.WalletRegister)
 
 	// Session — requires valid Bearer token
 	r.With(requireSession, requireNotBanned, middleware.LimitBody(64*1024), rlGeneral.Limit(rateFn)).Post("/listing/create", h.CreateListing)
@@ -186,12 +190,11 @@ func main() {
 	r.With(requireSession, requireNotBanned, middleware.LimitBody(64*1024), rlGeneral.Limit(rateFn)).Post("/chat/{room_id}/close", h.CloseChat)
 	// Review: auth via review_token (one-time anonymous token), no session required
 	r.With(middleware.LimitBody(64*1024), rlGeneral.Limit(rateFn)).Post("/review", h.Review)
-	// Abuse report: intentionally NOT ban-gated — banned wallets may still report abuse
-	r.With(requireSession, middleware.LimitBody(64*1024), rlAbuse.Limit(rateFn)).Post("/abuse-report", h.AbuseReport)
 
 	// Session management
 	r.With(middleware.LimitBody(64*1024), rlGeneral.Limit(rateFn)).Post("/session/refresh", h.SessionRefresh)
 	r.With(requireSession, middleware.LimitBody(64*1024)).Post("/session/revoke", h.SessionRevoke)
+	r.With(requireSession, rlGeneral.Limit(rateFn)).Get("/session/status", h.SessionStatus)
 
 	// Telegram notification bots
 	r.With(requireSession, middleware.LimitBody(4*1024), rlGeneral.Limit(rateFn)).Post("/telegram/client/token", h.TelegramClientToken)

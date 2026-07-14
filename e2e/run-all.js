@@ -11,12 +11,11 @@ import { run as test008 } from './tests/008_wallet_challenge.js';
 import { run as test009 } from './tests/009_session_lifecycle.js';
 import { run as test010 } from './tests/010_ws_auth.js';
 import { run as test011 } from './tests/011_peer_left_expiry.js';
-import { run as test012 } from './tests/012_abuse_report.js';
 import { run as test013 } from './tests/013_invoice_scoping.js';
 import { run as test014 } from './tests/014_reputation.js';
 
 const tests = [test001, test002, test003, test004, test005, test006,
-               test007, test008, test009, test010, test011, test012, test013, test014];
+               test007, test008, test009, test010, test011, test013, test014];
 const results = [];
 
 console.log('\n╔══════════════════════════════════╗');

@@ -37,11 +37,12 @@ func openAcceptTestDB(t *testing.T) *sql.DB {
 	t.Cleanup(func() { db.Close() })
 	for _, q := range []string{
 		`CREATE TABLE sessions (
-			token_hash TEXT PRIMARY KEY,
-			wallet_hash TEXT NOT NULL,
-			currency TEXT, role TEXT,
-			created_at INTEGER, expires_at INTEGER,
-			revoked_at INTEGER, last_seen_at INTEGER
+			token_hash   TEXT PRIMARY KEY,
+			wallet_hash  TEXT NOT NULL,
+			currency     TEXT, role TEXT,
+			created_at   INTEGER, expires_at INTEGER,
+			revoked_at   INTEGER, last_seen_at INTEGER,
+			principal_id TEXT
 		)`,
 		`CREATE TABLE listings (
 			id                  TEXT PRIMARY KEY,
@@ -55,32 +56,36 @@ func openAcceptTestDB(t *testing.T) *sql.DB {
 			created_at          INTEGER NOT NULL DEFAULT 0,
 			status              TEXT NOT NULL DEFAULT 'active',
 			opened_chats_count  INTEGER NOT NULL DEFAULT 0,
-			is_sample           INTEGER NOT NULL DEFAULT 0
+			is_sample           INTEGER NOT NULL DEFAULT 0,
+			owner_principal_id  TEXT
 		)`,
 		`CREATE TABLE responses (
-			id               TEXT PRIMARY KEY,
-			listing_id       TEXT NOT NULL,
-			counselor_hash   TEXT NOT NULL,
-			counselor_pubkey TEXT NOT NULL DEFAULT '',
-			status           TEXT NOT NULL DEFAULT 'pending',
-			created_at       INTEGER NOT NULL DEFAULT 0
+			id                      TEXT PRIMARY KEY,
+			listing_id              TEXT NOT NULL,
+			counselor_hash          TEXT NOT NULL,
+			counselor_pubkey        TEXT NOT NULL DEFAULT '',
+			status                  TEXT NOT NULL DEFAULT 'pending',
+			created_at              INTEGER NOT NULL DEFAULT 0,
+			counselor_principal_id  TEXT
 		)`,
 		`CREATE TABLE chat_rooms (
-			id               TEXT PRIMARY KEY,
-			listing_id       TEXT,
-			response_id      TEXT,
-			client_hash      TEXT NOT NULL,
-			counselor_hash   TEXT NOT NULL,
-			client_pubkey    TEXT NOT NULL DEFAULT '',
-			counselor_pubkey TEXT NOT NULL DEFAULT '',
-			started_at       INTEGER NOT NULL DEFAULT 0,
-			expires_at       INTEGER NOT NULL DEFAULT 0,
-			closed_at        INTEGER,
-			closed_by        TEXT,
-			peer_left_at     INTEGER,
-			client_left_at   INTEGER,
-			listing_counted  INTEGER NOT NULL DEFAULT 0,
-			status           TEXT NOT NULL DEFAULT 'active'
+			id                     TEXT PRIMARY KEY,
+			listing_id             TEXT,
+			response_id            TEXT,
+			client_hash            TEXT NOT NULL,
+			counselor_hash         TEXT NOT NULL,
+			client_pubkey          TEXT NOT NULL DEFAULT '',
+			counselor_pubkey       TEXT NOT NULL DEFAULT '',
+			started_at             INTEGER NOT NULL DEFAULT 0,
+			expires_at             INTEGER NOT NULL DEFAULT 0,
+			closed_at              INTEGER,
+			closed_by              TEXT,
+			peer_left_at           INTEGER,
+			client_left_at         INTEGER,
+			listing_counted        INTEGER NOT NULL DEFAULT 0,
+			status                 TEXT NOT NULL DEFAULT 'active',
+			client_principal_id    TEXT,
+			counselor_principal_id TEXT
 		)`,
 		`CREATE TABLE wallet_sessions (
 			wallet_hash        TEXT PRIMARY KEY,
@@ -112,11 +117,21 @@ func openAcceptTestDB(t *testing.T) *sql.DB {
 			chat_room_id        TEXT,
 			payment_detected_at INTEGER,
 			price_at_creation   REAL,
+			payer_principal_id  TEXT,
 			created_at          INTEGER NOT NULL
 		)`,
 		`CREATE TABLE invoice_index (
 			currency    TEXT PRIMARY KEY,
 			next_index  INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE TABLE principals (
+			id            TEXT PRIMARY KEY,
+			recovery_hash TEXT NOT NULL,
+			role          TEXT NOT NULL,
+			wallet_hash   TEXT,
+			currency      TEXT,
+			created_at    INTEGER NOT NULL DEFAULT 0,
+			last_seen     INTEGER
 		)`,
 	} {
 		if _, err := db.Exec(q); err != nil {
@@ -168,7 +183,8 @@ func seedAcceptCounselor(t *testing.T, db *sql.DB, walletAddr string) string {
 	return hash
 }
 
-// seedClientSession inserts wallet_sessions row for a client and returns hash + session token.
+// seedClientSession inserts wallet_sessions + principal row for a client and returns hash + session token.
+// The session includes principal_id so strict auth checks in AcceptResponse pass.
 func seedClientSession(t *testing.T, db *sql.DB, walletAddr string) (hash, token string) {
 	t.Helper()
 	hash = visHash(walletAddr)
@@ -181,11 +197,39 @@ func seedClientSession(t *testing.T, db *sql.DB, walletAddr string) (hash, token
 		(wallet_hash, wallet_address_enc, currency, role, min_required_usd, first_seen, created_at)
 		VALUES (?, ?, 'BTC', 'client', 150, ?, ?)`, hash, enc, now, now)
 	if err != nil {
-		t.Fatalf("seed client session: %v", err)
+		t.Fatalf("seed client wallet_session: %v", err)
+	}
+	// Create a principal for this client
+	principalID := "prn-acc-" + walletAddr
+	_, err = db.Exec(`INSERT INTO principals (id, recovery_hash, role, wallet_hash, created_at)
+		VALUES (?, ?, 'client', ?, ?)`, principalID, "rh-"+walletAddr, hash, now)
+	if err != nil {
+		t.Fatalf("seed principal: %v", err)
 	}
 	token = "accept-test-client-token-" + walletAddr
-	seedVisSession(t, db, middleware.HashToken(token), hash, "client")
+	seedVisSessionWithPrincipal(t, db, middleware.HashToken(token), hash, "client", principalID)
 	return hash, token
+}
+
+// seedAcceptListing inserts a listing with owner_principal_id for the client.
+func seedAcceptListing(t *testing.T, db *sql.DB, id, clientHash, status string, openedChats int, visibleUntil int64) {
+	t.Helper()
+	principalID := "prn-acc-listing-" + id
+	now := time.Now().Unix()
+	// Link to existing principal by wallet_hash
+	var existingPrincipalID string
+	db.QueryRow(`SELECT id FROM principals WHERE wallet_hash = ? AND role = 'client'`, clientHash).Scan(&existingPrincipalID)
+	if existingPrincipalID != "" {
+		principalID = existingPrincipalID
+	} else {
+		_, _ = db.Exec(`INSERT OR IGNORE INTO principals (id, recovery_hash, role, wallet_hash, created_at)
+			VALUES (?, ?, 'client', ?, ?)`, principalID, "rh-"+id, clientHash, now)
+	}
+	_, err := db.Exec(`INSERT INTO listings (id, wallet_hash, owner_principal_id, status, opened_chats_count, visible_until, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, id, clientHash, principalID, status, openedChats, visibleUntil, now)
+	if err != nil {
+		t.Fatalf("seedAcceptListing: %v", err)
+	}
 }
 
 func doAccept(t *testing.T, srv *httptest.Server, responseID, token, walletAddr, role string) *http.Response {
@@ -220,8 +264,7 @@ func TestAccept_AllowsSecondHelperWhileFirstChatActive(t *testing.T) {
 	counselorB := seedAcceptCounselor(t, db, "acc1-peer-B")
 
 	// Listing with 1 chat already opened
-	_, _ = db.Exec(`INSERT INTO listings (id, wallet_hash, status, opened_chats_count, visible_until, created_at)
-		VALUES ('acc-list-1', ?, 'active', 1, ?, ?)`, clientHash, now+3600, now)
+	seedAcceptListing(t, db, "acc-list-1", clientHash, "active", 1, now+3600)
 
 	// response_A: accepted, HAS a chat room (not an unpaid reservation)
 	_, _ = db.Exec(`INSERT INTO responses (id, listing_id, counselor_hash, status, created_at)
@@ -258,8 +301,7 @@ func TestAccept_BlockedByUnpaidInvoice(t *testing.T) {
 	counselorA := seedAcceptCounselor(t, db, "acc2-peer-A")
 	counselorB := seedAcceptCounselor(t, db, "acc2-peer-B")
 
-	_, _ = db.Exec(`INSERT INTO listings (id, wallet_hash, status, opened_chats_count, visible_until, created_at)
-		VALUES ('acc-list-2', ?, 'active', 0, ?, ?)`, clientHash, now+3600, now)
+	seedAcceptListing(t, db, "acc-list-2", clientHash, "active", 0, now+3600)
 
 	// response_A: accepted, NO chat room yet (unpaid reservation in flight)
 	_, _ = db.Exec(`INSERT INTO responses (id, listing_id, counselor_hash, status, created_at)
@@ -287,8 +329,7 @@ func TestAccept_PreservesPendingResponses(t *testing.T) {
 	counselorA := seedAcceptCounselor(t, db, "acc3-peer-A")
 	counselorB := seedAcceptCounselor(t, db, "acc3-peer-B")
 
-	_, _ = db.Exec(`INSERT INTO listings (id, wallet_hash, status, opened_chats_count, visible_until, created_at)
-		VALUES ('acc-list-3', ?, 'active', 0, ?, ?)`, clientHash, now+3600, now)
+	seedAcceptListing(t, db, "acc-list-3", clientHash, "active", 0, now+3600)
 	_, _ = db.Exec(`INSERT INTO responses (id, listing_id, counselor_hash, status, created_at)
 		VALUES ('acc-resp-A3', 'acc-list-3', ?, 'pending', ?)`, counselorA, now)
 	_, _ = db.Exec(`INSERT INTO responses (id, listing_id, counselor_hash, status, created_at)
@@ -318,8 +359,7 @@ func TestAccept_BlockedWhenListingAtCount2(t *testing.T) {
 	clientHash, clientToken := seedClientSession(t, db, "acc4-client")
 	counselorC := seedAcceptCounselor(t, db, "acc4-peer-C")
 
-	_, _ = db.Exec(`INSERT INTO listings (id, wallet_hash, status, opened_chats_count, visible_until, created_at)
-		VALUES ('acc-list-4', ?, 'closed', 2, ?, ?)`, clientHash, now+3600, now)
+	seedAcceptListing(t, db, "acc-list-4", clientHash, "closed", 2, now+3600)
 	_, _ = db.Exec(`INSERT INTO responses (id, listing_id, counselor_hash, status, created_at)
 		VALUES ('acc-resp-C4', 'acc-list-4', ?, 'pending', ?)`, counselorC, now)
 
@@ -340,15 +380,13 @@ func TestAccept_BlockedByActiveChatInOtherListing(t *testing.T) {
 	counselorD := seedAcceptCounselor(t, db, "acc5-peer-D")
 
 	// Listing 1: has active chat (client is in it)
-	_, _ = db.Exec(`INSERT INTO listings (id, wallet_hash, status, opened_chats_count, visible_until, created_at)
-		VALUES ('acc-other-list', ?, 'active', 1, ?, ?)`, clientHash, now+3600, now)
+	seedAcceptListing(t, db, "acc-other-list", clientHash, "active", 1, now+3600)
 	_, _ = db.Exec(`INSERT INTO chat_rooms (id, listing_id, client_hash, counselor_hash, started_at, expires_at, status)
 		VALUES ('acc-other-room', 'acc-other-list', ?, ?, ?, ?, 'active')`,
 		clientHash, counselorD, now-100, now+3600)
 
 	// Listing 2: new listing, client trying to accept here too
-	_, _ = db.Exec(`INSERT INTO listings (id, wallet_hash, status, opened_chats_count, visible_until, created_at)
-		VALUES ('acc-list-5', ?, 'active', 0, ?, ?)`, clientHash, now+3600, now)
+	seedAcceptListing(t, db, "acc-list-5", clientHash, "active", 0, now+3600)
 	_, _ = db.Exec(`INSERT INTO responses (id, listing_id, counselor_hash, status, created_at)
 		VALUES ('acc-resp-D5', 'acc-list-5', ?, 'pending', ?)`, counselorD, now)
 

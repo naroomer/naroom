@@ -46,6 +46,16 @@ func Open(path string) (*sql.DB, error) {
 	db.Exec(`ALTER TABLE helper_board_subscriptions ADD COLUMN counselor_hash TEXT`)
 	db.Exec(`ALTER TABLE telegram_link_tokens ADD COLUMN counselor_hash TEXT`)
 
+	// Principal/capability model: principal_id is the stable identity; wallet_hash demoted to billing
+	db.Exec(`ALTER TABLE sessions ADD COLUMN principal_id TEXT REFERENCES principals(id)`)
+	db.Exec(`ALTER TABLE listings ADD COLUMN owner_principal_id TEXT REFERENCES principals(id)`)
+	db.Exec(`ALTER TABLE responses ADD COLUMN counselor_principal_id TEXT REFERENCES principals(id)`)
+	db.Exec(`ALTER TABLE invoices ADD COLUMN payer_principal_id TEXT REFERENCES principals(id)`)
+	db.Exec(`ALTER TABLE chat_rooms ADD COLUMN client_principal_id TEXT REFERENCES principals(id)`)
+	db.Exec(`ALTER TABLE chat_rooms ADD COLUMN counselor_principal_id TEXT REFERENCES principals(id)`)
+	db.Exec(`ALTER TABLE telegram_link_tokens ADD COLUMN principal_id TEXT REFERENCES principals(id)`)
+	db.Exec(`ALTER TABLE helper_board_subscriptions ADD COLUMN principal_id TEXT REFERENCES principals(id)`)
+
 	// Schema cleanup migrations (must not silently fail if column/table is present)
 	// reconnection_hashes was a stub feature never read by any handler or frontend.
 	// ALTER TABLE … DROP COLUMN IF EXISTS is not valid SQLite syntax — check first.

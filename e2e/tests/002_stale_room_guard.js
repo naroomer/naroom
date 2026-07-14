@@ -28,21 +28,23 @@ export async function run() {
     // Simulate stale room left from a previous session
     await t.run('inject stale active room for peer address', async () => {
       // Use a DIFFERENT client hash so the stale room doesn't block acceptResponse
-      // The point is: same peer hash → peer's poll would pick it up if not scoped
+      // The point is: same peer principal_id → peer's poll would pick it up if not scoped
       const staleClientHash    = 'hash_stale_client_0000000000000000000000000000000000000000000000';
-      // wallet_sessions uses wallet_hash as PK (no wallet_address column) — look up via role
+      // Get peer's wallet_hash and principal_id (set by /session/init + /wallet/register)
       const staleCounselorHash = srv.db(`SELECT wallet_hash FROM wallet_sessions WHERE role='peer' LIMIT 1`);
       if (!staleCounselorHash) throw new Error('peer wallet_hash not found — verifyWallet must run first');
+      const peerPrincipalId = srv.db(`SELECT principal_id FROM sessions WHERE wallet_hash='${staleCounselorHash}' AND revoked_at IS NULL AND principal_id IS NOT NULL LIMIT 1`);
+      if (!peerPrincipalId) throw new Error('peer principal_id not found — verifyWallet must run first');
       srv.db(`
         INSERT INTO chat_rooms (id, listing_id, response_id, client_hash, counselor_hash,
-          client_pubkey, counselor_pubkey, started_at, expires_at, status)
+          client_pubkey, counselor_pubkey, started_at, expires_at, status, counselor_principal_id)
         VALUES (
           'room_stale_test', 'lst_old', 'rsp_old',
           '${staleClientHash}', '${staleCounselorHash}',
           '${clientKeys.pub}', '${peerKeys.pub}',
           ${Math.floor(Date.now()/1000) - 3600},
           ${Math.floor(Date.now()/1000) + 3600},
-          'active'
+          'active', '${peerPrincipalId}'
         )
       `);
     });

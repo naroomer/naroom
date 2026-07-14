@@ -18,11 +18,28 @@ export async function run() {
 
     let originalToken;
 
-    await t.run('verify wallet → session_token returned', async () => {
-      const r = await api.verifyWallet(CLIENT_WALLET, 'BTC', 'client');
-      assertStatus(r, 200, 'verify');
-      assertHasField(r.body, 'session_token', 'verify response');
-      originalToken = r.body.session_token;
+    await t.run('session/init → session_token returned; wallet/register → wallet_linked', async () => {
+      // Step 1: create principal + session
+      const initR = await fetch(`${srv.base}/session/init`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: 'client' }),
+      });
+      assertStatus({ status: initR.status, body: {} }, 201, 'session/init');
+      const initBody = await initR.json();
+      assertHasField(initBody, 'session_token', 'session/init response');
+      originalToken = initBody.session_token;
+      // Step 2: link wallet using session token
+      const regR = await fetch(`${srv.base}/wallet/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${originalToken}` },
+        body: JSON.stringify({ wallet_address: CLIENT_WALLET, currency: 'BTC', role: 'client' }),
+      });
+      assertStatus({ status: regR.status, body: {} }, 200, 'wallet/register');
+      const regBody = await regR.json();
+      if (!regBody.wallet_linked) throw new Error(`Expected wallet_linked: true, got ${JSON.stringify(regBody)}`);
+      // Store token in api client for subsequent calls
+      api.tokens[CLIENT_WALLET] = { token: originalToken, role: 'client' };
     });
 
     await t.run('token works for protected endpoint (create listing)', async () => {
@@ -99,8 +116,11 @@ export async function run() {
     });
 
     await t.run('re-verify after revoke → new working token', async () => {
+      // Clear stored token to force a fresh /session/init + /wallet/register cycle
+      delete api.tokens[CLIENT_WALLET];
       const r = await api.verifyWallet(CLIENT_WALLET, 'BTC', 'client');
       assertStatus(r, 200, 're-verify');
+      if (!r.body.wallet_linked) throw new Error(`Expected wallet_linked: true after re-verify`);
       // Try using new token
       const r2 = await fetch(`${srv.base}/board/new_york`);
       assertStatus(r2, 200, 'board after re-verify');

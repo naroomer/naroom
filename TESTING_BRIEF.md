@@ -72,7 +72,6 @@ FRONTEND_URL=http://localhost:4173 bash scripts/selftest-full.sh
 | 009_session_lifecycle | TTL сессии, истечение, отзыв |
 | 010_ws_auth | WebSocket аутентификация |
 | 011_peer_left_expiry | Истечение комнаты когда peer ушёл |
-| 012_abuse_report | Жалоба на злоупотребление |
 | 013_invoice_scoping | Инвойс привязан к конкретному кошельку |
 | 014_reputation | Система рейтингов (👍/👎) |
 | 015_region_lock | Peer заблокирован в первом городе где ответил |
@@ -85,7 +84,6 @@ FRONTEND_URL=http://localhost:4173 bash scripts/selftest-full.sh
 | 022_message_ttl | TTL сообщений в чате |
 | 023_wallet_session_ttl | TTL wallet-сессии |
 | 024_log_privacy | Логи не содержат IP, кошельки, токены |
-| 025_abuse_ban | Бан после нескольких жалоб |
 | 026_analytics_privacy | **(Playwright)** Аналитика не загружается на приватных страницах |
 | 027_challenge_replay | /wallet/challenge endpoint существует; challenge/verify flow работает |
 | 028_payment_edge_cases | Краевые случаи оплаты: недоплата, таймаут API, восстановление |

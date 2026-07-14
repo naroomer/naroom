@@ -27,12 +27,14 @@ const PEER_WALLET   = '1BoatSLRHtKNngkdXEeobR76b53LETtpyT';
 const OTHER_WALLET  = '1CounterpartyXXXXXXXXXXXXXXXUWLpVr';
 
 let _seq = 0;
-function injectListing(srv, walletHash, status = 'active') {
+function injectListing(srv, walletHash, status = 'active', ownerPrincipalID = null) {
   const now = Math.floor(Date.now() / 1000);
   const id = `lst_038_${now}_${++_seq}`;
+  const principalCol = ownerPrincipalID ? `, owner_principal_id` : '';
+  const principalVal = ownerPrincipalID ? `, '${ownerPrincipalID}'` : '';
   srv.db(
-    `INSERT INTO listings (id, city, dependency_type, help_type, urgency, languages, wallet_hash, visible_until, created_at, status, is_sample) ` +
-    `VALUES ('${id}', 'new_york', 'alcohol', 'crisis', 'urgent', '["en"]', '${walletHash}', ${now + 3600}, ${now}, '${status}', 0)`
+    `INSERT INTO listings (id, city, dependency_type, help_type, urgency, languages, wallet_hash, visible_until, created_at, status, is_sample${principalCol}) ` +
+    `VALUES ('${id}', 'new_york', 'alcohol', 'crisis', 'urgent', '["en"]', '${walletHash}', ${now + 3600}, ${now}, '${status}', 0${principalVal})`
   );
   return id;
 }
@@ -124,16 +126,20 @@ export async function run() {
       await srv.start();
       const api = new ApiClient(srv.base);
 
-      const tokenClient = srv.registerDirect(CLIENT_WALLET, 'client');
-      const tokenOther  = srv.registerDirect(OTHER_WALLET,  'client');
-      api.tokens[CLIENT_WALLET] = { token: tokenClient, role: 'client' };
-      api.tokens[OTHER_WALLET]  = { token: tokenOther,  role: 'client' };
+      // Use real API flow so sessions get principal_id and wallet_hash is set on the principal.
+      await api.verifyWallet(CLIENT_WALLET, 'BTC', 'client');
+      await api.verifyWallet(OTHER_WALLET,  'BTC', 'client');
 
-      // Get client wallet_hash for direct injection
+      // Resolve principal_id for CLIENT_WALLET so we can inject a listing owned by it.
+      const statusR = await api.get('/session/status', CLIENT_WALLET);
+      if (statusR.status !== 200 || !statusR.body.principal_id) {
+        throw new Error(`/session/status failed: ${JSON.stringify(statusR.body)}`);
+      }
+      const clientPrincipalID = statusR.body.principal_id;
+
+      // Get the wallet_hash for CLIENT_WALLET (needed for listing injection; listings still carry wallet_hash).
       const clientHash = srv.db(
-        `SELECT wallet_hash FROM wallet_sessions WHERE wallet_hash IN (` +
-        `  SELECT wallet_hash FROM sessions WHERE role='client' ORDER BY created_at LIMIT 1` +
-        `)`
+        `SELECT wallet_hash FROM sessions WHERE principal_id='${clientPrincipalID}' LIMIT 1`
       ).trim();
 
       let injectedListingId;
@@ -141,7 +147,7 @@ export async function run() {
       // T4: active listing with no chat room → /resume returns listing_id (fallback state)
       // In the new model there is no 'matched' status; listings stay 'active' through all chats.
       await t.run('T4: active listing, no chat room → /resume returns listing_id as fallback', async () => {
-        injectedListingId = injectListing(srv, clientHash, 'active');
+        injectedListingId = injectListing(srv, clientHash, 'active', clientPrincipalID);
 
         const r = await api.get('/resume', CLIENT_WALLET);
         assertStatus(r, 200, '/resume fallback');
@@ -156,7 +162,7 @@ export async function run() {
         }
       });
 
-      // T5: /resume fallback is wallet-scoped — unrelated wallet does not see client's listing
+      // T5: /resume fallback is principal-scoped — unrelated principal does not see client's listing
       await t.run('T5: /resume matched-listing fallback is wallet-scoped (OTHER_WALLET → 404)', async () => {
         const r = await api.get('/resume', OTHER_WALLET);
         if (r.status !== 404) {

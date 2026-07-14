@@ -22,16 +22,16 @@ export async function run() {
     let listingId, responseId, invoiceId, roomId, reviewToken;
 
     // ── Phase 1: Wallet verification ─────────────────────────────────────
-    await t.run('client wallet verifies + gets session token', async () => {
+    await t.run('client wallet: /session/init + /wallet/register → session + wallet linked', async () => {
       const r = await api.verifyWallet(CLIENT_WALLET, 'BTC', 'client');
       assertStatus(r, 200, 'client verify');
-      assertHasField(r.body, 'session_token', 'client verify');
+      if (!r.body.wallet_linked) throw new Error(`Expected wallet_linked: true, got ${JSON.stringify(r.body)}`);
     });
 
-    await t.run('peer wallet verifies + gets session token', async () => {
+    await t.run('peer wallet: /session/init + /wallet/register → session + wallet linked', async () => {
       const r = await api.verifyWallet(PEER_WALLET, 'BTC', 'peer');
       assertStatus(r, 200, 'peer verify');
-      assertHasField(r.body, 'session_token', 'peer verify');
+      if (!r.body.wallet_linked) throw new Error(`Expected wallet_linked: true, got ${JSON.stringify(r.body)}`);
     });
 
     // ── Phase 2: Create listing ──────────────────────────────────────────

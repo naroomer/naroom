@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"database/sql"
 	"log"
 	"net/http"
 	"time"
@@ -26,24 +27,40 @@ func (h *Handler) RenewListing(w http.ResponseWriter, r *http.Request) {
 	listingID := chi.URLParam(r, "id")
 
 	walletHash := middleware.SessionWalletHash(r.Context())
+	principalID := middleware.SessionPrincipalID(r.Context())
 	if walletHash == "" {
 		writeError(w, 401, "session required")
+		return
+	}
+	if role := middleware.SessionRole(r.Context()); role != "client" {
+		writeError(w, 403, "only clients can renew listings")
+		return
+	}
+
+	// Strict authorization: principal_id only, no wallet_hash fallback.
+	if principalID == "" {
+		writeError(w, 401, "session requires /session/init")
 		return
 	}
 
 	// Load listing for 404 / 403 / count checks.
 	// These are pre-checks only; the authoritative eligibility gate is the atomic UPDATE below.
-	var ownerHash string
+	var ownerPrincipalID sql.NullString
 	var renewalCount, openedChatsCount int
 	err := h.DB.QueryRow(`
-		SELECT wallet_hash, COALESCE(renewal_count, 0), COALESCE(opened_chats_count, 0)
+		SELECT owner_principal_id, COALESCE(renewal_count, 0), COALESCE(opened_chats_count, 0)
 		FROM listings WHERE id = ? AND is_sample = 0
-	`, listingID).Scan(&ownerHash, &renewalCount, &openedChatsCount)
+	`, listingID).Scan(&ownerPrincipalID, &renewalCount, &openedChatsCount)
 	if err != nil {
 		writeError(w, 404, "listing not found")
 		return
 	}
-	if ownerHash != walletHash {
+	// Strict ownership check: principal_id only
+	if !ownerPrincipalID.Valid || ownerPrincipalID.String == "" {
+		writeError(w, 403, "session upgrade required")
+		return
+	}
+	if ownerPrincipalID.String != principalID {
 		writeError(w, 403, "not your listing")
 		return
 	}

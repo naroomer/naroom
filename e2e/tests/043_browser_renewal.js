@@ -275,9 +275,7 @@ async function run() {
     console.log('Both servers ready.\n');
 
     // ── Seed via API ──────────────────────────────────────────────────────────
-    await apiPost('/wallet/register', { wallet_address: CLIENT_WALLET, currency: 'BTC', role: 'client' });
-    await apiPost('/wallet/register', { wallet_address: WRONG_WALLET,  currency: 'BTC', role: 'client' }, WRONG_WALLET);
-
+    // In dev mode, /listing/create accepts X-Dev-Wallet directly — no prior /wallet/register needed.
     const cr = await apiPost('/listing/create', {
       city: 'new_york', dependency_type: 'alcohol', help_type: 'just_talk',
       urgency: 'soon', languages: ['en'],

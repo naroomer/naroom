@@ -7,8 +7,7 @@
 //   T4: banned wallet cannot send chat poll message → 403
 //   T5: banned wallet cannot update chat pubkey → 403
 //   T6: non-banned wallet still works normally (sanity check)
-//   T7: banned wallet CAN still submit abuse report → 200
-//   T8: banned wallet CAN still access GET /board and GET /listing → 200
+//   T7: banned wallet CAN still access GET /board and GET /listing → 200
 //
 // Ban is stored in abuse_counters.banned_until.
 // We inject it directly via DB to avoid needing 3+ real peer reporters.
@@ -189,57 +188,13 @@ export async function run() {
       assertStatus(r, 201, 'non-banned client createListing');
     });
 
-    // ── T7: banned wallet CAN still submit abuse report → 200 or 201 ─────────
-    // Need a closed chat room where banned client is the client.
-    await t.run('setup: inject closed room for abuse report by peer (against banned client)', async () => {
-      const clientHash = walletHash(BANNED_CLIENT);
-      const peerHash   = walletHash(PEER_WALLET);
-      const now = Math.floor(Date.now() / 1000);
-      const roomId = 'room_abusereport_036';
-      srv.db(
-        `PRAGMA foreign_keys = OFF; ` +
-        `INSERT OR IGNORE INTO chat_rooms ` +
-        `(id, listing_id, client_hash, counselor_hash, client_pubkey, counselor_pubkey, status, started_at, closed_at, closed_by, expires_at) ` +
-        `VALUES ('${roomId}', '${bannedListingId}', '${peerHash}', '${clientHash}', ` +
-        `'cpubkey', 'ppubkey', 'closed', ${now - 7200}, ${now - 3600}, 'client', ${now + 3600}); ` +
-        `PRAGMA foreign_keys = ON`
-      );
-    });
-
-    // For T7: we need the banned wallet to be a PEER who reports a client (abuse flow requires peer role).
-    // But BANNED_CLIENT has role=client. Let's instead verify that a banned wallet's own role
-    // (client) can still access abuse-report — but abuse-report requires peer role.
-    // The invariant says: "banned users can still report abuse (they may be victims)".
-    // In practice: if banned wallet is a PEER, they can still file a report.
-    // Let's inject ban on a peer and verify they can still report.
-    await t.run('T7: banned peer wallet CAN still submit abuse report → 200', async () => {
-      // Use PEER_WALLET_2 (already banned from T1 setup), report against BANNED_CLIENT
-      const bannedClientHash = walletHash(BANNED_CLIENT);
-      const bannedPeerHash   = walletHash(PEER_WALLET_2);
-      const now = Math.floor(Date.now() / 1000);
-      const roomId = 'room_t7_036';
-      // Inject a closed room where PEER_WALLET_2 is the counselor (so they can report)
-      srv.db(
-        `PRAGMA foreign_keys = OFF; ` +
-        `INSERT OR IGNORE INTO chat_rooms ` +
-        `(id, listing_id, client_hash, counselor_hash, client_pubkey, counselor_pubkey, status, started_at, closed_at, closed_by, expires_at) ` +
-        `VALUES ('${roomId}', '${bannedListingId}', '${bannedClientHash}', '${bannedPeerHash}', ` +
-        `'cpubkey2', 'ppubkey2', 'closed', ${now - 7200}, ${now - 3600}, 'client', ${now + 3600}); ` +
-        `PRAGMA foreign_keys = ON`
-      );
-      const r = await api.abuseReport(roomId, ['misuse'], PEER_WALLET_2);
-      if (r.status !== 200 && r.status !== 201) {
-        throw new Error(`expected 200/201 for banned peer abuse report, got ${r.status}: ${JSON.stringify(r.body)}`);
-      }
-    });
-
-    // ── T8: banned wallet CAN still access GET /board and GET /listing → 200 ──
-    await t.run('T8: banned wallet can access GET /board → 200', async () => {
+    // ── T7: banned wallet CAN still access GET /board and GET /listing → 200 ──
+    await t.run('T7: banned wallet can access GET /board → 200', async () => {
       const r = await api.getBoard('new_york');
       assertStatus(r, 200, 'banned client GET /board');
     });
 
-    await t.run('T8: banned wallet can access GET /listing → 200', async () => {
+    await t.run('T7: banned wallet can access GET /listing → 200', async () => {
       const r = await api.getListing(bannedListingId);
       assertStatus(r, 200, 'banned client GET /listing');
     });

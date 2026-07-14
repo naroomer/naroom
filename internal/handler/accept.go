@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"database/sql"
 	"fmt"
 	"net/http"
 	"time"
@@ -22,8 +23,17 @@ func (h *Handler) AcceptResponse(w http.ResponseWriter, r *http.Request) {
 	responseID := chi.URLParam(r, "id")
 
 	clientHash := middleware.SessionWalletHash(r.Context())
+	clientPrincipalID := middleware.SessionPrincipalID(r.Context())
 	if clientHash == "" {
 		writeError(w, 401, "session required")
+		return
+	}
+	if role := middleware.SessionRole(r.Context()); role != "client" {
+		writeError(w, 403, "only clients can accept responses")
+		return
+	}
+	if clientPrincipalID == "" {
+		writeError(w, 401, "session requires /session/init")
 		return
 	}
 
@@ -100,15 +110,26 @@ func (h *Handler) AcceptResponse(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify that the response belongs to the client's own listing.
+	// Prefer principal_id ownership check; fallback to wallet_hash for legacy listings.
 	var listingID, counselorHash, counselorPubkey string
+	var listingOwnerPrincipalID sql.NullString
 	err = tx.QueryRow(`
-		SELECT r.listing_id, r.counselor_hash, r.counselor_pubkey
+		SELECT r.listing_id, r.counselor_hash, r.counselor_pubkey, l.owner_principal_id
 		FROM responses r
 		JOIN listings l ON l.id = r.listing_id
-		WHERE r.id = ? AND l.wallet_hash = ?
-	`, responseID, clientHash).Scan(&listingID, &counselorHash, &counselorPubkey)
+		WHERE r.id = ?
+	`, responseID).Scan(&listingID, &counselorHash, &counselorPubkey, &listingOwnerPrincipalID)
 	if err != nil {
 		writeError(w, 404, "response not found or not yours")
+		return
+	}
+	// Strict ownership gate: principal_id only, no wallet_hash fallback
+	if !listingOwnerPrincipalID.Valid || listingOwnerPrincipalID.String == "" {
+		writeError(w, 403, "session upgrade required")
+		return
+	}
+	if listingOwnerPrincipalID.String != clientPrincipalID {
+		writeError(w, 403, "not your listing")
 		return
 	}
 
@@ -136,10 +157,24 @@ func (h *Handler) AcceptResponse(w http.ResponseWriter, r *http.Request) {
 	// Check no active chat for this client in a DIFFERENT listing.
 	// A client may accept a second helper for the same listing (two-helper model).
 	var activeChatElsewhere int
-	tx.QueryRow(`
-		SELECT COUNT(*) FROM chat_rooms
-		WHERE client_hash = ? AND listing_id != ? AND status IN ('active', 'peer_left')
-	`, clientHash, listingID).Scan(&activeChatElsewhere)
+	if clientPrincipalID != "" {
+		tx.QueryRow(`
+			SELECT COUNT(*) FROM chat_rooms
+			WHERE client_principal_id = ? AND listing_id != ? AND status IN ('active', 'peer_left')
+		`, clientPrincipalID, listingID).Scan(&activeChatElsewhere)
+		if activeChatElsewhere == 0 {
+			// Also check legacy rooms by wallet_hash
+			tx.QueryRow(`
+				SELECT COUNT(*) FROM chat_rooms
+				WHERE client_hash = ? AND client_principal_id IS NULL AND listing_id != ? AND status IN ('active', 'peer_left')
+			`, clientHash, listingID).Scan(&activeChatElsewhere)
+		}
+	} else {
+		tx.QueryRow(`
+			SELECT COUNT(*) FROM chat_rooms
+			WHERE client_hash = ? AND listing_id != ? AND status IN ('active', 'peer_left')
+		`, clientHash, listingID).Scan(&activeChatElsewhere)
+	}
 	if activeChatElsewhere > 0 {
 		writeError(w, 409, "already have active chat in another listing")
 		return
@@ -182,12 +217,19 @@ func (h *Handler) AcceptResponse(w http.ResponseWriter, r *http.Request) {
 	}
 	counselorPayerHash := crypto.WalletHash(h.HashKey, rawCounselorAddress)
 
+	// counselorPrincipalID from responses is the counselor's principal — that's the payer for chat invoices
+	var counselorPrnID sql.NullString
+	tx.QueryRow(`SELECT counselor_principal_id FROM responses WHERE id = ?`, responseID).Scan(&counselorPrnID)
+	var nullCounselorPrincipalForInvoice sql.NullString
+	if counselorPrnID.Valid && counselorPrnID.String != "" {
+		nullCounselorPrincipalForInvoice = counselorPrnID
+	}
 	_, err = tx.Exec(`
 		INSERT INTO invoices (id, type, address, amount_usd, amount_crypto, currency,
-		                      response_id, client_pubkey, payer_address, price_at_creation, status, created_at)
-		VALUES (?, 'chat', ?, 15.0, ?, ?, ?, ?, ?, ?, 'pending', ?)
+		                      response_id, client_pubkey, payer_address, payer_principal_id, price_at_creation, status, created_at)
+		VALUES (?, 'chat', ?, 15.0, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
 	`, invoiceID, invoiceAddr, amountCrypto, req.Currency,
-		responseID, req.ClientPubkey, counselorPayerHash, priceAtCreation, now)
+		responseID, req.ClientPubkey, counselorPayerHash, nullCounselorPrincipalForInvoice, priceAtCreation, now)
 	if err != nil {
 		writeError(w, 500, "db error")
 		return

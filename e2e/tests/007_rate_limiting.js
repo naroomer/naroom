@@ -11,28 +11,27 @@ export async function run() {
   try {
     await srv.start();
 
-    // POST /wallet/register: burst=10, rate=10/min
-    // Use invalid body (missing wallet_address) so the handler returns 400 immediately —
-    // no external balance-check API calls, so timing is deterministic.
-    // The rate-limiter middleware runs before the handler, so these still consume tokens.
-    const invalidBody = JSON.stringify({ currency: 'BTC', role: 'client' }); // missing wallet_address
-    await t.run('wallet/register: first 10 requests hit rate limiter (return 400, not 429)', async () => {
+    // POST /session/init: burst=10, rate=10/min (same rlWalletVerify limiter)
+    // /session/init doesn't require auth, so requests return 201 until burst is exhausted.
+    // This tests the wallet verification rate limiter without needing a prior session.
+    const initBody = JSON.stringify({ role: 'client' });
+    await t.run('session/init: first 10 requests succeed (not 429)', async () => {
       for (let i = 0; i < 10; i++) {
-        const r = await fetch(`${srv.base}/wallet/register`, {
+        const r = await fetch(`${srv.base}/session/init`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: invalidBody,
+          body: initBody,
         });
-        if (r.status === 429) throw new Error(`Request ${i+1} got 429, expected 400`);
-        if (r.status !== 400) throw new Error(`Request ${i+1} got ${r.status}, expected 400`);
+        if (r.status === 429) throw new Error(`Request ${i+1} got 429, expected 201 (rate limit not yet hit)`);
+        if (r.status !== 201) throw new Error(`Request ${i+1} got ${r.status}, expected 201`);
       }
     });
 
-    await t.run('wallet/register: 11th request → 429 (burst exhausted)', async () => {
-      const r = await fetch(`${srv.base}/wallet/register`, {
+    await t.run('session/init: 11th request → 429 (burst exhausted)', async () => {
+      const r = await fetch(`${srv.base}/session/init`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: invalidBody,
+        body: initBody,
       });
       if (r.status !== 429) throw new Error(`Expected 429, got ${r.status}`);
     });

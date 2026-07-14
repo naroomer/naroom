@@ -99,7 +99,7 @@ Invariant IDs use short category codes: **ID** (Identity/Privacy), **SE** (Sessi
 **Enforced:**
 - `internal/middleware/session.go:RequireSession` — checks token hash exists in sessions, not revoked, not expired
 
-**Tests:** 009 (invalid/no token → 401); 013 (invoice without session → 401); 012 (abuse without session → 401)
+**Tests:** 009 (invalid/no token → 401); 013 (invoice without session → 401)
 **Coverage:** ✅ Covered
 
 ---
@@ -116,15 +116,14 @@ Invariant IDs use short category codes: **ID** (Identity/Privacy), **SE** (Sessi
 ---
 
 ### SE-3: Role enforcement — client cannot respond; peer cannot see responses
-**Rule:** Peer-only: `/listing/{id}/respond`, `/peer/region`, `/peer/chatroom`, `/abuse-report`. Client-only: review tokens.
+**Rule:** Peer-only: `/listing/{id}/respond`, `/peer/region`, `/peer/chatroom`. Client-only: review tokens.
 
 **Enforced:**
 - `internal/middleware/session.go` — stores `role` in context
 - `internal/handler/respond.go` line 32-36 — explicit `role == "client" → 403` check BEFORE DevMode block
 - `internal/handler/review.go` — `CloseChat` issues token only to client
-- `internal/handler/abuse.go` — checks `role = peer`
 
-**Tests:** 003 (peer close → no review_token; client close → review_token); 012 (client cannot abuse-report → 403); **016** (client role → 403 on respond, even for own listing)
+**Tests:** 003 (peer close → no review_token; client close → review_token); **016** (client role → 403 on respond, even for own listing)
 **Coverage:** ✅ Covered
 
 ---
@@ -513,32 +512,19 @@ Note: listings no longer enter `status='matched'`. The first chat opens while th
 
 ---
 
-### RP-3: Abuse report deduplication (one counselor→client pair per 30 days)
-**Rule:** Duplicate abuse report from same pair returns 409.
+### RP-4: Abuse ban enforcement
+**Rule:** Wallets with `abuse_counters.banned_until > now` are blocked from all active participation. Bans can be injected directly via DB (e.g. by admin tools). Banned wallets are blocked from all active participation.
 
 **Enforced:**
-- `internal/handler/abuse.go:AbuseReport` — `INSERT OR IGNORE INTO abuse_dedup`; 409 if already exists
-
-**Tests:** 012 (duplicate report → 409)
-**Coverage:** ✅ Covered
-
----
-
-### RP-4: Abuse ban thresholds (3 reports → 72h, 5 → permanent)
-**Rule:** After 3 abuse reports, `abuse_counters.banned_until` is set to `now + 259200` (72h). After 5 reports, `banned_until` = `now + 10 years`. Banned wallets are blocked from all active participation.
-
-**Enforced:**
-- `internal/handler/abuse.go:AbuseReport` — sets `banned_until` at ≥3 and ≥5 report thresholds
 - `internal/middleware/ban.go:RequireNotBanned` — checks `abuse_counters.banned_until > now` on protected routes; returns 403 with `{"error":"account banned","banned_until":<unix_ts>}`
 - `cmd/naroom/main.go` — `requireNotBanned` applied after `requireSession` on: `POST /listing/create`, `POST /listing/{id}/respond`, `POST /listing/{id}/renew`, `POST /chat/poll/send`, `POST /chat/{room_id}/pubkey`, `POST /chat/{room_id}/close`
 
 **Intentionally NOT blocked for banned wallets:**
 - `GET /board/{city}`, `GET /listing/{id}` — read-only browsing remains accessible
-- `POST /abuse-report` — banned wallets may still be victims and need to report
 - `POST /session/refresh`, `POST /wallet/register` — needed to check status
 
-**Tests:** **025** (5 peers report same client; after 3rd: `banned_until` ≈ now+259200; after 5th: ≈ now+10yr; total=5) + **036** (enforcement: banned wallet → 403 on respond/create/renew/pollSend/pubkey; GET /board and abuse-report remain accessible)
-**Coverage:** ✅ Threshold SET correctly · ✅ Ban CHECK enforced in middleware · ✅ Regression test 036 (16/16)
+**Tests:** **036** (enforcement: banned wallet → 403 on respond/create/renew/pollSend/pubkey; GET /board remains accessible)
+**Coverage:** ✅ Ban CHECK enforced in middleware · ✅ Regression test 036
 
 ---
 
@@ -626,7 +612,7 @@ Sprint 8 changes: LS-3 rewritten — renewal is free, no 30-day cutoff, blocked 
 | IN-4 Double-confirm chat side-effect | ⚠️ | Listing side-effect proven; chat path structural only |
 | IN-5 Balance math (not just error path) | ✅ | Test 018 added Sprint 1 |
 | RP-2 No token for short session | ⚠️ | Partial |
-| RP-4 Abuse ban thresholds | ✅ | Tests 025 + 036 (thresholds + enforcement; Sprint 6) |
+| RP-4 Abuse ban enforcement | ✅ | Test 036 (ban enforced in middleware; Sprint 6) |
 | WK-1 Message TTL cleanup | ✅ | Test 022 added Sprint 2 |
 | WK-3 wallet_sessions TTL cleanup | ✅ | Test 023 added Sprint 2 |
 | WK-4 Expired/closed chat frees peer slot | ✅ | Test 037 added Sprint 7 |

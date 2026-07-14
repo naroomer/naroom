@@ -36,17 +36,68 @@
 	let error          = $state('');
 	let telegramBotUrl = $state('');
 	let telegramToken  = $state('');
+	// Recovery code display (shown once after /session/init)
+	let recoveryCodeNew  = $state('');
+	let showRecoveryStep = $state(false);
+	let pendingAfterRecovery = $state(null);
 
-	// Step 1 → check balance → get Telegram token → go to step 2
+	// Step 1 → ensure principal session → show recovery code → check balance → get Telegram token → go to step 2
 	async function handleSubscribe() {
 		if (!walletAddress) return;
 		loading = true;
 		error = '';
 		try {
-			// 1. Check balance & issue session
+			let sessionToken = sessionStorage.getItem('naroom_session_peer') || '';
+
+			// Validate existing session via /session/status
+			if (sessionToken) {
+				try {
+					const testRes = await fetch('/api/session/status', { headers: { 'Authorization': `Bearer ${sessionToken}` } });
+					if (!testRes.ok) { sessionToken = ''; }
+				} catch { sessionToken = ''; }
+			}
+
+			if (!sessionToken) {
+				// New session — show recovery code BEFORE calling /wallet/register
+				const initRes = await fetch('/api/session/init', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ role: 'peer' }),
+				});
+				if (!initRes.ok) throw new Error('Failed to initialize session');
+				const initData = await initRes.json();
+				sessionToken = initData.session_token;
+				sessionStorage.setItem('naroom_session_peer', sessionToken);
+
+				recoveryCodeNew = initData.recovery_code;
+				pendingAfterRecovery = async () => {
+					showRecoveryStep = false;
+					await registerPeerWalletAndContinue(sessionToken);
+				};
+				showRecoveryStep = true;
+				loading = false;
+				return;
+			}
+
+			// Existing valid session — go straight to wallet registration
+			await registerPeerWalletAndContinue(sessionToken);
+		} catch (e) {
+			error = e.message ?? 'Error';
+		} finally {
+			loading = false;
+		}
+	}
+
+	async function registerPeerWalletAndContinue(sessionToken) {
+		loading = true;
+		error = '';
+		try {
 			const res = await fetch('/api/wallet/register', {
 				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
+				headers: {
+					'Content-Type': 'application/json',
+					'Authorization': `Bearer ${sessionToken}`,
+				},
 				body: JSON.stringify({ wallet_address: walletAddress, currency, role: 'peer' }),
 			});
 			const data = await res.json();
@@ -56,10 +107,18 @@
 				}
 				throw new Error(data.error ?? 'Failed to verify balance');
 			}
-			const sessionToken = data.session_token ?? '';
-			if (sessionToken) sessionStorage.setItem('naroom_session_peer', sessionToken);
+			await continueHelperSubscribe(sessionToken);
+		} catch (e) {
+			error = e.message ?? 'Error';
+		} finally {
+			loading = false;
+		}
+	}
 
-			// 2. Get Telegram token
+	async function continueHelperSubscribe(sessionToken) {
+		loading = true;
+		try {
+			// Get Telegram token
 			const filters = {};
 			if (city)     filters.city = city;
 			if (language) filters.language = language;
@@ -71,7 +130,7 @@
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json',
-					...(sessionToken ? { 'Authorization': `Bearer ${sessionToken}` } : {}),
+					'Authorization': `Bearer ${sessionToken}`,
 				},
 				body: JSON.stringify(filters),
 			});
@@ -126,7 +185,7 @@
 	</header>
 
 	<!-- Step 1: Form -->
-	{#if step === 1}
+	{#if step === 1 && !showRecoveryStep}
 	<div class="form-wrap">
 		<div>
 			<h1>{t('helper.title')}</h1>
@@ -228,6 +287,17 @@
 			type="button"
 		>
 			{loading ? t('helper.processing') : t('helper.subscribe')}
+		</button>
+	</div>
+
+	<!-- Recovery code display (shown once after /session/init) -->
+	{:else if showRecoveryStep}
+	<div class="form-wrap">
+		<h2>Save your recovery code</h2>
+		<p>This is the only way to restore access if you lose your session. It will not be shown again.</p>
+		<div class="message-box" style="font-size: 12px;">{recoveryCodeNew}</div>
+		<button class="submit" onclick={() => pendingAfterRecovery && pendingAfterRecovery()}>
+			I saved it — continue →
 		</button>
 	</div>
 

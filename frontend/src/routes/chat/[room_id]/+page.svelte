@@ -21,9 +21,11 @@
 
 	// Re-auth state — shown when session is missing or expired
 	let needsAuth     = $state(false);
-	let authWallet    = $state('');
+	let authWallet    = $state(''); // holds recovery code (not wallet) after rename of UX
 	let authLoading   = $state(false);
 	let authError     = $state('');
+	let authNewCode   = $state('');  // new recovery code issued by /session/recover
+	let showNewCode   = $state(false);
 
 	// Convert hex to Uint8Array
 	function hexToBytes(hex) {
@@ -100,30 +102,36 @@
 		if (!authWallet) return;
 		authLoading = true; authError = '';
 		try {
-			const vr = await fetch('/api/wallet/register', {
-				method: 'POST', headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ wallet_address: authWallet, currency: authWallet.match(/^[LMl]|^ltc1/i) ? 'LTC' : 'BTC', role: 'peer' }),
+			const res = await fetch('/api/session/recover', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ recovery_code: authWallet.trim() }),
 			});
-			if (!vr.ok) {
-				// Try as client
-				const vr2 = await fetch('/api/wallet/register', {
-					method: 'POST', headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({ wallet_address: authWallet, currency: authWallet.match(/^[LMl]|^ltc1/i) ? 'LTC' : 'BTC', role: 'client' }),
-				});
-				if (!vr2.ok) throw new Error((await vr2.json()).error ?? 'Verification failed');
-				const d2 = await vr2.json();
-				sessionToken = d2.session_token ?? '';
-				if (sessionToken) sessionStorage.setItem('naroom_session_client', sessionToken);
-			} else {
-				const d = await vr.json();
-				sessionToken = d.session_token ?? '';
-				if (sessionToken) sessionStorage.setItem('naroom_session_peer', sessionToken);
+			if (!res.ok) {
+				const d = await res.json();
+				throw new Error(d.error ?? 'Recovery failed');
 			}
-			needsAuth = false;
-			loading = true;
-			await loadRoom();
+			const data = await res.json();
+			if (!data.session_token || !data.role) throw new Error('Invalid recovery response');
+			sessionToken = data.session_token;
+			sessionStorage.setItem(`naroom_session_${data.role}`, sessionToken);
+			if (data.recovery_code) {
+				authNewCode = data.recovery_code;
+				showNewCode = true;
+			} else {
+				needsAuth = false;
+				loading = true;
+				await loadRoom();
+			}
 		} catch(e) { authError = e.message; }
 		finally { authLoading = false; }
+	}
+
+	async function ackNewCode() {
+		showNewCode = false;
+		needsAuth = false;
+		loading = true;
+		await loadRoom();
 	}
 
 	async function loadRoom() {
@@ -455,18 +463,27 @@
 		</div>
 
 	{:else if needsAuth}
-		<div class="center" style="flex-direction:column;gap:16px;padding:32px">
-			<div style="font-size:15px;color:var(--text-dim);text-align:center">
-				{t('chat.session_lost') || 'Session not found. Enter your wallet address to reconnect.'}
+		{#if showNewCode}
+			<div class="center" style="flex-direction:column;gap:16px;padding:32px;text-align:center">
+				<div style="font-size:15px;font-weight:600;color:var(--text)">Save your new recovery code</div>
+				<p style="font-size:13px;color:var(--text-dim);max-width:340px;margin:0">Write it down — this is the only way to recover access next time.</p>
+				<div style="font-family:monospace;font-size:12px;word-break:break-all;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:12px;width:100%;max-width:380px;box-sizing:border-box">{authNewCode}</div>
+				<button class="btn-primary" onclick={ackNewCode}>I saved it — continue →</button>
 			</div>
-			<input type="text" placeholder={t('listing.btc_ltc_ph') || 'Your BTC or LTC address...'} bind:value={authWallet}
-				style="width:100%;max-width:380px;padding:10px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:14px"
-				onkeydown={(e) => e.key === 'Enter' && reAuth()} />
-			{#if authError}<div style="color:var(--error,#e55);font-size:13px">{authError}</div>{/if}
-			<button class="btn-primary" disabled={!authWallet || authLoading} onclick={reAuth}>
-				{authLoading ? '...' : (t('chat.reconnect') || 'Reconnect')}
-			</button>
-		</div>
+		{:else}
+			<div class="center" style="flex-direction:column;gap:16px;padding:32px">
+				<div style="font-size:15px;color:var(--text-dim);text-align:center">
+					Session expired. Enter your recovery code to reconnect.
+				</div>
+				<input type="text" placeholder="Paste your recovery code..." bind:value={authWallet}
+					style="width:100%;max-width:380px;padding:10px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:14px"
+					onkeydown={(e) => e.key === 'Enter' && reAuth()} />
+				{#if authError}<div style="color:var(--error,#e55);font-size:13px">{authError}</div>{/if}
+				<button class="btn-primary" disabled={!authWallet || authLoading} onclick={reAuth}>
+					{authLoading ? '...' : (t('chat.reconnect') || 'Reconnect')}
+				</button>
+			</div>
+		{/if}
 
 	{:else if loading}
 		<div class="center"><div class="dot-pulse"></div></div>

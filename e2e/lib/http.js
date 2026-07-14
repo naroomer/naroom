@@ -34,13 +34,31 @@ export class ApiClient {
 
   // ── Wallet / session ──────────────────────────────────────────────────────
 
-  // Register wallet and get session token (no signature required).
+  // Register wallet and get session token.
+  // New flow: POST /session/init → session_token, then POST /wallet/register with Bearer.
+  // If the wallet already has a stored token, skip /session/init and only call /wallet/register.
   async verifyWallet(wallet, currency = 'BTC', role) {
-    const r = await this.post('/wallet/register', {
-      wallet_address: wallet, currency, role,
+    // Step 1: get or create a principal/session
+    let token = this.tokens[wallet]?.token ?? '';
+    if (!token) {
+      const initR = await this.post('/session/init', { role });
+      if (initR.status !== 201 || !initR.body.session_token) return initR;
+      token = initR.body.session_token;
+      this.tokens[wallet] = { token, role };
+    }
+
+    // Step 2: link wallet to principal
+    const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` };
+    const resp = await fetch(this.base + '/wallet/register', {
+      method: 'POST', headers,
+      body: JSON.stringify({ wallet_address: wallet, currency, role }),
     });
-    if (r.status === 200 && r.body.session_token) {
-      this.tokens[wallet] = { token: r.body.session_token, role };
+    const body = await resp.json().catch(() => ({}));
+    const r = { status: resp.status, body };
+
+    if (resp.status !== 200) {
+      // On failure, clear the stored token so next call retries from scratch
+      if (resp.status !== 402) delete this.tokens[wallet];
     }
     return r;
   }
@@ -146,7 +164,4 @@ export class ApiClient {
     return this.get(`/invoice/${invoiceId}/status`, wallet);
   }
 
-  async abuseReport(roomId, categories, peerWallet) {
-    return this.post('/abuse-report', { room_id: roomId, categories }, peerWallet);
-  }
 }

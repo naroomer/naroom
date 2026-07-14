@@ -197,16 +197,6 @@ Note: runs with `devMode: false` specifically for rate limiting to be active.
 
 ---
 
-### `tests/012_abuse_report.js`
-
-| Step/Check | Invariant(s) |
-|-----------|-------------|
-| Reporter without prior room → 403 | RP-3 |
-| Reporter with prior room → 200 | RP-3 |
-| Duplicate report same room → 409 | RP-3 |
-
----
-
 ### `tests/013_invoice_scoping.js`
 
 | Step/Check | Invariant(s) |
@@ -342,19 +332,6 @@ Note: runs with `devMode: false` specifically for rate limiting to be active.
 
 ---
 
-### `tests/025_abuse_ban.js`
-
-| Step/Check | Invariant(s) |
-|-----------|-------------|
-| Inject 5 closed chat_rooms (one per peer) | RP-4 |
-| Peers 1-3 submit abuse reports → 200 | RP-4 |
-| After 3rd report: banned_until ≈ now + 259200 (72h) | RP-4 |
-| Peers 4-5 submit abuse reports → 200 | RP-4 |
-| After 5th report: banned_until ≈ now + 10 years | RP-4 |
-| abuse_counters.total = 5 | RP-4 |
-
----
-
 ### `tests/036_ban_enforcement.js`
 
 | Step/Check | Invariant(s) |
@@ -365,9 +342,8 @@ Note: runs with `devMode: false` specifically for rate limiting to be active.
 | T4: banned wallet cannot send chat poll message → 403 + error="account banned" | RP-4 |
 | T5: banned wallet cannot update chat pubkey → 403 + error="account banned" | RP-4 |
 | T6: non-banned wallet can still create listing → 201 (sanity) | RP-4 |
-| T7: banned peer wallet CAN still submit abuse report → 200 (not blocked) | RP-4 |
-| T8: banned wallet CAN access GET /board → 200 (read-only OK) | RP-4 |
-| T8: banned wallet CAN access GET /listing → 200 (read-only OK) | RP-4 |
+| T7: banned wallet CAN access GET /board → 200 (read-only OK) | RP-4 |
+| T7: banned wallet CAN access GET /listing → 200 (read-only OK) | RP-4 |
 | 403 response includes banned_until timestamp | RP-4 |
 
 ---
@@ -519,7 +495,7 @@ Note: runs with `devMode: false` specifically for rate limiting to be active.
 | **ID-4** Session tokens stored as SHA-256 hash | 008, 009 | ✅ |
 | **ID-5** No IP in logs | 024 | ✅ Sprint 2 |
 | **ID-6** WALLET_ENC_KEY required in prod | encrypt_test.go:TestPrepareEncKeyProd | ✅ |
-| **SE-1** 401 without valid token | 009, 012, 013 | ✅ |
+| **SE-1** 401 without valid token | 009, 013 | ✅ |
 | **SE-2** Old token → 401 after refresh | 009 (explicit assertion) | ✅ |
 | **SE-3** Client cannot call respond | 016 | ✅ Sprint 1 |
 | **SE-4** Dev mode bypass blocked in prod | 020 | ✅ Sprint 2 |
@@ -547,8 +523,7 @@ Note: runs with `devMode: false` specifically for rate limiting to be active.
 | **IN-6** API error / grace window | `TestVerify_APIError_LeavesPending`, `TestGraceWindow_NotExpiredWithinGrace`, `TestGraceWindow_ExpiredAfterGrace` | ✅ |
 | **RP-1** Review token single-use | 001, 003 | ✅ |
 | **RP-2** Token only to client, ≥ 6h | 003 | ⚠️ No short-session test |
-| **RP-3** Abuse report dedup | 012 | ✅ |
-| **RP-4** Abuse ban thresholds + enforcement | 025, 036 | ✅ Thresholds SET correctly (Sprint 2) · ✅ Ban enforced in middleware (Sprint 6) · 036: 16/16 PASS |
+| **RP-4** Abuse ban enforcement | 036 | ✅ Ban enforced in middleware (Sprint 6) · 036 PASS |
 | **WK-1** Message TTL cleanup | 022 | ✅ Sprint 2 |
 | **WK-2** peer_left → listing restored | 011 | ✅ |
 | **WK-3** wallet_sessions TTL cleanup | 023 | ✅ Sprint 2 |

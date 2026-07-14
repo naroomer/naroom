@@ -19,19 +19,19 @@ import (
 
 // ChatHub manages active WebSocket connections per room.
 //
-// Policy: exactly one active connection per (room, wallet).
+// Policy: exactly one active connection per (room, principal).
 //   - Reconnect with the same session token (browser refresh) → takes over, old conn cancelled.
 //   - Connect with a different session token (second browser) → rejected with chat_already_open.
 //   - After the original connection closes the slot is free; any session may reconnect.
 type ChatHub struct {
 	mu    sync.RWMutex
-	rooms map[string]map[string]*roomConn // room_id → wallet_hash → roomConn
+	rooms map[string]map[string]*roomConn // room_id → principal_id → roomConn
 }
 
 // roomConn holds one WebSocket connection together with identity metadata.
 // sessionTokenHash lets us distinguish a same-session refresh from a second browser.
 type roomConn struct {
-	walletHash       string
+	principalID      string
 	sessionTokenHash string // SHA-256(raw session token); used for refresh vs new-browser detection
 	conn             *websocket.Conn
 	cancel           context.CancelFunc
@@ -70,41 +70,45 @@ func (h *Handler) ChatWS(hub *ChatHub) http.HandlerFunc {
 			return
 		}
 
-		// Resolve wallet identity (wallet_hash).
-		// Priority 1: RequireSession middleware sets walletHash via Authorization header.
-		// Priority 2: Token from Sec-WebSocket-Protocol header (browser WS API, can't send custom headers).
-		walletHash := middleware.SessionWalletHash(r.Context())
-		wsProtoToken := "" // set when auth was via Sec-WebSocket-Protocol; must be echoed back
-		if walletHash == "" {
+		// Resolve session identity via Sec-WebSocket-Protocol header.
+		// Browser WebSocket API cannot send custom headers, so the session token is passed
+		// as the subprotocol string. Load principal_id (not wallet_hash) from the DB.
+		var principalID string
+		wsProtoToken := ""
+		{
 			rawToken := r.Header.Get("Sec-WebSocket-Protocol")
 			if rawToken != "" {
 				tokenHash := middleware.HashToken(rawToken)
 				now := time.Now().Unix()
+				var prnNull sql.NullString
 				h.DB.QueryRow(`
-					SELECT wallet_hash FROM sessions
+					SELECT principal_id FROM sessions
 					WHERE token_hash = ? AND expires_at > ? AND revoked_at IS NULL
-				`, tokenHash, now).Scan(&walletHash)
-				if walletHash != "" {
+				`, tokenHash, now).Scan(&prnNull)
+				if prnNull.Valid && prnNull.String != "" {
+					principalID = prnNull.String
 					wsProtoToken = rawToken
 				}
 			}
 		}
-		if walletHash == "" {
+		if principalID == "" {
 			writeError(w, 401, "session required")
 			return
 		}
 
 		// Compute session identity for same-browser-refresh detection.
-		// ChatWS has no requireSession middleware; auth always flows through Sec-WebSocket-Protocol.
 		sessionTokenHash := middleware.HashToken(wsProtoToken)
 
-		// Determine pubkey from wallet identity via hash comparison
+		// Load room and verify principal_id membership. No wallet_hash fallback.
 		var roomStatus string
-		var clientPubkey, counselorPubkey, clientHash, counselorHash string
+		var clientPubkey, counselorPubkey string
+		var clientPrincipalID, counselorPrincipalID sql.NullString
 		err := h.DB.QueryRow(`
-			SELECT status, client_pubkey, counselor_pubkey, client_hash, counselor_hash
+			SELECT status, client_pubkey, counselor_pubkey,
+			       client_principal_id, counselor_principal_id
 			FROM chat_rooms WHERE id = ?
-		`, roomID).Scan(&roomStatus, &clientPubkey, &counselorPubkey, &clientHash, &counselorHash)
+		`, roomID).Scan(&roomStatus, &clientPubkey, &counselorPubkey,
+			&clientPrincipalID, &counselorPrincipalID)
 		if err != nil {
 			writeError(w, 404, "room not found")
 			return
@@ -114,10 +118,13 @@ func (h *Handler) ChatWS(hub *ChatHub) http.HandlerFunc {
 			return
 		}
 
+		// Strict principal_id-only participant check. Rooms without principal_id fail closed.
 		var pubkey string
-		if walletHash == clientHash {
+		isClient := clientPrincipalID.Valid && clientPrincipalID.String == principalID
+		isCounselor := counselorPrincipalID.Valid && counselorPrincipalID.String == principalID
+		if isClient {
 			pubkey = clientPubkey
-		} else if walletHash == counselorHash {
+		} else if isCounselor {
 			pubkey = counselorPubkey
 		} else {
 			writeError(w, 403, "not a participant")
@@ -141,18 +148,16 @@ func (h *Handler) ChatWS(hub *ChatHub) http.HandlerFunc {
 		defer cancel()
 
 		// ── Single-active-browser policy ─────────────────────────────────────
-		// Check whether another connection for this wallet is already registered.
+		// Check whether another connection for this principal is already registered.
 		// Must happen AFTER websocket.Accept so we can send a WS-level rejection message
 		// (browser WebSocket API cannot observe pre-upgrade HTTP status codes).
 		hub.mu.Lock()
 		if hub.rooms[roomID] == nil {
 			hub.rooms[roomID] = make(map[string]*roomConn)
 		}
-		if existing, ok := hub.rooms[roomID][walletHash]; ok {
+		if existing, ok := hub.rooms[roomID][principalID]; ok {
 			if existing.sessionTokenHash != sessionTokenHash {
 				// Different session token → second browser.
-				// Send a system event so the frontend can show the lock screen if onmessage
-				// fires before onclose (belt-and-suspenders).
 				// Close with code 4000 — the browser's onclose(event) always sees event.code,
 				// so this is the reliable rejection signal regardless of frame ordering.
 				hub.mu.Unlock()
@@ -164,8 +169,8 @@ func (h *Handler) ChatWS(hub *ChatHub) http.HandlerFunc {
 			// so the new one takes over cleanly.
 			existing.cancel()
 		}
-		hub.rooms[roomID][walletHash] = &roomConn{
-			walletHash:       walletHash,
+		hub.rooms[roomID][principalID] = &roomConn{
+			principalID:      principalID,
 			sessionTokenHash: sessionTokenHash,
 			conn:             conn,
 			cancel:           cancel,
@@ -174,10 +179,10 @@ func (h *Handler) ChatWS(hub *ChatHub) http.HandlerFunc {
 
 		defer func() {
 			hub.mu.Lock()
-			// Only deregister if this is still the registered connection for this wallet.
+			// Only deregister if this is still the registered connection for this principal.
 			// A successful refresh may have already replaced us — don't remove the new conn.
-			if rc, ok := hub.rooms[roomID][walletHash]; ok && rc.conn == conn {
-				delete(hub.rooms[roomID], walletHash)
+			if rc, ok := hub.rooms[roomID][principalID]; ok && rc.conn == conn {
+				delete(hub.rooms[roomID], principalID)
 				if len(hub.rooms[roomID]) == 0 {
 					delete(hub.rooms, roomID)
 				}
@@ -229,7 +234,7 @@ func (h *Handler) ChatWS(hub *ChatHub) http.HandlerFunc {
 				VALUES (?, ?, ?, ?, ?, ?, ?)
 			`, msgID, roomID, pubkey, msg.Nonce, msg.Ciphertext, msgType, now)
 
-			// Forward to the other participant's connection (exactly one per wallet in the room).
+			// Forward to the other participant's connection (exactly one per principal in the room).
 			out := wsOutMessage{
 				ID:           msgID,
 				SenderPubkey: pubkey,
@@ -241,8 +246,8 @@ func (h *Handler) ChatWS(hub *ChatHub) http.HandlerFunc {
 
 			hub.mu.RLock()
 			if room, ok := hub.rooms[roomID]; ok {
-				for wh, rc := range room {
-					if wh != walletHash {
+				for pid, rc := range room {
+					if pid != principalID {
 						wsjson.Write(ctx, rc.conn, out)
 					}
 				}
@@ -275,36 +280,35 @@ func (h *Handler) sendHistory(ctx context.Context, conn *websocket.Conn, roomID 
 	}
 }
 
-// ResumeChat handles GET /resume — returns any active chat room for this wallet (peer or client).
+// ResumeChat handles GET /resume — returns any active chat room for this principal (peer or client).
 // Fallback: if no active chat room, returns listing_id for a 'matched' listing owned by this client.
 // Used when a participant loses their session and needs to find their room.
 func (h *Handler) ResumeChat(w http.ResponseWriter, r *http.Request) {
-	walletHash := middleware.SessionWalletHash(r.Context())
-	if walletHash == "" {
+	principalID := middleware.SessionPrincipalID(r.Context())
+	if principalID == "" {
 		writeError(w, 401, "session required")
 		return
 	}
-	// Primary: active chat room (client or peer side)
+	// Primary: active chat room (client or peer side) — strict principal_id only.
 	var roomID string
 	err := h.DB.QueryRow(`
 		SELECT id FROM chat_rooms
-		WHERE (counselor_hash = ? OR client_hash = ?) AND status = 'active'
+		WHERE (counselor_principal_id = ? OR client_principal_id = ?) AND status = 'active'
 		ORDER BY started_at DESC LIMIT 1
-	`, walletHash, walletHash).Scan(&roomID)
+	`, principalID, principalID).Scan(&roomID)
 	if err == nil {
 		writeJSON(w, 200, map[string]any{"room_id": roomID})
 		return
 	}
-	// Fallback: owner's most recent active or expired listing.
-	// Returns listing_id + can_renew + opened_chats_count so the client can decide next action.
+	// Fallback: owner's most recent active or expired listing — strict principal_id only.
 	var listingID, listingStatus string
 	var openedChatsCount int
 	err = h.DB.QueryRow(`
 		SELECT id, status, COALESCE(opened_chats_count, 0)
 		FROM listings
-		WHERE wallet_hash = ? AND status IN ('active', 'expired') AND is_sample = 0
+		WHERE owner_principal_id = ? AND status IN ('active', 'expired') AND is_sample = 0
 		ORDER BY created_at DESC LIMIT 1
-	`, walletHash).Scan(&listingID, &listingStatus, &openedChatsCount)
+	`, principalID).Scan(&listingID, &listingStatus, &openedChatsCount)
 	if err == nil {
 		canRenew := openedChatsCount < 2
 		writeJSON(w, 200, map[string]any{
@@ -321,17 +325,21 @@ func (h *Handler) ResumeChat(w http.ResponseWriter, r *http.Request) {
 // ResumePeerChat handles GET /peer/resume — returns any active chat room for this peer.
 // Used when peer loses their session and needs to find their room without a listing_id.
 func (h *Handler) ResumePeerChat(w http.ResponseWriter, r *http.Request) {
-	walletHash := middleware.SessionWalletHash(r.Context())
-	if walletHash == "" {
+	principalID := middleware.SessionPrincipalID(r.Context())
+	if principalID == "" {
 		writeError(w, 401, "session required")
+		return
+	}
+	if role := middleware.SessionRole(r.Context()); role != "peer" {
+		writeError(w, 403, "peer role required")
 		return
 	}
 	var roomID string
 	err := h.DB.QueryRow(`
 		SELECT id FROM chat_rooms
-		WHERE counselor_hash = ? AND status = 'active'
+		WHERE counselor_principal_id = ? AND status = 'active'
 		ORDER BY started_at DESC LIMIT 1
-	`, walletHash).Scan(&roomID)
+	`, principalID).Scan(&roomID)
 	if err != nil {
 		writeError(w, 404, "no active chat room")
 		return
@@ -343,20 +351,29 @@ func (h *Handler) ResumePeerChat(w http.ResponseWriter, r *http.Request) {
 // Counselor polls this to know when client accepted and chat room opened.
 // listing_id scopes the lookup to prevent stale rooms from previous sessions being returned.
 func (h *Handler) GetCounselorChatRoom(w http.ResponseWriter, r *http.Request) {
-	walletHash := middleware.SessionWalletHash(r.Context())
+	principalID := middleware.SessionPrincipalID(r.Context())
 	listingID := r.URL.Query().Get("listing_id")
-	if walletHash == "" || listingID == "" {
-		writeError(w, 400, "listing_id required")
+	if principalID == "" || listingID == "" {
+		if principalID == "" {
+			writeError(w, 401, "session required")
+		} else {
+			writeError(w, 400, "listing_id required")
+		}
+		return
+	}
+	if role := middleware.SessionRole(r.Context()); role != "peer" {
+		writeError(w, 403, "peer role required")
 		return
 	}
 
 	var roomID, status string
 	var expiresAt int64
+
 	err := h.DB.QueryRow(`
 		SELECT id, status, expires_at FROM chat_rooms
-		WHERE counselor_hash = ? AND listing_id = ? AND status = 'active'
+		WHERE counselor_principal_id = ? AND listing_id = ? AND status = 'active'
 		ORDER BY started_at DESC LIMIT 1
-	`, walletHash, listingID).Scan(&roomID, &status, &expiresAt)
+	`, principalID, listingID).Scan(&roomID, &status, &expiresAt)
 	if err != nil {
 		writeError(w, 404, "no active chat room")
 		return
@@ -370,37 +387,42 @@ func (h *Handler) GetCounselorChatRoom(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetChatRoom handles GET /chat/{room_id} — returns room metadata for a participant.
-// Participant identity resolved from session.
+// Participant identity resolved from session principal_id only. No wallet_hash fallback.
 func (h *Handler) GetChatRoom(w http.ResponseWriter, r *http.Request) {
 	roomID := chi.URLParam(r, "room_id")
-	walletHash := middleware.SessionWalletHash(r.Context())
-	if roomID == "" || walletHash == "" {
-		writeError(w, 400, "room_id required")
+	principalID := middleware.SessionPrincipalID(r.Context())
+	if roomID == "" || principalID == "" {
+		writeError(w, 401, "session required")
 		return
 	}
 
-	var status, clientPubkey, counselorPubkey, clientHash, counselorHash string
+	var status, clientPubkey, counselorPubkey string
 	var startedAt, expiresAt int64
 	var peerLeftAt sql.NullInt64
+	var clientPrnID, counselorPrnID sql.NullString
 	err := h.DB.QueryRow(`
-		SELECT status, client_pubkey, counselor_pubkey, client_hash, counselor_hash, started_at, expires_at,
-		       peer_left_at
+		SELECT status, client_pubkey, counselor_pubkey, started_at, expires_at,
+		       peer_left_at, client_principal_id, counselor_principal_id
 		FROM chat_rooms WHERE id = ?
-	`, roomID).Scan(&status, &clientPubkey, &counselorPubkey, &clientHash, &counselorHash, &startedAt, &expiresAt,
-		&peerLeftAt)
+	`, roomID).Scan(&status, &clientPubkey, &counselorPubkey, &startedAt, &expiresAt,
+		&peerLeftAt, &clientPrnID, &counselorPrnID)
 	if err != nil {
 		writeError(w, 404, "room not found")
 		return
 	}
-	if walletHash != clientHash && walletHash != counselorHash {
+
+	// Strict principal_id-only participant check. Rooms without principal_id fail closed (403).
+	isClient := clientPrnID.Valid && clientPrnID.String == principalID
+	isPeer := counselorPrnID.Valid && counselorPrnID.String == principalID
+	if !isClient && !isPeer {
 		writeError(w, 403, "not a participant")
 		return
 	}
 
 	// If the OTHER side left (not us), we can still access the room in read mode.
 	// If WE left (our status), treat as closed for us.
-	if (walletHash == clientHash && status == "client_left") ||
-		(walletHash == counselorHash && status == "peer_left") {
+	if (isClient && status == "client_left") ||
+		(isPeer && status == "peer_left") {
 		// This side already left — treat as closed for them
 		writeJSON(w, 200, map[string]any{"room_id": roomID, "status": "closed"})
 		return
@@ -409,7 +431,7 @@ func (h *Handler) GetChatRoom(w http.ResponseWriter, r *http.Request) {
 	role := "client"
 	myPubkey := clientPubkey
 	peerPubkey := counselorPubkey
-	if walletHash == counselorHash {
+	if isPeer {
 		role = "peer"
 		myPubkey = counselorPubkey
 		peerPubkey = clientPubkey
@@ -435,9 +457,9 @@ func (h *Handler) GetChatRoom(w http.ResponseWriter, r *http.Request) {
 // Only the public key is updated; private keys never leave the browser.
 func (h *Handler) UpdateChatPubkey(w http.ResponseWriter, r *http.Request) {
 	roomID := chi.URLParam(r, "room_id")
-	walletHash := middleware.SessionWalletHash(r.Context())
-	if roomID == "" || walletHash == "" {
-		writeError(w, 400, "room_id required")
+	principalID := middleware.SessionPrincipalID(r.Context())
+	if roomID == "" || principalID == "" {
+		writeError(w, 401, "session required")
 		return
 	}
 	var req struct {
@@ -448,9 +470,10 @@ func (h *Handler) UpdateChatPubkey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var clientHash, counselorHash, status string
-	err := h.DB.QueryRow(`SELECT client_hash, counselor_hash, status FROM chat_rooms WHERE id = ?`, roomID).
-		Scan(&clientHash, &counselorHash, &status)
+	var status string
+	var updClientPrnID, updCounselorPrnID sql.NullString
+	err := h.DB.QueryRow(`SELECT status, client_principal_id, counselor_principal_id FROM chat_rooms WHERE id = ?`, roomID).
+		Scan(&status, &updClientPrnID, &updCounselorPrnID)
 	if err != nil {
 		writeError(w, 404, "room not found")
 		return
@@ -460,26 +483,27 @@ func (h *Handler) UpdateChatPubkey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Strict principal_id-only participant check. Rooms without principal_id fail closed (403).
 	var col string
-	if walletHash == clientHash {
+	if updClientPrnID.Valid && updClientPrnID.String == principalID {
 		col = "client_pubkey"
-	} else if walletHash == counselorHash {
+	} else if updCounselorPrnID.Valid && updCounselorPrnID.String == principalID {
 		col = "counselor_pubkey"
 	} else {
 		writeError(w, 403, "not a participant")
 		return
 	}
 
-	// Deny the update if a different WS session already owns this wallet's slot in the hub.
+	// Deny the update if a different WS session already owns this principal's slot in the hub.
 	// Without this check a second browser (fresh keypair, different session token) would
 	// overwrite the legitimate participant's public key and silently break E2E encryption
-	// for the existing pair (A + H) until both sides refresh.
+	// for the existing pair until both sides refresh.
 	if h.Hub != nil {
 		requesterTokenHash := middleware.SessionTokenHash(r.Context())
 		if requesterTokenHash != "" { // non-empty only for Bearer-token auth (not dev bypass)
 			h.Hub.mu.RLock()
 			if room, ok := h.Hub.rooms[roomID]; ok {
-				if rc, ok := room[walletHash]; ok && rc.sessionTokenHash != requesterTokenHash {
+				if rc, ok := room[principalID]; ok && rc.sessionTokenHash != requesterTokenHash {
 					h.Hub.mu.RUnlock()
 					writeError(w, 409, "another session is active in this room")
 					return
@@ -495,7 +519,7 @@ func (h *Handler) UpdateChatPubkey(w http.ResponseWriter, r *http.Request) {
 	}
 	// Notify the other participant via WS so they reload the room and recompute shared key
 	if h.Hub != nil {
-		h.Hub.broadcastSystem(roomID, walletHash, wsSystemMsg{Type: "system", Event: "pubkey_updated"})
+		h.Hub.broadcastSystem(roomID, principalID, wsSystemMsg{Type: "system", Event: "pubkey_updated"})
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
@@ -506,13 +530,13 @@ type wsSystemMsg struct {
 	Event string `json:"event"` // "peer_left" | "room_closed"
 }
 
-// broadcastSystem sends a system event to all connections in the room except the sender's wallet.
-func (hub *ChatHub) broadcastSystem(roomID, senderWalletHash string, event wsSystemMsg) {
+// broadcastSystem sends a system event to all connections in the room except the sender's principal.
+func (hub *ChatHub) broadcastSystem(roomID, senderPrincipalID string, event wsSystemMsg) {
 	hub.mu.RLock()
 	defer hub.mu.RUnlock()
 	if room, ok := hub.rooms[roomID]; ok {
-		for wh, rc := range room {
-			if wh != senderWalletHash {
+		for pid, rc := range room {
+			if pid != senderPrincipalID {
 				wsjson.Write(context.Background(), rc.conn, event)
 			}
 		}
@@ -533,20 +557,23 @@ func (h *Handler) CloseChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	walletHash := middleware.SessionWalletHash(r.Context())
-	if walletHash == "" {
+	principalID := middleware.SessionPrincipalID(r.Context())
+	if principalID == "" {
 		writeError(w, 401, "session required")
 		return
 	}
 
-	var clientPubkey, counselorPubkey, clientHash, counselorHash, responseID string
+	var counselorHash, responseID string
 	var startedAt int64
 	var status string
 	var listingIDForClose sql.NullString
+	var closeChatClientPrnID, closeChatCounselorPrnID sql.NullString
 	err := h.DB.QueryRow(`
-		SELECT status, client_pubkey, counselor_pubkey, client_hash, counselor_hash, started_at, response_id, listing_id
+		SELECT status, counselor_hash, started_at, response_id, listing_id,
+		       client_principal_id, counselor_principal_id
 		FROM chat_rooms WHERE id = ?
-	`, roomID).Scan(&status, &clientPubkey, &counselorPubkey, &clientHash, &counselorHash, &startedAt, &responseID, &listingIDForClose)
+	`, roomID).Scan(&status, &counselorHash, &startedAt, &responseID,
+		&listingIDForClose, &closeChatClientPrnID, &closeChatCounselorPrnID)
 	if err == sql.ErrNoRows {
 		writeError(w, 404, "room not found")
 		return
@@ -557,15 +584,19 @@ func (h *Handler) CloseChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 410, "room already closed")
 		return
 	}
-	if walletHash != clientHash && walletHash != counselorHash {
+
+	// Strict principal_id-only participant check. Rooms without principal_id fail closed (403).
+	isClientClose := closeChatClientPrnID.Valid && closeChatClientPrnID.String == principalID
+	isPeerClose := closeChatCounselorPrnID.Valid && closeChatCounselorPrnID.String == principalID
+	if !isClientClose && !isPeerClose {
 		writeError(w, 403, "not a participant")
 		return
 	}
 
 	now := time.Now().Unix()
 
-	isPeer   := walletHash == counselorHash
-	isClient := walletHash == clientHash
+	isPeer   := isPeerClose
+	isClient := isClientClose
 
 	// ── One side leaves first → mark their departure, other side keeps messages ──
 	// If the OTHER side already left, this is the final close → delete messages.
@@ -595,7 +626,7 @@ func (h *Handler) CloseChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if h.Hub != nil {
-			h.Hub.broadcastSystem(roomID, walletHash, wsSystemMsg{Type: "system", Event: wsEvent})
+			h.Hub.broadcastSystem(roomID, principalID, wsSystemMsg{Type: "system", Event: wsEvent})
 		}
 		writeJSON(w, 200, map[string]any{"status": newStatus})
 		return
@@ -673,7 +704,7 @@ func (h *Handler) CloseChat(w http.ResponseWriter, r *http.Request) {
 	h.DB.Exec(`DELETE FROM encrypted_messages WHERE room_id = ?`, roomID)
 
 	if h.Hub != nil {
-		h.Hub.broadcastSystem(roomID, walletHash, wsSystemMsg{Type: "system", Event: "room_closed"})
+		h.Hub.broadcastSystem(roomID, principalID, wsSystemMsg{Type: "system", Event: "room_closed"})
 	}
 
 	writeJSON(w, 200, resp)

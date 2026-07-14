@@ -46,11 +46,12 @@ func openVisTestDB(t *testing.T) *sql.DB {
 	t.Cleanup(func() { db.Close() })
 	for _, q := range []string{
 		`CREATE TABLE sessions (
-			token_hash TEXT PRIMARY KEY,
-			wallet_hash TEXT NOT NULL,
-			currency TEXT, role TEXT,
-			created_at INTEGER, expires_at INTEGER, revoked_at INTEGER,
-			last_seen_at INTEGER, revoked_by TEXT
+			token_hash   TEXT PRIMARY KEY,
+			wallet_hash  TEXT NOT NULL,
+			currency     TEXT, role TEXT,
+			created_at   INTEGER, expires_at INTEGER, revoked_at INTEGER,
+			last_seen_at INTEGER, revoked_by TEXT,
+			principal_id TEXT
 		)`,
 		`CREATE TABLE listings (
 			id                  TEXT PRIMARY KEY,
@@ -66,32 +67,36 @@ func openVisTestDB(t *testing.T) *sql.DB {
 			opened_chats_count  INTEGER NOT NULL DEFAULT 0,
 			renewal_count       INTEGER NOT NULL DEFAULT 0,
 			is_sample           INTEGER NOT NULL DEFAULT 0,
-			first_activated_at  INTEGER
+			first_activated_at  INTEGER,
+			owner_principal_id  TEXT
 		)`,
 		`CREATE TABLE chat_rooms (
-			id               TEXT PRIMARY KEY,
-			listing_id       TEXT,
-			response_id      TEXT,
-			client_hash      TEXT NOT NULL,
-			counselor_hash   TEXT NOT NULL,
-			client_pubkey    TEXT NOT NULL DEFAULT '',
-			counselor_pubkey TEXT NOT NULL DEFAULT '',
-			started_at       INTEGER NOT NULL DEFAULT 0,
-			expires_at       INTEGER NOT NULL DEFAULT 0,
-			closed_at        INTEGER,
-			closed_by        TEXT,
-			peer_left_at     INTEGER,
-			client_left_at   INTEGER,
-			listing_counted  INTEGER NOT NULL DEFAULT 0,
-			status           TEXT NOT NULL DEFAULT 'active'
+			id                     TEXT PRIMARY KEY,
+			listing_id             TEXT,
+			response_id            TEXT,
+			client_hash            TEXT NOT NULL,
+			counselor_hash         TEXT NOT NULL,
+			client_pubkey          TEXT NOT NULL DEFAULT '',
+			counselor_pubkey       TEXT NOT NULL DEFAULT '',
+			started_at             INTEGER NOT NULL DEFAULT 0,
+			expires_at             INTEGER NOT NULL DEFAULT 0,
+			closed_at              INTEGER,
+			closed_by              TEXT,
+			peer_left_at           INTEGER,
+			client_left_at         INTEGER,
+			listing_counted        INTEGER NOT NULL DEFAULT 0,
+			status                 TEXT NOT NULL DEFAULT 'active',
+			client_principal_id    TEXT,
+			counselor_principal_id TEXT
 		)`,
 		`CREATE TABLE responses (
-			id               TEXT PRIMARY KEY,
-			listing_id       TEXT NOT NULL,
-			counselor_hash   TEXT NOT NULL,
-			counselor_pubkey TEXT NOT NULL DEFAULT '',
-			status           TEXT NOT NULL DEFAULT 'pending',
-			created_at       INTEGER NOT NULL DEFAULT 0
+			id                      TEXT PRIMARY KEY,
+			listing_id              TEXT NOT NULL,
+			counselor_hash          TEXT NOT NULL,
+			counselor_pubkey        TEXT NOT NULL DEFAULT '',
+			status                  TEXT NOT NULL DEFAULT 'pending',
+			created_at              INTEGER NOT NULL DEFAULT 0,
+			counselor_principal_id  TEXT
 		)`,
 		`CREATE TABLE reputation (
 			counselor_hash     TEXT PRIMARY KEY,
@@ -134,6 +139,7 @@ func openVisTestDB(t *testing.T) *sql.DB {
 			chat_room_id        TEXT,
 			payment_detected_at INTEGER,
 			price_at_creation   REAL,
+			payer_principal_id  TEXT,
 			created_at          INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE TABLE helper_board_subscriptions (
@@ -154,6 +160,15 @@ func openVisTestDB(t *testing.T) *sql.DB {
 			listing_id TEXT NOT NULL,
 			active     BOOLEAN DEFAULT TRUE,
 			expires_at INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE TABLE principals (
+			id            TEXT PRIMARY KEY,
+			recovery_hash TEXT NOT NULL,
+			role          TEXT NOT NULL,
+			wallet_hash   TEXT,
+			currency      TEXT,
+			created_at    INTEGER NOT NULL DEFAULT 0,
+			last_seen     INTEGER
 		)`,
 	} {
 		if _, err := db.Exec(q); err != nil {
@@ -179,25 +194,66 @@ func visServer(t *testing.T, db *sql.DB) *httptest.Server {
 
 func seedVisSession(t *testing.T, db *sql.DB, tokenHash, walletHash, role string) {
 	t.Helper()
+	seedVisSessionWithPrincipal(t, db, tokenHash, walletHash, role, "")
+}
+
+// seedVisSessionWithPrincipal inserts a session row with optional principal_id.
+func seedVisSessionWithPrincipal(t *testing.T, db *sql.DB, tokenHash, walletHash, role, principalID string) {
+	t.Helper()
 	now := time.Now().Unix()
-	_, err := db.Exec(`INSERT INTO sessions (token_hash, wallet_hash, role, created_at, expires_at)
-		VALUES (?, ?, ?, ?, ?)`, tokenHash, walletHash, role, now, now+86400)
+	var err error
+	if principalID != "" {
+		_, err = db.Exec(`INSERT INTO sessions (token_hash, wallet_hash, role, created_at, expires_at, principal_id)
+			VALUES (?, ?, ?, ?, ?, ?)`, tokenHash, walletHash, role, now, now+86400, principalID)
+	} else {
+		_, err = db.Exec(`INSERT INTO sessions (token_hash, wallet_hash, role, created_at, expires_at)
+			VALUES (?, ?, ?, ?, ?)`, tokenHash, walletHash, role, now, now+86400)
+	}
 	if err != nil {
 		t.Fatalf("seed session: %v", err)
 	}
 }
 
+// seedVisPrincipal inserts a principal row and returns its ID.
+func seedVisPrincipal(t *testing.T, db *sql.DB, id, walletHash, role string) string {
+	t.Helper()
+	now := time.Now().Unix()
+	_, err := db.Exec(`INSERT INTO principals (id, recovery_hash, role, wallet_hash, created_at)
+		VALUES (?, ?, ?, ?, ?)`, id, "testhash-"+id, role, walletHash, now)
+	if err != nil {
+		t.Fatalf("seed principal: %v", err)
+	}
+	return id
+}
+
 // seedVisListing inserts a listing. walletAddr is the raw wallet address; it is hashed internally.
+// Also creates a principal and links owner_principal_id so strict auth checks pass.
 func seedVisListing(t *testing.T, db *sql.DB, id, walletAddr, status string, openedChats int, visibleUntil int64) {
 	t.Helper()
 	now := time.Now().Unix()
+	hash := visHash(walletAddr)
+	principalID := "prn-vis-" + id
+	seedVisPrincipal(t, db, principalID, hash, "client")
 	_, err := db.Exec(`INSERT INTO listings
-		(id, wallet_hash, status, opened_chats_count, visible_until, created_at, first_activated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		id, visHash(walletAddr), status, openedChats, visibleUntil, now-3600, now-3600)
+		(id, wallet_hash, owner_principal_id, status, opened_chats_count, visible_until, created_at, first_activated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, hash, principalID, status, openedChats, visibleUntil, now-3600, now-3600)
 	if err != nil {
 		t.Fatalf("seed listing: %v", err)
 	}
+}
+
+// seedVisListingWithToken seeds a listing and returns a Bearer token that includes principal_id.
+// Use this for tests that call RenewListing via doPost (dev-mode wallet headers won't set principal_id).
+func seedVisListingWithToken(t *testing.T, db *sql.DB, id, walletAddr, status string, openedChats int, visibleUntil int64) string {
+	t.Helper()
+	seedVisListing(t, db, id, walletAddr, status, openedChats, visibleUntil)
+	hash := visHash(walletAddr)
+	principalID := "prn-vis-" + id
+	tokenRaw := "vis-bearer-token-" + id
+	tokenHash := middleware.HashToken(tokenRaw)
+	seedVisSessionWithPrincipal(t, db, tokenHash, hash, "client", principalID)
+	return tokenRaw
 }
 
 func seedVisChatRoom(t *testing.T, db *sql.DB, roomID, listingID, clientHash, counselorHash string) {
@@ -255,6 +311,25 @@ func doPost(t *testing.T, srv *httptest.Server, path, walletAddr, role, body str
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Dev-Wallet", walletAddr)
 	req.Header.Set("X-Dev-Role", role)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", path, err)
+	}
+	return resp
+}
+
+// doPostWithBearer sends a POST request using a Bearer token (for principal-aware auth).
+func doPostWithBearer(t *testing.T, srv *httptest.Server, path, bearerToken, body string) *http.Response {
+	t.Helper()
+	var bodyReader *strings.Reader
+	if body != "" {
+		bodyReader = strings.NewReader(body)
+	} else {
+		bodyReader = strings.NewReader("{}")
+	}
+	req, _ := http.NewRequest("POST", srv.URL+path, bodyReader)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+bearerToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST %s: %v", path, err)
@@ -342,9 +417,9 @@ func TestRenew_AllowedWhenCount0(t *testing.T) {
 	srv := visServer(t, db)
 
 	now := time.Now().Unix()
-	seedVisListing(t, db, "ren-list-0", "owner-wallet-0", "expired", 0, now-100)
+	token := seedVisListingWithToken(t, db, "ren-list-0", "owner-wallet-0", "expired", 0, now-100)
 
-	resp := doPost(t, srv, "/listing/ren-list-0/renew", "owner-wallet-0", "client", "")
+	resp := doPostWithBearer(t, srv, "/listing/ren-list-0/renew", token, "")
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("VIS-4 FAIL: expected 200, got %d", resp.StatusCode)
@@ -362,9 +437,9 @@ func TestRenew_AllowedWhenCount1(t *testing.T) {
 	srv := visServer(t, db)
 
 	now := time.Now().Unix()
-	seedVisListing(t, db, "ren-list-1", "owner-wallet-1", "expired", 1, now-100)
+	token := seedVisListingWithToken(t, db, "ren-list-1", "owner-wallet-1", "expired", 1, now-100)
 
-	resp := doPost(t, srv, "/listing/ren-list-1/renew", "owner-wallet-1", "client", "")
+	resp := doPostWithBearer(t, srv, "/listing/ren-list-1/renew", token, "")
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("VIS-5 FAIL: expected 200, got %d", resp.StatusCode)
@@ -377,24 +452,32 @@ func TestRenew_BlockedWhenCount2(t *testing.T) {
 	srv := visServer(t, db)
 
 	now := time.Now().Unix()
-	seedVisListing(t, db, "ren-list-2", "owner-wallet-2", "expired", 2, now-100)
+	token := seedVisListingWithToken(t, db, "ren-list-2", "owner-wallet-2", "expired", 2, now-100)
 
-	resp := doPost(t, srv, "/listing/ren-list-2/renew", "owner-wallet-2", "client", "")
+	resp := doPostWithBearer(t, srv, "/listing/ren-list-2/renew", token, "")
 	defer resp.Body.Close()
 	if resp.StatusCode != 409 {
 		t.Fatalf("VIS-6 FAIL: expected 409 for count=2, got %d", resp.StatusCode)
 	}
 }
 
-// VIS-7: Renewal blocked for wrong wallet.
+// VIS-7: Renewal blocked for wrong wallet (different principal).
 func TestRenew_BlockedWrongWallet(t *testing.T) {
 	db := openVisTestDB(t)
 	srv := visServer(t, db)
 
 	now := time.Now().Unix()
-	seedVisListing(t, db, "ren-list-w", "true-owner", "expired", 0, now-100)
+	// Seed the listing with "true-owner" principal
+	seedVisListingWithToken(t, db, "ren-list-w", "true-owner", "expired", 0, now-100)
 
-	resp := doPost(t, srv, "/listing/ren-list-w/renew", "wrong-wallet", "client", "")
+	// Seed a different principal for "wrong-wallet"
+	wrongHash := visHash("wrong-wallet")
+	wrongPrincipalID := "prn-vis-wrong"
+	seedVisPrincipal(t, db, wrongPrincipalID, wrongHash, "client")
+	wrongToken := "vis-bearer-token-wrong"
+	seedVisSessionWithPrincipal(t, db, middleware.HashToken(wrongToken), wrongHash, "client", wrongPrincipalID)
+
+	resp := doPostWithBearer(t, srv, "/listing/ren-list-w/renew", wrongToken, "")
 	defer resp.Body.Close()
 	if resp.StatusCode != 403 {
 		t.Fatalf("VIS-7 FAIL: expected 403 for wrong wallet, got %d", resp.StatusCode)
@@ -409,16 +492,28 @@ func TestResumeChat_FindsExpiredRenewableListing(t *testing.T) {
 	srv := visServer(t, db)
 
 	now := time.Now().Unix()
-	// Expired listing, first_activated_at < 30 days ago, count < 2
+	principalID := "prn-vis-8-owner"
+	ownerHash := visHash("resume-owner-8")
+	// Insert principal and listing with owner_principal_id
+	_, _ = db.Exec(`INSERT OR IGNORE INTO principals (id, recovery_hash, role, wallet_hash, created_at) VALUES (?, ?, 'client', ?, ?)`,
+		principalID, "rh-vis-8", ownerHash, now)
 	_, err := db.Exec(`INSERT INTO listings
-		(id, wallet_hash, status, opened_chats_count, visible_until, created_at, first_activated_at)
-		VALUES ('resume-list-1', ?, 'expired', 0, ?, ?, ?)`,
-		visHash("resume-owner"), now-100, now-86400, now-86400)
+		(id, wallet_hash, owner_principal_id, status, opened_chats_count, visible_until, created_at, first_activated_at)
+		VALUES ('resume-list-1', ?, ?, 'expired', 0, ?, ?, ?)`,
+		ownerHash, principalID, now-100, now-86400, now-86400)
 	if err != nil {
 		t.Fatalf("insert listing: %v", err)
 	}
+	// Session with principal_id
+	tokenRaw := "resume-token-vis-8"
+	seedVisSessionWithPrincipal(t, db, middleware.HashToken(tokenRaw), ownerHash, "client", principalID)
 
-	resp := doGet(t, srv, "/resume", "resume-owner", "client")
+	req, _ := http.NewRequest("GET", srv.URL+"/resume", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenRaw)
+	resp, err2 := http.DefaultClient.Do(req)
+	if err2 != nil {
+		t.Fatalf("GET /resume: %v", err2)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("VIS-8 FAIL: expected 200, got %d", resp.StatusCode)
@@ -442,18 +537,37 @@ func TestResumeChat_ActiveChatTakesPriority(t *testing.T) {
 	srv := visServer(t, db)
 
 	now := time.Now().Unix()
+	clientPrincipalID := "prn-vis-9-client"
+	peerPrincipalID := "prn-vis-9-peer"
+	ownerHash2 := visHash("resume-owner-9")
+	peerHash2 := visHash("peer-9")
+
+	_, _ = db.Exec(`INSERT OR IGNORE INTO principals (id, recovery_hash, role, wallet_hash, created_at) VALUES (?, 'rh-vis-9c', 'client', ?, ?)`, clientPrincipalID, ownerHash2, now)
+	_, _ = db.Exec(`INSERT OR IGNORE INTO principals (id, recovery_hash, role, wallet_hash, created_at) VALUES (?, 'rh-vis-9p', 'peer', ?, ?)`, peerPrincipalID, peerHash2, now)
+
 	// Both an expired listing and an active chat room exist
-	ownerHash2 := visHash("resume-owner-2")
 	_, err := db.Exec(`INSERT INTO listings
-		(id, wallet_hash, status, opened_chats_count, visible_until, created_at, first_activated_at)
-		VALUES ('resume-list-2', ?, 'expired', 0, ?, ?, ?)`,
-		ownerHash2, now-100, now-86400, now-86400)
+		(id, wallet_hash, owner_principal_id, status, opened_chats_count, visible_until, created_at, first_activated_at)
+		VALUES ('resume-list-2', ?, ?, 'expired', 0, ?, ?, ?)`,
+		ownerHash2, clientPrincipalID, now-100, now-86400, now-86400)
 	if err != nil {
 		t.Fatalf("insert listing: %v", err)
 	}
-	seedVisChatRoom(t, db, "resume-room-2", "resume-list-2", ownerHash2, visHash("peer-2"))
+	// Chat room with client_principal_id so ResumeChat finds it
+	_, _ = db.Exec(`INSERT INTO chat_rooms
+		(id, listing_id, client_hash, counselor_hash, started_at, expires_at, status, client_principal_id, counselor_principal_id)
+		VALUES ('resume-room-2', 'resume-list-2', ?, ?, ?, ?, 'active', ?, ?)`,
+		ownerHash2, peerHash2, now, now+86400, clientPrincipalID, peerPrincipalID)
 
-	resp := doGet(t, srv, "/resume", "resume-owner-2", "client")
+	tokenRaw := "resume-token-vis-9"
+	seedVisSessionWithPrincipal(t, db, middleware.HashToken(tokenRaw), ownerHash2, "client", clientPrincipalID)
+
+	req, _ := http.NewRequest("GET", srv.URL+"/resume", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenRaw)
+	resp, err2 := http.DefaultClient.Do(req)
+	if err2 != nil {
+		t.Fatalf("GET /resume: %v", err2)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("VIS-9 FAIL: expected 200, got %d", resp.StatusCode)
@@ -476,6 +590,11 @@ func TestCloseChat_ListingStaysActive_OnFirstClose(t *testing.T) {
 
 	clientHash1 := visHash("close-client-1")
 	peerHash1 := visHash("close-peer-1")
+	clientPrnID1 := "prn-close-client-1"
+	peerPrnID1 := "prn-close-peer-1"
+
+	_, _ = db.Exec(`INSERT OR IGNORE INTO principals (id, recovery_hash, role, wallet_hash, created_at) VALUES (?, 'rh-c1', 'client', ?, ?)`, clientPrnID1, clientHash1, now)
+	_, _ = db.Exec(`INSERT OR IGNORE INTO principals (id, recovery_hash, role, wallet_hash, created_at) VALUES (?, 'rh-p1', 'peer', ?, ?)`, peerPrnID1, peerHash1, now)
 
 	_, _ = db.Exec(`INSERT INTO listings
 		(id, wallet_hash, status, opened_chats_count, visible_until, created_at)
@@ -484,12 +603,13 @@ func TestCloseChat_ListingStaysActive_OnFirstClose(t *testing.T) {
 		VALUES ('close-resp-1', 'close-list-1', ?, 'accepted', ?)`, peerHash1, now)
 	// Peer already left; client closing is the final departure (full-close path)
 	_, _ = db.Exec(`INSERT INTO chat_rooms
-		(id, listing_id, response_id, client_hash, counselor_hash, started_at, expires_at, status, peer_left_at)
-		VALUES ('close-room-1', 'close-list-1', 'close-resp-1', ?, ?, ?, ?, 'peer_left', ?)`,
-		clientHash1, peerHash1, now-200, now+3600, now-100)
+		(id, listing_id, response_id, client_hash, counselor_hash, started_at, expires_at, status, peer_left_at,
+		 client_principal_id, counselor_principal_id)
+		VALUES ('close-room-1', 'close-list-1', 'close-resp-1', ?, ?, ?, ?, 'peer_left', ?, ?, ?)`,
+		clientHash1, peerHash1, now-200, now+3600, now-100, clientPrnID1, peerPrnID1)
 	_, _ = db.Exec(`INSERT INTO reputation (counselor_hash) VALUES (?)`, peerHash1)
 
-	seedVisSession(t, db, middleware.HashToken("close-token-1"), clientHash1, "client")
+	seedVisSessionWithPrincipal(t, db, middleware.HashToken("close-token-1"), clientHash1, "client", clientPrnID1)
 	srv := visServer(t, db)
 
 	req, _ := http.NewRequest("POST", srv.URL+"/chat/close-room-1/close", strings.NewReader("{}"))
@@ -519,6 +639,11 @@ func TestCloseChat_ListingClosed_OnSecondClose(t *testing.T) {
 
 	clientHash2 := visHash("close-client-2")
 	peerHash2 := visHash("close-peer-2")
+	clientPrnID2 := "prn-close-client-2"
+	peerPrnID2 := "prn-close-peer-2"
+
+	_, _ = db.Exec(`INSERT OR IGNORE INTO principals (id, recovery_hash, role, wallet_hash, created_at) VALUES (?, 'rh-c2', 'client', ?, ?)`, clientPrnID2, clientHash2, now)
+	_, _ = db.Exec(`INSERT OR IGNORE INTO principals (id, recovery_hash, role, wallet_hash, created_at) VALUES (?, 'rh-p2', 'peer', ?, ?)`, peerPrnID2, peerHash2, now)
 
 	_, _ = db.Exec(`INSERT INTO listings
 		(id, wallet_hash, status, opened_chats_count, visible_until, created_at)
@@ -527,12 +652,13 @@ func TestCloseChat_ListingClosed_OnSecondClose(t *testing.T) {
 		VALUES ('close-resp-2', 'close-list-2', ?, 'accepted', ?)`, peerHash2, now)
 	// Peer already left (peer_left) — client closing is the final departure
 	_, _ = db.Exec(`INSERT INTO chat_rooms
-		(id, listing_id, response_id, client_hash, counselor_hash, started_at, expires_at, status, peer_left_at)
-		VALUES ('close-room-2', 'close-list-2', 'close-resp-2', ?, ?, ?, ?, 'peer_left', ?)`,
-		clientHash2, peerHash2, now-200, now+3600, now-100)
+		(id, listing_id, response_id, client_hash, counselor_hash, started_at, expires_at, status, peer_left_at,
+		 client_principal_id, counselor_principal_id)
+		VALUES ('close-room-2', 'close-list-2', 'close-resp-2', ?, ?, ?, ?, 'peer_left', ?, ?, ?)`,
+		clientHash2, peerHash2, now-200, now+3600, now-100, clientPrnID2, peerPrnID2)
 	_, _ = db.Exec(`INSERT INTO reputation (counselor_hash) VALUES (?)`, peerHash2)
 
-	seedVisSession(t, db, middleware.HashToken("close-token-2"), clientHash2, "client")
+	seedVisSessionWithPrincipal(t, db, middleware.HashToken("close-token-2"), clientHash2, "client", clientPrnID2)
 	srv := visServer(t, db)
 
 	req, _ := http.NewRequest("POST", srv.URL+"/chat/close-room-2/close", strings.NewReader("{}"))
@@ -594,6 +720,25 @@ func visServerFull(t *testing.T, db *sql.DB, tg interface {
 
 // ── Extended renewal tests ────────────────────────────────────────────────────
 
+// seedVisListingRaw inserts a listing directly with a principal and returns a bearer token.
+func seedVisListingRaw(t *testing.T, db *sql.DB, id, walletAddr, status string, openedChats int, visibleUntil, createdAt, firstActivatedAt int64) string {
+	t.Helper()
+	hash := visHash(walletAddr)
+	principalID := "prn-raw-" + id
+	seedVisPrincipal(t, db, principalID, hash, "client")
+	_, err := db.Exec(`INSERT INTO listings
+		(id, wallet_hash, owner_principal_id, status, opened_chats_count, visible_until, created_at, first_activated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, hash, principalID, status, openedChats, visibleUntil, createdAt, firstActivatedAt)
+	if err != nil {
+		t.Fatalf("seedVisListingRaw: %v", err)
+	}
+	tokenRaw := "vis-raw-bearer-" + id
+	tokenHash := middleware.HashToken(tokenRaw)
+	seedVisSessionWithPrincipal(t, db, tokenHash, hash, "client", principalID)
+	return tokenRaw
+}
+
 // VIS-12: A listing activated more than 30 days ago with count=0 can still renew.
 // Proves the old 30-day cutoff has been removed.
 func TestRenew_OlderThan30Days_AllowedAtCount0(t *testing.T) {
@@ -602,15 +747,9 @@ func TestRenew_OlderThan30Days_AllowedAtCount0(t *testing.T) {
 	now := time.Now().Unix()
 
 	// first_activated_at = 60 days ago; visible_until already expired
-	_, err := db.Exec(`INSERT INTO listings
-		(id, wallet_hash, status, opened_chats_count, visible_until, created_at, first_activated_at)
-		VALUES ('old-list-0', ?, 'expired', 0, ?, ?, ?)`,
-		visHash("old-owner-0"), now-100, now-86400*60, now-86400*60)
-	if err != nil {
-		t.Fatalf("insert: %v", err)
-	}
+	token := seedVisListingRaw(t, db, "old-list-0", "old-owner-0", "expired", 0, now-100, now-86400*60, now-86400*60)
 
-	resp := doPost(t, srv, "/listing/old-list-0/renew", "old-owner-0", "client", "")
+	resp := doPostWithBearer(t, srv, "/listing/old-list-0/renew", token, "")
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("VIS-12 FAIL: expected 200 for 60-day-old listing (no 30-day cutoff), got %d", resp.StatusCode)
@@ -623,15 +762,9 @@ func TestRenew_OlderThan30Days_AllowedAtCount1(t *testing.T) {
 	srv := visServer(t, db)
 	now := time.Now().Unix()
 
-	_, err := db.Exec(`INSERT INTO listings
-		(id, wallet_hash, status, opened_chats_count, visible_until, created_at, first_activated_at)
-		VALUES ('old-list-1', ?, 'expired', 1, ?, ?, ?)`,
-		visHash("old-owner-1"), now-100, now-86400*45, now-86400*45)
-	if err != nil {
-		t.Fatalf("insert: %v", err)
-	}
+	token := seedVisListingRaw(t, db, "old-list-1", "old-owner-1", "expired", 1, now-100, now-86400*45, now-86400*45)
 
-	resp := doPost(t, srv, "/listing/old-list-1/renew", "old-owner-1", "client", "")
+	resp := doPostWithBearer(t, srv, "/listing/old-list-1/renew", token, "")
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("VIS-13 FAIL: expected 200 for 45-day-old listing with count=1, got %d", resp.StatusCode)
@@ -645,9 +778,9 @@ func TestRenew_EarlyRenewalBlocked(t *testing.T) {
 	now := time.Now().Unix()
 
 	// visible_until = now + 7200 (2 hours left) → more than the 1h threshold
-	seedVisListing(t, db, "early-list", "early-owner", "active", 0, now+7200)
+	token := seedVisListingWithToken(t, db, "early-list", "early-owner", "active", 0, now+7200)
 
-	resp := doPost(t, srv, "/listing/early-list/renew", "early-owner", "client", "")
+	resp := doPostWithBearer(t, srv, "/listing/early-list/renew", token, "")
 	defer resp.Body.Close()
 	if resp.StatusCode != 409 {
 		t.Fatalf("VIS-14 FAIL: expected 409 (active listing has >1h left), got %d", resp.StatusCode)
@@ -663,17 +796,17 @@ func TestRenew_DuplicateRenewal(t *testing.T) {
 	now := time.Now().Unix()
 
 	// Start expired so first renewal succeeds
-	seedVisListing(t, db, "dup-list", "dup-owner", "expired", 0, now-100)
+	token := seedVisListingWithToken(t, db, "dup-list", "dup-owner", "expired", 0, now-100)
 
 	// First renewal: must succeed
-	r1 := doPost(t, srv, "/listing/dup-list/renew", "dup-owner", "client", "")
+	r1 := doPostWithBearer(t, srv, "/listing/dup-list/renew", token, "")
 	r1.Body.Close()
 	if r1.StatusCode != 200 {
 		t.Fatalf("VIS-15 FAIL: first renewal expected 200, got %d", r1.StatusCode)
 	}
 
 	// Second renewal immediately after: must return 409 (listing now fresh)
-	r2 := doPost(t, srv, "/listing/dup-list/renew", "dup-owner", "client", "")
+	r2 := doPostWithBearer(t, srv, "/listing/dup-list/renew", token, "")
 	defer r2.Body.Close()
 	if r2.StatusCode != 409 {
 		t.Fatalf("VIS-15 FAIL: duplicate renewal expected 409, got %d", r2.StatusCode)
@@ -687,16 +820,21 @@ func TestRenew_Assertions(t *testing.T) {
 	now := time.Now().Unix()
 
 	// Expired listing with count=1 (still renewable)
+	hash := visHash("assert-owner")
+	principalID := "prn-assert"
+	seedVisPrincipal(t, db, principalID, hash, "client")
 	_, err := db.Exec(`INSERT INTO listings
-		(id, wallet_hash, status, opened_chats_count, renewal_count, visible_until, created_at, first_activated_at)
-		VALUES ('assert-list', ?, 'expired', 1, 2, ?, ?, ?)`,
-		visHash("assert-owner"), now-100, now-86400, now-86400)
+		(id, wallet_hash, owner_principal_id, status, opened_chats_count, renewal_count, visible_until, created_at, first_activated_at)
+		VALUES ('assert-list', ?, ?, 'expired', 1, 2, ?, ?, ?)`,
+		hash, principalID, now-100, now-86400, now-86400)
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}
+	tokenRaw := "vis-assert-token"
+	seedVisSessionWithPrincipal(t, db, middleware.HashToken(tokenRaw), hash, "client", principalID)
 
 	before := time.Now().Unix()
-	resp := doPost(t, srv, "/listing/assert-list/renew", "assert-owner", "client", "")
+	resp := doPostWithBearer(t, srv, "/listing/assert-list/renew", tokenRaw, "")
 	defer resp.Body.Close()
 	after := time.Now().Unix()
 
@@ -751,17 +889,22 @@ func TestRenew_TelegramNotifiedOnce(t *testing.T) {
 	}
 
 	// Expired listing in tbilisi matching the subscription
+	tgHash := visHash("tg-owner")
+	tgPrincipalID := "prn-tg"
+	seedVisPrincipal(t, db, tgPrincipalID, tgHash, "client")
 	_, err = db.Exec(`INSERT INTO listings
-		(id, wallet_hash, status, opened_chats_count, visible_until, created_at, first_activated_at,
+		(id, wallet_hash, owner_principal_id, status, opened_chats_count, visible_until, created_at, first_activated_at,
 		 city, dependency_type, help_type, urgency, languages)
-		VALUES ('tg-list', ?, 'expired', 0, ?, ?, ?, 'tbilisi', 'alcohol', 'crisis', 'can_wait', '["en"]')`,
-		visHash("tg-owner"), now-100, now-86400, now-86400)
+		VALUES ('tg-list', ?, ?, 'expired', 0, ?, ?, ?, 'tbilisi', 'alcohol', 'crisis', 'can_wait', '["en"]')`,
+		tgHash, tgPrincipalID, now-100, now-86400, now-86400)
 	if err != nil {
 		t.Fatalf("insert listing: %v", err)
 	}
+	tgTokenRaw := "vis-tg-token"
+	seedVisSessionWithPrincipal(t, db, middleware.HashToken(tgTokenRaw), tgHash, "client", tgPrincipalID)
 
 	// First renewal → 200 → goroutine dispatched
-	r1 := doPost(t, srv, "/listing/tg-list/renew", "tg-owner", "client", "")
+	r1 := doPostWithBearer(t, srv, "/listing/tg-list/renew", tgTokenRaw, "")
 	r1.Body.Close()
 	if r1.StatusCode != 200 {
 		t.Fatalf("VIS-17: first renewal expected 200, got %d", r1.StatusCode)
@@ -774,7 +917,7 @@ func TestRenew_TelegramNotifiedOnce(t *testing.T) {
 	}
 
 	// Second renewal immediately → 409 → no goroutine dispatched
-	r2 := doPost(t, srv, "/listing/tg-list/renew", "tg-owner", "client", "")
+	r2 := doPostWithBearer(t, srv, "/listing/tg-list/renew", tgTokenRaw, "")
 	r2.Body.Close()
 	if r2.StatusCode != 409 {
 		t.Fatalf("VIS-17: duplicate renewal expected 409, got %d", r2.StatusCode)

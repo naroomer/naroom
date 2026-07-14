@@ -97,6 +97,34 @@
 	let regionLockState = $state('idle'); // idle | warning | locked_other
 	let peerLockedCity  = $state('');     // city peer is already locked to
 
+	// Peer session recovery gate
+	let peerRecoveryCode = $state('');
+	let peerShowRecovery = $state(false);
+	let peerPendingFn    = $state(null);
+	// Client session recovery gate
+	let clientRecoveryCode = $state('');
+	let clientShowRecovery = $state(false);
+	let clientPendingFn    = $state(null);
+
+	// Get or create a principal session for `role`.
+	// Returns {token, recoveryCode?}. recoveryCode is non-null only when a new session was just created.
+	async function ensureSession(role) {
+		const key = `naroom_session_${role}`;
+		const stored = sessionStorage.getItem(key) ?? '';
+		if (stored) {
+			const r = await fetch('/api/session/status', { headers: { 'Authorization': `Bearer ${stored}` } });
+			if (r.ok) return { token: stored, recoveryCode: null };
+		}
+		const initR = await fetch('/api/session/init', {
+			method: 'POST', headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ role }),
+		});
+		if (!initR.ok) throw new Error('Failed to initialize session');
+		const { session_token, recovery_code } = await initR.json();
+		sessionStorage.setItem(key, session_token);
+		return { token: session_token, recoveryCode: recovery_code };
+	}
+
 	// Poll for chat room after peer responds (waiting for client to accept)
 	let peerPollTimer;
 
@@ -165,8 +193,15 @@
 		const detectedQuick = detectCurrency(peerWallet);
 		if (detectedQuick) peerCurrency = detectedQuick;
 		try {
+			// Auto-check only works when a valid peer session is already present; don't silently init one.
+			const stored = sessionStorage.getItem('naroom_session_peer') ?? '';
+			if (!stored) return;
+			const sr = await fetch('/api/session/status', { headers: { 'Authorization': `Bearer ${stored}` } });
+			if (!sr.ok) return;
+			const token = stored;
 			const vr = await fetch('/api/wallet/register', {
-				method: 'POST', headers: { 'Content-Type': 'application/json' },
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
 				body: JSON.stringify({ wallet_address: peerWallet, currency: peerCurrency, role: 'peer' }),
 			});
 			if (!vr.ok) {
@@ -179,11 +214,8 @@
 				return;
 			}
 			peerBalanceLow = null;
-			const vrData = await vr.json();
-			const peerToken = vrData.session_token ?? '';
-			if (peerToken) sessionStorage.setItem('naroom_session_peer', peerToken);
 			const pi = await fetch('/api/peer/invoice', {
-				headers: peerToken ? { 'Authorization': `Bearer ${peerToken}` } : {},
+				headers: { 'Authorization': `Bearer ${token}` },
 			});
 			if (pi.ok) {
 				const piData = await pi.json();
@@ -196,13 +228,32 @@
 	async function checkRegionAndRespond() {
 		if (!peerWallet) return;
 		respondLoading = true; respondError = '';
-		// Re-detect currency at submit time to avoid race with $effect
 		const detectedPeer = detectCurrency(peerWallet);
 		if (detectedPeer) peerCurrency = detectedPeer;
 		try {
-			// Step 1: register wallet and get session token
+			const { token, recoveryCode } = await ensureSession('peer');
+			if (recoveryCode) {
+				peerRecoveryCode = recoveryCode;
+				peerPendingFn = async () => {
+					peerShowRecovery = false;
+					await continueCheckRegionAndRespond(token);
+				};
+				peerShowRecovery = true;
+				respondLoading = false;
+				return;
+			}
+			await continueCheckRegionAndRespond(token);
+		} catch(e) { respondError = e.message; }
+		finally { respondLoading = false; }
+	}
+
+	async function continueCheckRegionAndRespond(token) {
+		respondLoading = true; respondError = '';
+		try {
+			// Register wallet (balance check + link to principal) with Bearer token
 			const vr = await fetch('/api/wallet/register', {
-				method: 'POST', headers: { 'Content-Type': 'application/json' },
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
 				body: JSON.stringify({ wallet_address: peerWallet, currency: peerCurrency, role: 'peer' }),
 			});
 			if (!vr.ok) {
@@ -214,26 +265,22 @@
 				throw new Error(errData.error ?? 'Wallet verification failed');
 			}
 			peerBalanceLow = null;
-			const vrData = await vr.json();
-			const peerToken = vrData.session_token ?? '';
-			if (peerToken) sessionStorage.setItem('naroom_session_peer', peerToken);
 
-			// Step 1b: check if peer already has a pending invoice (lost page recovery)
+			// Check if peer already has a pending invoice (lost page recovery)
 			const pi = await fetch('/api/peer/invoice', {
-				headers: peerToken ? { 'Authorization': `Bearer ${peerToken}` } : {},
+				headers: { 'Authorization': `Bearer ${token}` },
 			});
 			if (pi.ok) {
 				const piData = await pi.json();
-				// Peer already has a pending invoice — show payment UI in peer section
 				peerPendingInvoice = piData;
 				startPeerPoll(piData.listing_id || listing.id);
 				return;
 			}
 
-			// Step 2: check region lock
+			// Check region lock
 			const rr = await fetch('/api/peer/region', {
 				headers: {
-					...(peerToken ? { 'Authorization': `Bearer ${peerToken}` } : {}),
+					'Authorization': `Bearer ${token}`,
 					'X-Dev-Wallet': peerWallet,
 					'X-Dev-Role': 'peer',
 				},
@@ -241,15 +288,12 @@
 			const regionData = rr.ok ? await rr.json() : { region: null };
 
 			if (regionData.region === null) {
-				// First time — show region lock warning
 				regionLockState = 'warning';
 			} else if (regionData.region !== listing.city) {
-				// Locked to a different city
 				peerLockedCity = regionData.region;
 				regionLockState = 'locked_other';
 			} else {
-				// Already locked to this city — proceed directly
-				await doSubmitRespond(peerToken);
+				await doSubmitRespond(token);
 			}
 		} catch(e) { respondError = e.message; }
 		finally { respondLoading = false; }
@@ -295,20 +339,24 @@
 	// Poll for chat room after accept
 	let chatPollTimer;
 
+	// Ensures a valid client session and registers the wallet with Bearer token.
+	// Returns {token, recoveryCode?}. recoveryCode is set when a new session was just created
+	// (caller must show recovery gate before calling /wallet/register).
 	async function getClientSession() {
-		// Verify wallet and get/refresh session token
-		let token = sessionStorage.getItem('naroom_session_client') ?? '';
-		if (!token) {
-			const vr = await fetch('/api/wallet/register', {
-				method: 'POST', headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ wallet_address: clientWallet, currency: clientCurrency, role: 'client' }),
-			});
-			if (!vr.ok) throw new Error((await vr.json()).error ?? 'Wallet verification failed');
-			const d = await vr.json();
-			token = d.session_token ?? '';
-			if (token) sessionStorage.setItem('naroom_session_client', token);
+		const { token, recoveryCode } = await ensureSession('client');
+		if (recoveryCode) {
+			return { token, recoveryCode };
 		}
-		return token;
+		// Register wallet (balance check + link) with Bearer token
+		const vr = await fetch('/api/wallet/register', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+			body: JSON.stringify({ wallet_address: clientWallet, currency: clientCurrency, role: 'client' }),
+		});
+		if (!vr.ok) throw new Error((await vr.json()).error ?? 'Wallet verification failed');
+		sessionStorage.setItem('naroom_wallet_client', clientWallet);
+		sessionStorage.setItem('naroom_currency_client', clientCurrency);
+		return { token, recoveryCode: null };
 	}
 
 	function clientAuthHeaders(token) {
@@ -324,17 +372,40 @@
 		if (!clientWallet) { responsesError = 'Enter your wallet address'; return; }
 		loadingResponses = true; responsesError = '';
 		try {
-			const token = await getClientSession();
+			const { token, recoveryCode } = await getClientSession();
+			if (recoveryCode) {
+				clientRecoveryCode = recoveryCode;
+				clientPendingFn = async () => {
+					clientShowRecovery = false;
+					// Register wallet after user acks recovery code
+					const vr = await fetch('/api/wallet/register', {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+						body: JSON.stringify({ wallet_address: clientWallet, currency: clientCurrency, role: 'client' }),
+					});
+					if (!vr.ok) { responsesError = (await vr.json()).error ?? 'Wallet verification failed'; return; }
+					sessionStorage.setItem('naroom_wallet_client', clientWallet);
+					await doLoadResponses(token);
+				};
+				clientShowRecovery = true;
+				loadingResponses = false;
+				return;
+			}
+			await doLoadResponses(token);
+		} catch(e) { responsesError = e.message; }
+		finally { loadingResponses = false; }
+	}
+
+	async function doLoadResponses(token) {
+		loadingResponses = true;
+		try {
 			// Recovery: check if chat room already exists (e.g. after page refresh post-accept)
 			const cr = await fetch(`/api/listing/${listing.id}/chatroom`, {
 				headers: clientAuthHeaders(token),
 			});
 			if (cr.ok) {
 				const crData = await cr.json();
-				if (crData.room_id) {
-					existingChatRoom = crData;
-					return;
-				}
+				if (crData.room_id) { existingChatRoom = crData; return; }
 			}
 			const res = await fetch(`/api/listing/${listing.id}/responses`, {
 				headers: clientAuthHeaders(token),
@@ -360,7 +431,7 @@
 	async function acceptResponse(responseId) {
 		acceptLoading = true; acceptError = '';
 		try {
-			const token = await getClientSession();
+			const { token } = await ensureSession('client');
 			const res = await fetch(`/api/response/${responseId}/accept`, {
 				method: 'POST',
 				headers: clientAuthHeaders(token),
@@ -408,7 +479,7 @@
 	async function startRenew() {
 		renewLoading = true; renewError = '';
 		try {
-			const token = await getClientSession();
+			const { token } = await ensureSession('client');
 			const res = await fetch(`/api/listing/${listing.id}/renew`, {
 				method: 'POST',
 				headers: clientAuthHeaders(token),
@@ -434,17 +505,20 @@
 		const savedCurrency = sessionStorage.getItem('my_currency_' + listing.id);
 		if (savedCurrency) clientCurrency = savedCurrency;
 
-		// Auto-check for an existing chat room using stored session.
+		// Auto-check for an existing chat room using stored session (validate first).
 		// Covers the case where the client returns after a peer accepted and paid.
-		const token = sessionStorage.getItem('naroom_session_client') ?? '';
-		if (token && listing.status === 'active') {
+		const stored = sessionStorage.getItem('naroom_session_client') ?? '';
+		if (stored && listing.status === 'active') {
 			try {
-				const res = await fetch(`/api/listing/${listing.id}/chatroom`, {
-					headers: { 'Authorization': `Bearer ${token}` },
-				});
-				if (res.ok) {
-					const d = await res.json();
-					if (d.room_id) existingChatRoom = d;
+				const sr = await fetch('/api/session/status', { headers: { 'Authorization': `Bearer ${stored}` } });
+				if (sr.ok) {
+					const res = await fetch(`/api/listing/${listing.id}/chatroom`, {
+						headers: { 'Authorization': `Bearer ${stored}` },
+					});
+					if (res.ok) {
+						const d = await res.json();
+						if (d.room_id) existingChatRoom = d;
+					}
 				}
 			} catch {}
 		}
@@ -704,6 +778,24 @@
 		<div class="expired-note">{t('listing.expired_note')}</div>
 	{/if}
 
+	<!-- ── RECOVERY GATE (shown when a new session was just created for peer or client) ── -->
+	{#if peerShowRecovery || clientShowRecovery}
+	<div class="recovery-overlay">
+		<div class="recovery-card">
+			<h3 style="margin:0;font-size:17px;font-weight:600;color:var(--text)">Save your recovery code</h3>
+			<p style="font-size:13px;color:var(--text-dim);line-height:1.6;margin:0">
+				This is the only way to restore access if you close the browser. Write it down — it will not be shown again.
+			</p>
+			<div class="recovery-code-box">
+				{peerShowRecovery ? peerRecoveryCode : clientRecoveryCode}
+			</div>
+			<button class="btn-primary" onclick={() => peerShowRecovery ? peerPendingFn?.() : clientPendingFn?.()}>
+				I saved it — continue →
+			</button>
+		</div>
+	</div>
+	{/if}
+
 	<!-- ── RENEW SECTION (owner only, expiring/expired, < 2 responses) ── -->
 	{#if showRenew}
 	<div class="section renew-section">
@@ -930,6 +1022,23 @@
 	.region-blocked {
 		background: rgba(212, 132, 90, 0.08); border: 1px solid var(--danger);
 		border-radius: 8px; padding: 12px 14px; font-size: 13px; color: var(--danger);
+	}
+
+	/* Recovery gate overlay */
+	.recovery-overlay {
+		position: fixed; inset: 0; background: rgba(0,0,0,0.65);
+		display: flex; align-items: center; justify-content: center;
+		z-index: 200; backdrop-filter: blur(4px);
+	}
+	.recovery-card {
+		background: var(--bg-card); border: 1px solid var(--accent);
+		border-radius: 14px; padding: 28px; width: 100%; max-width: 420px;
+		display: flex; flex-direction: column; gap: 16px; margin: 16px;
+	}
+	.recovery-code-box {
+		background: var(--bg-card2, #1a1a2e); border: 1px solid var(--accent);
+		border-radius: 8px; padding: 14px; font-family: monospace;
+		font-size: 12px; word-break: break-all; color: var(--text); line-height: 1.6;
 	}
 
 	/* Renew section */

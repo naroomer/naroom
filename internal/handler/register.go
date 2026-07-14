@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"naroom/internal/crypto"
+	"naroom/internal/middleware"
 )
 
 // detectCurrencyFromAddress returns "BTC" or "LTC" based on address prefix.
@@ -31,9 +32,18 @@ type walletRegisterReq struct {
 }
 
 // WalletRegister handles POST /wallet/register.
-// Checks that the address has ≥$1000 balance and issues a session token.
-// No signature required — proof of ownership happens at payment time.
+// Requires an existing session (from /session/init or /session/recover).
+// Checks that the address has sufficient balance, then links the wallet to the principal.
+// No new session token is issued — the caller already has one (and it is updated in-place).
 func (h *Handler) WalletRegister(w http.ResponseWriter, r *http.Request) {
+	// Must have an existing session with a principal_id (from /session/init or /session/recover)
+	principalID := middleware.SessionPrincipalID(r.Context())
+	if principalID == "" {
+		writeError(w, 401, "session required — call /session/init first")
+		return
+	}
+	sessionRole := middleware.SessionRole(r.Context())
+
 	var req walletRegisterReq
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, 400, "invalid json")
@@ -47,6 +57,19 @@ func (h *Handler) WalletRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "role must be client or peer")
 		return
 	}
+	// Role mismatch: request role must equal the session role.
+	if sessionRole != "" && req.Role != sessionRole {
+		writeError(w, 400, "role mismatch: request role does not match session role")
+		return
+	}
+	// Also verify principal's stored role matches.
+	var principalRole string
+	if err := h.DB.QueryRow(`SELECT role FROM principals WHERE id = ?`, principalID).Scan(&principalRole); err == nil {
+		if principalRole != req.Role {
+			writeError(w, 403, "role mismatch: principal role does not match request role")
+			return
+		}
+	}
 	if req.Currency != "BTC" && req.Currency != "LTC" {
 		writeError(w, 400, "currency must be BTC or LTC")
 		return
@@ -57,22 +80,21 @@ func (h *Handler) WalletRegister(w http.ResponseWriter, r *http.Request) {
 		req.Currency = detected
 	}
 
+	walletHash := crypto.WalletHash(h.HashKey, req.WalletAddress)
+
 	// ── Dev mode: skip balance check ─────────────────────────────────────────
 	if h.DevMode {
 		if err := h.upsertWalletSession(req.WalletAddress, req.Role, req.Currency); err != nil {
 			writeError(w, 500, "db error")
 			return
 		}
-		walletHash := crypto.WalletHash(h.HashKey, req.WalletAddress)
-		token, err := h.issueSession(walletHash, req.Role, req.Currency)
-		if err != nil {
-			writeError(w, 500, "session creation failed")
+		if err := h.linkWalletToPrincipal(principalID, walletHash, req.Currency); err != nil {
+			writeError(w, 500, "db error")
 			return
 		}
 		writeJSON(w, 200, map[string]any{
 			"status":        "ok",
-			"session_token": token,
-			"expires_in":    86400,
+			"wallet_linked": true,
 		})
 		return
 	}
@@ -88,7 +110,6 @@ func (h *Handler) WalletRegister(w http.ResponseWriter, r *http.Request) {
 
 	// Use cached balance if wallet was verified within the last 5 minutes.
 	// Avoids hammering BlockCypher/Mempool on repeated register calls.
-	walletHash := crypto.WalletHash(h.HashKey, req.WalletAddress)
 	var cachedBalance float64
 	cacheHit := false
 	if err := h.DB.QueryRow(`
@@ -115,28 +136,26 @@ func (h *Handler) WalletRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	if balanceUSD < minUSD {
 		writeJSON(w, 402, map[string]any{
-			"error":       "insufficient balance",
-			"balance_usd": balanceUSD,
+			"error":        "insufficient balance",
+			"balance_usd":  balanceUSD,
 			"required_usd": minUSD,
 		})
 		return
 	}
 
-	// ── Issue session ─────────────────────────────────────────────────────────
+	// ── Link wallet to principal ──────────────────────────────────────────────
 	if err := h.upsertWalletSession(req.WalletAddress, req.Role, req.Currency); err != nil {
 		writeError(w, 500, "db error")
 		return
 	}
-	token, err := h.issueSession(walletHash, req.Role, req.Currency)
-	if err != nil {
-		writeError(w, 500, "session creation failed")
+	if err := h.linkWalletToPrincipal(principalID, walletHash, req.Currency); err != nil {
+		writeError(w, 500, "db error")
 		return
 	}
 	writeJSON(w, 200, map[string]any{
 		"status":        "ok",
 		"balance_usd":   balanceUSD,
-		"session_token": token,
-		"expires_in":    86400,
+		"wallet_linked": true,
 	})
 }
 

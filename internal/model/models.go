@@ -111,10 +111,3 @@ type ReviewToken struct {
 	CreatedAt    int64  `json:"-"`
 	ExpiresAt    int64  `json:"-"`
 }
-
-// AbuseReport — входящий abuse report от психолога
-type AbuseReport struct {
-	CounselorHash string   `json:"-"`
-	ClientHash    string   `json:"-"`
-	Categories    []string `json:"categories"`
-}

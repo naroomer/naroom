@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"database/sql"
 	"net/http"
 	"time"
 
@@ -26,13 +27,14 @@ func (h *Handler) Respond(w http.ResponseWriter, r *http.Request) {
 	}
 
 	counselorHash := middleware.SessionWalletHash(r.Context())
+	counselorPrincipalID := middleware.SessionPrincipalID(r.Context())
 	if counselorHash == "" {
 		writeError(w, 401, "session required")
 		return
 	}
 
-	// Clients may never respond to listings — enforce role regardless of DevMode.
-	if role := middleware.SessionRole(r.Context()); role == "client" {
+	// Only peers may respond to listings.
+	if role := middleware.SessionRole(r.Context()); role != "peer" {
 		writeError(w, 403, "clients cannot respond to listings")
 		return
 	}
@@ -162,10 +164,14 @@ func (h *Handler) Respond(w http.ResponseWriter, r *http.Request) {
 	}
 
 	responseID := crypto.NewID("rsp")
+	var nullCounselorPrincipal sql.NullString
+	if counselorPrincipalID != "" {
+		nullCounselorPrincipal = sql.NullString{String: counselorPrincipalID, Valid: true}
+	}
 	_, err = tx.Exec(`
-		INSERT INTO responses (id, listing_id, counselor_hash, counselor_pubkey, status, created_at)
-		VALUES (?, ?, ?, ?, 'pending', ?)
-	`, responseID, listingID, counselorHash, req.CounselorPubkey, now)
+		INSERT INTO responses (id, listing_id, counselor_hash, counselor_pubkey, counselor_principal_id, status, created_at)
+		VALUES (?, ?, ?, ?, ?, 'pending', ?)
+	`, responseID, listingID, counselorHash, req.CounselorPubkey, nullCounselorPrincipal, now)
 	if err != nil {
 		writeError(w, 500, "db error")
 		return
@@ -192,6 +198,10 @@ func (h *Handler) GetPeerRegion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 401, "session required")
 		return
 	}
+	if role := middleware.SessionRole(r.Context()); role != "peer" {
+		writeError(w, 403, "peer role required")
+		return
+	}
 
 	var region string
 	h.DB.QueryRow(`SELECT region FROM reputation WHERE counselor_hash = ?`, counselorHash).Scan(&region)
@@ -208,17 +218,27 @@ func (h *Handler) CancelResponse(w http.ResponseWriter, r *http.Request) {
 	responseID := chi.URLParam(r, "id")
 
 	counselorHash := middleware.SessionWalletHash(r.Context())
+	counselorPrincipalID := middleware.SessionPrincipalID(r.Context())
 	if counselorHash == "" {
 		writeError(w, 401, "session required")
 		return
 	}
+	if role := middleware.SessionRole(r.Context()); role != "peer" {
+		writeError(w, 403, "peer role required")
+		return
+	}
+	// Strict authorization: counselor_principal_id only, no wallet_hash fallback.
+	if counselorPrincipalID == "" {
+		writeError(w, 401, "session requires /session/init")
+		return
+	}
 
-	// Check response belongs to this counselor and is pending
+	// Check response belongs to this counselor and is pending.
 	var listingID string
 	err := h.DB.QueryRow(`
 		SELECT listing_id FROM responses
-		WHERE id = ? AND counselor_hash = ? AND status = 'pending'
-	`, responseID, counselorHash).Scan(&listingID)
+		WHERE id = ? AND counselor_principal_id = ? AND status = 'pending'
+	`, responseID, counselorPrincipalID).Scan(&listingID)
 	if err != nil {
 		writeError(w, 404, "response not found or not cancellable")
 		return

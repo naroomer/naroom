@@ -3,6 +3,7 @@ package handler
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -13,7 +14,8 @@ import (
 
 // issueSession creates a new session token, stores the hash, and returns the raw token.
 // walletHash must be pre-computed with crypto.WalletHash — plain address is never stored in sessions.
-func (h *Handler) issueSession(walletHash, role, currency string) (string, error) {
+// principalID may be "" for legacy sessions; use createPrincipal first for new sessions.
+func (h *Handler) issueSession(principalID, walletHash, role, currency string) (string, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return "", err
@@ -25,14 +27,59 @@ func (h *Handler) issueSession(walletHash, role, currency string) (string, error
 	now := time.Now().Unix()
 	expiresAt := now + 86400 // 24h
 
+	var nullPrincipal sql.NullString
+	if principalID != "" {
+		nullPrincipal = sql.NullString{String: principalID, Valid: true}
+	}
+
 	_, err := h.DB.Exec(`
-		INSERT INTO sessions (token_hash, wallet_hash, currency, role, created_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, tokenHash, walletHash, currency, role, now, expiresAt)
+		INSERT INTO sessions (token_hash, wallet_hash, currency, role, created_at, expires_at, principal_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, tokenHash, walletHash, currency, role, now, expiresAt, nullPrincipal)
 	if err != nil {
 		return "", err
 	}
 	return token, nil
+}
+
+// createPrincipal creates a new principal and returns (principalID, rawRecoveryCode, error).
+// The raw recovery code is returned ONCE and must be shown to the user immediately.
+func (h *Handler) createPrincipal(role string) (string, string, error) {
+	principalID := crypto.NewID("prn")
+	// Generate 32-byte random recovery code
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", "", err
+	}
+	rawRecovery := hex.EncodeToString(raw)
+	recoveryHash := crypto.WalletHash(h.HashKey, rawRecovery) // HMAC(HASH_KEY, raw)
+	now := time.Now().Unix()
+	_, err := h.DB.Exec(`
+		INSERT INTO principals (id, recovery_hash, role, created_at)
+		VALUES (?, ?, ?, ?)
+	`, principalID, recoveryHash, role, now)
+	if err != nil {
+		return "", "", err
+	}
+	return principalID, rawRecovery, nil
+}
+
+// linkWalletToPrincipal sets the billing wallet for a principal and updates all active sessions.
+func (h *Handler) linkWalletToPrincipal(principalID, walletHash, currency string) error {
+	now := time.Now().Unix()
+	_, err := h.DB.Exec(`
+		UPDATE principals SET wallet_hash = ?, currency = ?, last_seen = ?
+		WHERE id = ?
+	`, walletHash, currency, now, principalID)
+	if err != nil {
+		return err
+	}
+	// Update active sessions so middleware returns real wallet_hash
+	_, err = h.DB.Exec(`
+		UPDATE sessions SET wallet_hash = ?
+		WHERE principal_id = ? AND revoked_at IS NULL AND expires_at > ?
+	`, walletHash, principalID, now)
+	return err
 }
 
 func (h *Handler) upsertWalletSession(walletAddress, role, currency string) error {
@@ -60,11 +107,11 @@ func (h *Handler) upsertWalletSession(walletAddress, role, currency string) erro
 		ON CONFLICT(wallet_hash) DO UPDATE SET
 			wallet_address_enc = excluded.wallet_address_enc,
 			currency           = excluded.currency,
-			role               = excluded.role,
 			balance_status     = 'ok',
 			min_required_usd   = excluded.min_required_usd,
 			last_checked_at    = excluded.last_checked_at,
 			verified           = TRUE
+			-- role is intentionally NOT updated to prevent role overwrite
 	`, walletHash, addrEnc, currency, role, minRequired, minRequired, now, now, now, now)
 	if err != nil {
 		return err

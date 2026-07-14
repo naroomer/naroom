@@ -62,13 +62,17 @@
 	});
 
 	// UI state
-	let step           = $state(1); // 1=form 2=crisis 3=invoice 4=telegram
+	let step           = $state(1); // 1=form 2=crisis 2.5=recovery 3=invoice 4=telegram
 	let loading        = $state(false);
 	let error          = $state('');
 	let balanceLow     = $state(false); // true when 402 — show retry button
 	let invoice        = $state(null);
 	let telegramBotUrl = $state('');
 	let telegramError  = $state('');
+	// Recovery code display (shown once after /session/init before continuing)
+	let recoveryCodeNew     = $state('');
+	let showRecoveryStep    = $state(false);
+	let pendingAfterRecovery = $state(null); // callback to run after user acknowledges code
 
 	// Languages available for currently selected city
 	let availableLangs = $derived(
@@ -114,19 +118,63 @@
 		balanceLow = false;
 
 		try {
-			// 1. Проверить баланс → получить session token
-			// Re-detect currency at submit time to avoid race with $effect
 			const detectedOnSubmit = detectCurrency(walletAddress);
 			if (detectedOnSubmit) currency = detectedOnSubmit;
 
+			let sessionToken = sessionStorage.getItem('naroom_session_client') || '';
+
+			// Validate existing session via /session/status
+			if (sessionToken) {
+				try {
+					const testRes = await fetch('/api/session/status', { headers: { 'Authorization': `Bearer ${sessionToken}` } });
+					if (!testRes.ok) { sessionToken = ''; }
+				} catch { sessionToken = ''; }
+			}
+
+			if (!sessionToken) {
+				// New session — show recovery code BEFORE calling /wallet/register
+				const initRes = await fetch('/api/session/init', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ role: 'client' }),
+				});
+				if (!initRes.ok) throw new Error('Failed to initialize session');
+				const initData = await initRes.json();
+				sessionToken = initData.session_token;
+				sessionStorage.setItem('naroom_session_client', sessionToken);
+
+				recoveryCodeNew = initData.recovery_code;
+				pendingAfterRecovery = async () => {
+					showRecoveryStep = false;
+					await registerWalletAndContinue(sessionToken);
+				};
+				showRecoveryStep = true;
+				loading = false;
+				return;
+			}
+
+			// Existing valid session — go straight to wallet registration
+			await registerWalletAndContinue(sessionToken);
+
+		} catch (e) {
+			error = e.message;
+		} finally {
+			loading = false;
+		}
+	}
+
+	async function registerWalletAndContinue(sessionToken) {
+		loading = true;
+		error = '';
+		balanceLow = false;
+		try {
 			const verifyRes = await fetch('/api/wallet/register', {
 				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					wallet_address: walletAddress,
-					currency,
-					role: 'client',
-				}),
+				headers: {
+					'Content-Type': 'application/json',
+					'Authorization': `Bearer ${sessionToken}`,
+				},
+				body: JSON.stringify({ wallet_address: walletAddress, currency, role: 'client' }),
 			});
 
 			const verifyData = await verifyRes.json();
@@ -142,18 +190,25 @@
 				throw new Error(verifyData.error ?? 'Wallet verification failed');
 			}
 
-			const sessionToken = verifyData.session_token ?? '';
-			if (sessionToken) sessionStorage.setItem('naroom_session_client', sessionToken);
-			// Сохраняем адрес для повторных проверок (только в браузере)
 			sessionStorage.setItem('naroom_wallet_client', walletAddress);
 			sessionStorage.setItem('naroom_currency_client', currency);
 
-			// 2. Создать объявление (wallet_address берётся из сессии на сервере)
+			await continueCreateListing(sessionToken);
+		} catch (e) {
+			error = e.message;
+		} finally {
+			loading = false;
+		}
+	}
+
+	async function continueCreateListing(sessionToken) {
+		loading = true;
+		try {
 			const listRes = await fetch('/api/listing/create', {
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json',
-					...(sessionToken ? { 'Authorization': `Bearer ${sessionToken}` } : {}),
+					'Authorization': `Bearer ${sessionToken}`,
 					'X-Dev-Wallet': walletAddress,
 					'X-Dev-Role': 'client',
 				},
@@ -177,7 +232,6 @@
 			sessionStorage.setItem('my_wallet_' + invoice.listing_id, walletAddress);
 			sessionStorage.setItem('my_currency_' + invoice.listing_id, currency);
 			step = 3;
-
 		} catch (e) {
 			error = e.message;
 		} finally {
@@ -269,7 +323,7 @@
 	</header>
 
 	<!-- Step 1: Form -->
-	{#if step === 1}
+	{#if step === 1 && !showRecoveryStep}
 	<div class="form-wrap">
 		<h1>{t('new.title')}</h1>
 		<p class="subtitle">{t('new.subtitle')}</p>
@@ -380,6 +434,17 @@
 		</button>
 
 		<p class="fine">{t('new.listing_fine', {currency})}</p>
+	</div>
+
+	<!-- Recovery code display (shown once after /session/init) -->
+	{:else if showRecoveryStep}
+	<div class="form-wrap">
+		<h2>Save your recovery code</h2>
+		<p>This is the only way to restore access if you lose your session. It will not be shown again.</p>
+		<div class="address-box" style="font-size: 12px; word-break: break-all; font-family: monospace;">{recoveryCodeNew}</div>
+		<button class="submit" onclick={() => pendingAfterRecovery && pendingAfterRecovery()}>
+			I saved it — continue →
+		</button>
 	</div>
 
 	<!-- Step 2: Crisis screen (urgent only) -->

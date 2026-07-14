@@ -17,8 +17,11 @@
 // and the 64 KB limit on /wallet/register but doesn't verify error shapes).
 
 import { TestServer } from '../lib/server.js';
+import { ApiClient } from '../lib/http.js';
 import { assertStatus } from '../lib/assert.js';
 import { Runner } from '../lib/runner.js';
+
+const CLIENT_WALLET = '1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf';
 
 export async function run() {
   console.log('\n=== 030: Input validation (malformed JSON, size limits, method enforcement) ===');
@@ -27,12 +30,27 @@ export async function run() {
 
   try {
     await srv.start();
+    const api = new ApiClient(srv.base);
+
+    // Get a valid session token for tests that need it
+    // (since /wallet/register now requires requireSession)
+    let sessionToken = '';
+    const initR = await fetch(`${srv.base}/session/init`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'client' }),
+    });
+    if (initR.status === 201) {
+      const initBody = await initR.json().catch(() => ({}));
+      sessionToken = initBody.session_token ?? '';
+    }
 
     // ── (a) Malformed JSON → 4xx, not 500 ────────────────────────────────────
+    // /wallet/register requires session, so without one returns 401 (still 4xx)
     await t.run('malformed JSON → 4xx not 5xx', async () => {
       const r = await fetch(`${srv.base}/wallet/register`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sessionToken}` },
         body: '{not: valid json,,}',
       });
       if (r.status >= 500) throw new Error(`malformed JSON caused ${r.status} (panic?) — expected 4xx`);
@@ -43,7 +61,7 @@ export async function run() {
     await t.run('empty body → 4xx not 5xx', async () => {
       const r = await fetch(`${srv.base}/wallet/register`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sessionToken}` },
         body: '',
       });
       if (r.status >= 500) throw new Error(`empty body caused ${r.status} (panic?) — expected 4xx`);
@@ -54,14 +72,15 @@ export async function run() {
     await t.run('missing wallet_address → 400', async () => {
       const r = await fetch(`${srv.base}/wallet/register`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sessionToken}` },
         body: JSON.stringify({ currency: 'BTC', role: 'client' }),
       });
       assertStatus({ status: r.status, body: {} }, 400, 'missing wallet_address');
     });
 
     // ── (d) Body > 64 KB on non-chat endpoint → rejected (not 2xx) ───────────
-    // Handler enforces MaxBytesReader and rejects with 4xx (typically 400).
+    // Note: LimitBody runs after requireSession — session check fires first (401),
+    // but the LimitBody enforcement is also verified via /session/init below.
     await t.run('body > 64 KB on /wallet/register → rejected (not 2xx)', async () => {
       const big = JSON.stringify({
         wallet_address: '1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf',
@@ -71,7 +90,7 @@ export async function run() {
       });
       const r = await fetch(`${srv.base}/wallet/register`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sessionToken}` },
         body: big,
       });
       if (r.status >= 200 && r.status < 300) {

@@ -64,6 +64,7 @@ func openTestDB(t *testing.T) *sql.DB {
 			chat_room_id        TEXT,
 			payment_detected_at INTEGER,
 			price_at_creation   REAL,
+			payer_principal_id  TEXT,
 			created_at          INTEGER NOT NULL
 		);
 		CREATE TABLE listings (
@@ -121,39 +122,44 @@ func openTestDBFull(t *testing.T) *sql.DB {
 			chat_room_id        TEXT,
 			payment_detected_at INTEGER,
 			price_at_creation   REAL,
+			payer_principal_id  TEXT,
 			created_at          INTEGER NOT NULL
 		);
 		CREATE TABLE listings (
-			id                 TEXT PRIMARY KEY,
-			city               TEXT NOT NULL DEFAULT 'tbilisi',
-			dependency_type    TEXT NOT NULL DEFAULT 'alcohol',
-			help_type          TEXT NOT NULL DEFAULT 'crisis',
-			urgency            TEXT NOT NULL DEFAULT 'urgent',
-			languages          TEXT NOT NULL DEFAULT 'en',
-			wallet_hash        TEXT NOT NULL DEFAULT 'test-hash',
-			visible_until      INTEGER NOT NULL DEFAULT 0,
-			created_at         INTEGER NOT NULL DEFAULT 0,
-			status             TEXT NOT NULL DEFAULT 'pending',
-			opened_chats_count INTEGER NOT NULL DEFAULT 0
+			id                   TEXT PRIMARY KEY,
+			city                 TEXT NOT NULL DEFAULT 'tbilisi',
+			dependency_type      TEXT NOT NULL DEFAULT 'alcohol',
+			help_type            TEXT NOT NULL DEFAULT 'crisis',
+			urgency              TEXT NOT NULL DEFAULT 'urgent',
+			languages            TEXT NOT NULL DEFAULT 'en',
+			wallet_hash          TEXT NOT NULL DEFAULT 'test-hash',
+			visible_until        INTEGER NOT NULL DEFAULT 0,
+			created_at           INTEGER NOT NULL DEFAULT 0,
+			status               TEXT NOT NULL DEFAULT 'pending',
+			opened_chats_count   INTEGER NOT NULL DEFAULT 0,
+			owner_principal_id   TEXT
 		);
 		CREATE TABLE responses (
-			id               TEXT PRIMARY KEY,
-			listing_id       TEXT NOT NULL,
-			counselor_hash   TEXT NOT NULL,
-			counselor_pubkey TEXT NOT NULL DEFAULT ''
+			id                      TEXT PRIMARY KEY,
+			listing_id              TEXT NOT NULL,
+			counselor_hash          TEXT NOT NULL,
+			counselor_pubkey        TEXT NOT NULL DEFAULT '',
+			counselor_principal_id  TEXT
 		);
 		CREATE TABLE chat_rooms (
-			id               TEXT PRIMARY KEY,
-			listing_id       TEXT NOT NULL,
-			response_id      TEXT NOT NULL,
-			client_hash      TEXT NOT NULL,
-			counselor_hash   TEXT NOT NULL,
-			client_pubkey    TEXT NOT NULL DEFAULT '',
-			counselor_pubkey TEXT NOT NULL DEFAULT '',
-			started_at       INTEGER NOT NULL DEFAULT 0,
-			expires_at       INTEGER NOT NULL DEFAULT 0,
-			status           TEXT NOT NULL DEFAULT 'active',
-			listing_counted  INTEGER NOT NULL DEFAULT 0
+			id                    TEXT PRIMARY KEY,
+			listing_id            TEXT NOT NULL,
+			response_id           TEXT NOT NULL,
+			client_hash           TEXT NOT NULL,
+			counselor_hash        TEXT NOT NULL,
+			client_pubkey         TEXT NOT NULL DEFAULT '',
+			counselor_pubkey      TEXT NOT NULL DEFAULT '',
+			started_at            INTEGER NOT NULL DEFAULT 0,
+			expires_at            INTEGER NOT NULL DEFAULT 0,
+			status                TEXT NOT NULL DEFAULT 'active',
+			listing_counted       INTEGER NOT NULL DEFAULT 0,
+			client_principal_id   TEXT,
+			counselor_principal_id TEXT
 		);
 		CREATE TABLE wallet_sessions (
 			wallet_hash      TEXT PRIMARY KEY,
@@ -437,7 +443,7 @@ func TestDoubleConfirmGuard(t *testing.T) {
 	}
 
 	// Simulate a second watcher tick trying to confirm the same invoice.
-	iw.confirmInvoice("inv-dupe", "listing", "duplicate-txid", 0, "list-1", "", "", "")
+	iw.confirmInvoice("inv-dupe", "listing", "duplicate-txid", 0, "list-1", "", "", "", "")
 
 	// 1. txid must not be overwritten.
 	var txid sql.NullString
@@ -794,7 +800,7 @@ func TestDoubleConfirm_OpenedChatsCountNotDoubled(t *testing.T) {
 	}
 
 	// First call: should create chat room and increment opened_chats_count to 1
-	iw.confirmInvoice("inv-chat-double", "chat", "txid-1", 1000000, "", "resp-1", "client-pubkey-1", "")
+	iw.confirmInvoice("inv-chat-double", "chat", "txid-1", 1000000, "", "resp-1", "client-pubkey-1", "", "")
 
 	// Verify first call worked: opened_chats_count should be 1
 	var count int
@@ -815,7 +821,7 @@ func TestDoubleConfirm_OpenedChatsCountNotDoubled(t *testing.T) {
 	}
 
 	// Second call: invoice is now 'confirmed', must be a no-op
-	iw.confirmInvoice("inv-chat-double", "chat", "txid-2", 1000000, "", "resp-1", "client-pubkey-1", "")
+	iw.confirmInvoice("inv-chat-double", "chat", "txid-2", 1000000, "", "resp-1", "client-pubkey-1", "", "")
 
 	// opened_chats_count must still be 1 — not doubled
 	if err := db.QueryRow(`SELECT opened_chats_count FROM listings WHERE id = 'list-chat-1'`).Scan(&count); err != nil {
@@ -852,7 +858,7 @@ func TestListingStaysActive_AfterFirstChat(t *testing.T) {
 		VALUES ('vis-inv-1', 'chat', 'addr', '0', 'BTC', 'peer-vis-1', 'pending', 'vis-resp-1', 'client-pub-1', ?)`, now)
 
 	iw := &InvoiceWatcher{DB: db, HashKey: []byte(testHashKey), DevMode: true}
-	iw.confirmInvoice("vis-inv-1", "chat", "txid-1", 1000000, "", "vis-resp-1", "client-pub-1", "")
+	iw.confirmInvoice("vis-inv-1", "chat", "txid-1", 1000000, "", "vis-resp-1", "client-pub-1", "", "")
 
 	var status string
 	db.QueryRow(`SELECT status FROM listings WHERE id = 'vis-list-1'`).Scan(&status)
@@ -883,7 +889,7 @@ func TestListingClosed_AfterSecondChat(t *testing.T) {
 		VALUES ('vis-inv-2b', 'chat', 'addr', '0', 'BTC', 'peer-vis-2b', 'pending', 'vis-resp-2b', 'client-pub-2', ?)`, now)
 
 	iw := &InvoiceWatcher{DB: db, HashKey: []byte(testHashKey), DevMode: true}
-	iw.confirmInvoice("vis-inv-2b", "chat", "txid-2b", 1000000, "", "vis-resp-2b", "client-pub-2", "")
+	iw.confirmInvoice("vis-inv-2b", "chat", "txid-2b", 1000000, "", "vis-resp-2b", "client-pub-2", "", "")
 
 	var status string
 	db.QueryRow(`SELECT status FROM listings WHERE id = 'vis-list-2'`).Scan(&status)
@@ -934,40 +940,45 @@ func openTestDBFullWithStatus(t *testing.T) *sql.DB {
 			chat_room_id        TEXT,
 			payment_detected_at INTEGER,
 			price_at_creation   REAL,
+			payer_principal_id  TEXT,
 			created_at          INTEGER NOT NULL
 		);
 		CREATE TABLE listings (
-			id                 TEXT PRIMARY KEY,
-			city               TEXT NOT NULL DEFAULT 'tbilisi',
-			dependency_type    TEXT NOT NULL DEFAULT 'alcohol',
-			help_type          TEXT NOT NULL DEFAULT 'crisis',
-			urgency            TEXT NOT NULL DEFAULT 'urgent',
-			languages          TEXT NOT NULL DEFAULT 'en',
-			wallet_hash        TEXT NOT NULL DEFAULT 'test-hash',
-			visible_until      INTEGER NOT NULL DEFAULT 0,
-			created_at         INTEGER NOT NULL DEFAULT 0,
-			status             TEXT NOT NULL DEFAULT 'pending',
-			opened_chats_count INTEGER NOT NULL DEFAULT 0
+			id                   TEXT PRIMARY KEY,
+			city                 TEXT NOT NULL DEFAULT 'tbilisi',
+			dependency_type      TEXT NOT NULL DEFAULT 'alcohol',
+			help_type            TEXT NOT NULL DEFAULT 'crisis',
+			urgency              TEXT NOT NULL DEFAULT 'urgent',
+			languages            TEXT NOT NULL DEFAULT 'en',
+			wallet_hash          TEXT NOT NULL DEFAULT 'test-hash',
+			visible_until        INTEGER NOT NULL DEFAULT 0,
+			created_at           INTEGER NOT NULL DEFAULT 0,
+			status               TEXT NOT NULL DEFAULT 'pending',
+			opened_chats_count   INTEGER NOT NULL DEFAULT 0,
+			owner_principal_id   TEXT
 		);
 		CREATE TABLE responses (
-			id               TEXT PRIMARY KEY,
-			listing_id       TEXT NOT NULL,
-			counselor_hash   TEXT NOT NULL,
-			counselor_pubkey TEXT NOT NULL DEFAULT '',
-			status           TEXT NOT NULL DEFAULT 'pending'
+			id                      TEXT PRIMARY KEY,
+			listing_id              TEXT NOT NULL,
+			counselor_hash          TEXT NOT NULL,
+			counselor_pubkey        TEXT NOT NULL DEFAULT '',
+			status                  TEXT NOT NULL DEFAULT 'pending',
+			counselor_principal_id  TEXT
 		);
 		CREATE TABLE chat_rooms (
-			id               TEXT PRIMARY KEY,
-			listing_id       TEXT NOT NULL,
-			response_id      TEXT NOT NULL,
-			client_hash      TEXT NOT NULL,
-			counselor_hash   TEXT NOT NULL,
-			client_pubkey    TEXT NOT NULL DEFAULT '',
-			counselor_pubkey TEXT NOT NULL DEFAULT '',
-			started_at       INTEGER NOT NULL DEFAULT 0,
-			expires_at       INTEGER NOT NULL DEFAULT 0,
-			status           TEXT NOT NULL DEFAULT 'active',
-			listing_counted  INTEGER NOT NULL DEFAULT 0
+			id                     TEXT PRIMARY KEY,
+			listing_id             TEXT NOT NULL,
+			response_id            TEXT NOT NULL,
+			client_hash            TEXT NOT NULL,
+			counselor_hash         TEXT NOT NULL,
+			client_pubkey          TEXT NOT NULL DEFAULT '',
+			counselor_pubkey       TEXT NOT NULL DEFAULT '',
+			started_at             INTEGER NOT NULL DEFAULT 0,
+			expires_at             INTEGER NOT NULL DEFAULT 0,
+			status                 TEXT NOT NULL DEFAULT 'active',
+			listing_counted        INTEGER NOT NULL DEFAULT 0,
+			client_principal_id    TEXT,
+			counselor_principal_id TEXT
 		);
 		CREATE TABLE wallet_sessions (
 			wallet_hash      TEXT PRIMARY KEY,
@@ -998,7 +1009,7 @@ func TestAtomicGuard_ThirdRoomImpossible(t *testing.T) {
 		VALUES ('atom-inv-c', 'chat', 'addr', '0', 'BTC', 'counselor-atom-1', 'pending', 'atom-resp-c', 'client-pub-c', ?)`, now)
 
 	iw := &InvoiceWatcher{DB: db, HashKey: []byte(testHashKey), DevMode: true}
-	iw.confirmInvoice("atom-inv-c", "chat", "txid-c", 1000000, "", "atom-resp-c", "client-pub-c", "")
+	iw.confirmInvoice("atom-inv-c", "chat", "txid-c", 1000000, "", "atom-resp-c", "client-pub-c", "", "")
 
 	// No chat room must have been created
 	var roomCount int
@@ -1039,7 +1050,7 @@ func TestSecondPayment_ClosesListingAndRejectsPending(t *testing.T) {
 		VALUES ('atom-inv-b', 'chat', 'addr', '0', 'BTC', 'counselor-atom-2b', 'pending', 'atom-resp-b', 'client-pub-2', ?)`, now)
 
 	iw := &InvoiceWatcher{DB: db, HashKey: []byte(testHashKey), DevMode: true}
-	iw.confirmInvoice("atom-inv-b", "chat", "txid-b", 1000000, "", "atom-resp-b", "client-pub-2", "")
+	iw.confirmInvoice("atom-inv-b", "chat", "txid-b", 1000000, "", "atom-resp-b", "client-pub-2", "", "")
 
 	// Listing must be 'closed'
 	var listingStatus string

@@ -53,7 +53,6 @@ e2e/tests/008_wallet_challenge.js
 e2e/tests/009_session_lifecycle.js
 e2e/tests/010_ws_auth.js
 e2e/tests/011_peer_left_expiry.js
-e2e/tests/012_abuse_report.js
 e2e/tests/013_invoice_scoping.js
 e2e/tests/014_reputation.js
 e2e/tests/015_region_lock.js
@@ -66,7 +65,6 @@ e2e/tests/021_cancel_cooldown.js
 e2e/tests/022_message_ttl.js
 e2e/tests/023_wallet_session_ttl.js
 e2e/tests/024_log_privacy.js
-e2e/tests/025_abuse_ban.js
 e2e/tests/026_analytics_privacy.js
 e2e/tests/027_challenge_replay.js
 e2e/tests/028_payment_edge_cases.js
@@ -120,7 +118,6 @@ internal/crypto/verify_test.go
 internal/db/db.go
 internal/db/schema.sql
 internal/db/seed.go
-internal/handler/abuse.go
 internal/handler/accept.go
 internal/handler/balance.go
 internal/handler/board.go
@@ -392,7 +389,6 @@ func main() {
 	rlRespond       := middleware.NewRateLimiter(3.0/60, 3)    // 3/min/IP
 	rlBoard         := middleware.NewRateLimiter(1.0, 60)      // 60/min/IP
 	rlInvoice       := middleware.NewRateLimiter(30.0/60, 30)  // 30/min/IP
-	rlAbuse         := middleware.NewRateLimiter(5.0/3600, 5)  // 5/hour/IP
 	rlGeneral       := middleware.NewRateLimiter(30.0/60, 30)  // 30/min/IP — всё остальное
 
 	// In dev mode: bypass all rate limits so E2E tests aren't throttled.
@@ -435,7 +431,6 @@ func main() {
 	r.With(requireSession, middleware.LimitBody(64*1024), rlGeneral.Limit(rateFn)).Post("/chat/{room_id}/close", h.CloseChat)
 	// Review: auth via review_token (one-time anonymous token), no session required
 	r.With(middleware.LimitBody(64*1024), rlGeneral.Limit(rateFn)).Post("/review", h.Review)
-	r.With(requireSession, middleware.LimitBody(64*1024), rlAbuse.Limit(rateFn)).Post("/abuse-report", h.AbuseReport)
 
 	// Session management
 	r.With(middleware.LimitBody(64*1024), rlGeneral.Limit(rateFn)).Post("/session/refresh", h.SessionRefresh)
@@ -4113,136 +4108,6 @@ func (h *Handler) Review(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-### internal/handler/abuse.go
-```go
-package handler
-
-import (
-	"database/sql"
-	"net/http"
-	"time"
-
-	"naroom/internal/crypto"
-	"naroom/internal/middleware"
-)
-
-type abuseReportReq struct {
-	RoomID     string   `json:"room_id"`
-	Categories []string `json:"categories"` // misuse, threatening, drugs, links, other
-}
-
-var validAbuseCategories = map[string]bool{
-	"misuse": true, "threatening": true, "drugs": true, "links": true, "other": true,
-}
-
-// AbuseReport handles POST /abuse-report — counselor (peer) reports a client.
-// Counselor identity is resolved from session. room_id proves participation.
-func (h *Handler) AbuseReport(w http.ResponseWriter, r *http.Request) {
-	counselorHash := middleware.SessionWalletHash(r.Context())
-	if counselorHash == "" {
-		writeError(w, 401, "session required")
-		return
-	}
-	role := middleware.SessionRole(r.Context())
-	if role != "peer" {
-		writeError(w, 403, "only peers can submit abuse reports")
-		return
-	}
-
-	var req abuseReportReq
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, 400, "invalid json")
-		return
-	}
-	if req.RoomID == "" || len(req.Categories) == 0 {
-		writeError(w, 400, "room_id and categories required")
-		return
-	}
-
-	for _, cat := range req.Categories {
-		if !validAbuseCategories[cat] {
-			writeError(w, 400, "invalid category: "+cat)
-			return
-		}
-	}
-
-	// Verify counselor participated in this room and retrieve stored client_hash.
-	var clientHash string
-	err := h.DB.QueryRow(`
-		SELECT client_hash FROM chat_rooms
-		WHERE id = ? AND counselor_hash = ?
-	`, req.RoomID, counselorHash).Scan(&clientHash)
-	if err == sql.ErrNoRows {
-		writeError(w, 403, "you are not a participant in this room")
-		return
-	}
-	if err != nil {
-		writeError(w, 500, "db error")
-		return
-	}
-	pairHash := crypto.Hash(counselorHash, clientHash)
-
-	// Check dedup — one counselor can report one client only once per room
-	var dedupCount int
-	h.DB.QueryRow(`SELECT COUNT(*) FROM abuse_dedup WHERE pair_hash = ?`, pairHash).Scan(&dedupCount)
-	if dedupCount > 0 {
-		writeError(w, 409, "already reported this client")
-		return
-	}
-
-	now := time.Now().Unix()
-	dedupExpires := now + 30*24*3600 // 30 days
-
-	tx, err := h.DB.Begin()
-	if err != nil {
-		writeError(w, 500, "db error")
-		return
-	}
-	defer tx.Rollback()
-
-	// Insert dedup record
-	tx.Exec(`INSERT INTO abuse_dedup (pair_hash, created_at, expires_at) VALUES (?, ?, ?)`,
-		pairHash, now, dedupExpires)
-
-	// Upsert abuse counters
-	tx.Exec(`INSERT OR IGNORE INTO abuse_counters (client_hash) VALUES (?)`, clientHash)
-
-	for _, cat := range req.Categories {
-		switch cat {
-		case "misuse":
-			tx.Exec(`UPDATE abuse_counters SET abuse_misuse = abuse_misuse + 1, total = total + 1 WHERE client_hash = ?`, clientHash)
-		case "threatening":
-			tx.Exec(`UPDATE abuse_counters SET abuse_threatening = abuse_threatening + 1, total = total + 1 WHERE client_hash = ?`, clientHash)
-		case "drugs":
-			tx.Exec(`UPDATE abuse_counters SET abuse_drugs = abuse_drugs + 1, total = total + 1 WHERE client_hash = ?`, clientHash)
-		case "links":
-			tx.Exec(`UPDATE abuse_counters SET abuse_links = abuse_links + 1, total = total + 1 WHERE client_hash = ?`, clientHash)
-		case "other":
-			tx.Exec(`UPDATE abuse_counters SET abuse_other = abuse_other + 1, total = total + 1 WHERE client_hash = ?`, clientHash)
-		}
-	}
-
-	// Check thresholds
-	var total int
-	tx.QueryRow(`SELECT total FROM abuse_counters WHERE client_hash = ?`, clientHash).Scan(&total)
-
-	if total >= 5 {
-		// Permanent ban (far future)
-		tx.Exec(`UPDATE abuse_counters SET banned_until = ? WHERE client_hash = ?`, now+10*365*24*3600, clientHash)
-	} else if total >= 3 {
-		// 72h ban
-		tx.Exec(`UPDATE abuse_counters SET banned_until = ? WHERE client_hash = ?`, now+259200, clientHash)
-	}
-
-	if err := tx.Commit(); err != nil {
-		writeError(w, 500, "db error")
-		return
-	}
-
-	writeJSON(w, 200, map[string]string{"status": "reported"})
-}
-```
-
 ### internal/handler/renew.go
 ```go
 package handler
@@ -5411,10 +5276,6 @@ export class ApiClient {
 
   async invoiceStatus(invoiceId, wallet) {
     return this.get(`/invoice/${invoiceId}/status`, wallet);
-  }
-
-  async abuseReport(roomId, categories, peerWallet) {
-    return this.post('/abuse-report', { room_id: roomId, categories }, peerWallet);
   }
 }
 ```
@@ -7979,7 +7840,6 @@ CREATE UNIQUE INDEX idx_helper_subs_active_chat
   [0;32m✓[0m 009_session_lifecycle
   [0;32m✓[0m 010_ws_auth
   [0;32m✓[0m 011_peer_left_expiry
-  [0;32m✓[0m 012_abuse_report
   [0;32m✓[0m 013_invoice_scoping
   [0;32m✓[0m 014_reputation
   [0;32m✓[0m 015_region_lock
@@ -7992,7 +7852,6 @@ CREATE UNIQUE INDEX idx_helper_subs_active_chat
   [0;32m✓[0m 022_message_ttl
   [0;32m✓[0m 023_wallet_session_ttl
   [0;32m✓[0m 024_log_privacy
-  [0;32m✓[0m 025_abuse_ban
   [0;31m✗[0m 027_challenge_replay
     node:internal/modules/esm/resolve:271
         throw new ERR_MODULE_NOT_FOUND(
@@ -8183,7 +8042,6 @@ CREATE UNIQUE INDEX idx_helper_subs_active_chat
 168:	r.With(requireSession, rlGeneral.Limit(rateFn)).Get("/chat/poll/receive", h.ChatPollReceive)
 169:	r.With(requireSession, middleware.LimitBody(64*1024), rlGeneral.Limit(rateFn)).Post("/chat/{room_id}/close", h.CloseChat)
 171:	r.With(middleware.LimitBody(64*1024), rlGeneral.Limit(rateFn)).Post("/review", h.Review)
-172:	r.With(requireSession, middleware.LimitBody(64*1024), rlAbuse.Limit(rateFn)).Post("/abuse-report", h.AbuseReport)
 175:	r.With(middleware.LimitBody(64*1024), rlGeneral.Limit(rateFn)).Post("/session/refresh", h.SessionRefresh)
 176:	r.With(requireSession, middleware.LimitBody(64*1024)).Post("/session/revoke", h.SessionRevoke)
 180:	r.With(requireSession, middleware.LimitBody(4*1024), rlGeneral.Limit(rateFn)).Post("/telegram/helper/token", h.TelegramHelperToken)

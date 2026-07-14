@@ -62,19 +62,30 @@ func (h *Handler) TelegramClientToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	walletHash := middleware.SessionWalletHash(r.Context())
+	principalID := middleware.SessionPrincipalID(r.Context())
 	if walletHash == "" {
 		writeError(w, 401, "session required")
 		return
 	}
+	// Strict authorization: owner_principal_id only, no wallet_hash fallback.
+	if principalID == "" {
+		writeError(w, 401, "session requires /session/init")
+		return
+	}
 
-	// Verify listing ownership
-	var ownerHash, status string
-	if err := h.DB.QueryRow(`SELECT wallet_hash, status FROM listings WHERE id = ?`,
-		req.ListingID).Scan(&ownerHash, &status); err != nil {
+	// Verify listing ownership: owner_principal_id only
+	var status string
+	var ownerPrincipalID sql.NullString
+	if err := h.DB.QueryRow(`SELECT owner_principal_id, status FROM listings WHERE id = ?`,
+		req.ListingID).Scan(&ownerPrincipalID, &status); err != nil {
 		writeError(w, 404, "listing not found")
 		return
 	}
-	if ownerHash != walletHash {
+	if !ownerPrincipalID.Valid || ownerPrincipalID.String == "" {
+		writeError(w, 403, "session upgrade required")
+		return
+	}
+	if ownerPrincipalID.String != principalID {
 		writeError(w, 403, "not your listing")
 		return
 	}

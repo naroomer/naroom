@@ -194,6 +194,18 @@ CREATE TABLE IF NOT EXISTS invoice_index (
     next_index INTEGER DEFAULT 0
 );
 
+-- Stable principal identity, decoupled from wallet address.
+-- wallet_hash here is the billing wallet (nullable until first payment).
+CREATE TABLE IF NOT EXISTS principals (
+    id            TEXT PRIMARY KEY,      -- random 256-bit opaque identifier
+    recovery_hash TEXT NOT NULL UNIQUE,  -- HMAC(HASH_KEY, raw_recovery_code); raw code never stored
+    wallet_hash   TEXT,                  -- billing wallet_hash (set/updated after wallet registration)
+    currency      TEXT,                  -- BTC or LTC (billing currency)
+    role          TEXT NOT NULL,         -- client or peer
+    created_at    INTEGER NOT NULL,
+    last_seen     INTEGER
+);
+
 -- Authenticated sessions (issued after wallet signature verification)
 -- wallet_address is NOT stored here — only wallet_hash (HMAC-SHA256 of address).
 -- Plain wallet address lives only in wallet_sessions (needed for blockchain API calls).

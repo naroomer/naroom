@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -113,20 +114,29 @@ func (h *Handler) GetListing(w http.ResponseWriter, r *http.Request) {
 // Returns pending responses only to the listing owner (identified by session).
 func (h *Handler) GetListingResponses(w http.ResponseWriter, r *http.Request) {
 	listingID := chi.URLParam(r, "id")
-	walletHash := middleware.SessionWalletHash(r.Context())
-	if listingID == "" || walletHash == "" {
+	if listingID == "" {
 		writeError(w, 400, "listing id required")
 		return
 	}
 
-	// Verify ownership via hash
-	var ownerHash string
-	err := h.DB.QueryRow(`SELECT wallet_hash FROM listings WHERE id = ?`, listingID).Scan(&ownerHash)
+	// Strict authorization: principal_id only, no wallet_hash fallback.
+	principalID := middleware.SessionPrincipalID(r.Context())
+	if principalID == "" {
+		writeError(w, 401, "session requires /session/init")
+		return
+	}
+
+	var ownerPrincipalID sql.NullString
+	err := h.DB.QueryRow(`SELECT owner_principal_id FROM listings WHERE id = ?`, listingID).Scan(&ownerPrincipalID)
 	if err != nil {
 		writeError(w, 404, "listing not found")
 		return
 	}
-	if ownerHash != walletHash {
+	if !ownerPrincipalID.Valid || ownerPrincipalID.String == "" {
+		writeError(w, 403, "session upgrade required")
+		return
+	}
+	if ownerPrincipalID.String != principalID {
 		writeError(w, 403, "not your listing")
 		return
 	}
@@ -208,19 +218,26 @@ func (h *Handler) GetListingResponses(w http.ResponseWriter, r *http.Request) {
 // Returns active chat room for this listing if one exists (session identifies client).
 func (h *Handler) GetListingChatRoom(w http.ResponseWriter, r *http.Request) {
 	listingID := chi.URLParam(r, "id")
-	walletHash := middleware.SessionWalletHash(r.Context())
-	if listingID == "" || walletHash == "" {
+	if listingID == "" {
 		writeError(w, 400, "listing id required")
+		return
+	}
+
+	// Strict authorization: client_principal_id only, no wallet_hash fallback.
+	principalID := middleware.SessionPrincipalID(r.Context())
+	if principalID == "" {
+		writeError(w, 401, "session requires /session/init")
 		return
 	}
 
 	var roomID, status string
 	var expiresAt int64
+
 	err := h.DB.QueryRow(`
 		SELECT id, status, expires_at FROM chat_rooms
-		WHERE listing_id = ? AND client_hash = ? AND status = 'active'
+		WHERE listing_id = ? AND client_principal_id = ? AND status = 'active'
 		ORDER BY started_at DESC LIMIT 1
-	`, listingID, walletHash).Scan(&roomID, &status, &expiresAt)
+	`, listingID, principalID).Scan(&roomID, &status, &expiresAt)
 	if err != nil {
 		writeError(w, 404, "no active chat room")
 		return
@@ -246,6 +263,11 @@ func (h *Handler) CreateListing(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 401, "session required")
 		return
 	}
+	if role := middleware.SessionRole(r.Context()); role != "client" {
+		writeError(w, 403, "only clients can create listings")
+		return
+	}
+	principalID := middleware.SessionPrincipalID(r.Context())
 
 	// Validate fields
 	if req.City == "" {
@@ -288,19 +310,31 @@ func (h *Handler) CreateListing(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Idempotency: if wallet already has a pending listing with an unpaid invoice
+	// Idempotency: if principal already has a pending listing with an unpaid invoice
 	// created within the last hour, return that same invoice instead of creating a new one.
 	// This handles rapid double-clicks and page refreshes gracefully.
 	var existingInvoiceID, existingAddr, existingCrypto, existingCurrency, existingListingID string
 	var existingUSD float64
-	idempErr := h.DB.QueryRow(`
-		SELECT i.id, i.address, i.amount_usd, i.amount_crypto, i.currency, l.id
-		FROM invoices i
-		JOIN listings l ON l.id = i.listing_id
-		WHERE l.wallet_hash = ? AND l.status = 'pending' AND i.status = 'pending'
-		  AND l.created_at > strftime('%s','now') - 3600
-		ORDER BY l.created_at DESC LIMIT 1
-	`, walletHash).Scan(&existingInvoiceID, &existingAddr, &existingUSD, &existingCrypto, &existingCurrency, &existingListingID)
+	var idempErr error
+	if principalID != "" {
+		idempErr = h.DB.QueryRow(`
+			SELECT i.id, i.address, i.amount_usd, i.amount_crypto, i.currency, l.id
+			FROM invoices i
+			JOIN listings l ON l.id = i.listing_id
+			WHERE l.owner_principal_id = ? AND l.status = 'pending' AND i.status = 'pending'
+			  AND l.created_at > strftime('%s','now') - 3600
+			ORDER BY l.created_at DESC LIMIT 1
+		`, principalID).Scan(&existingInvoiceID, &existingAddr, &existingUSD, &existingCrypto, &existingCurrency, &existingListingID)
+	} else {
+		idempErr = h.DB.QueryRow(`
+			SELECT i.id, i.address, i.amount_usd, i.amount_crypto, i.currency, l.id
+			FROM invoices i
+			JOIN listings l ON l.id = i.listing_id
+			WHERE l.wallet_hash = ? AND l.status = 'pending' AND i.status = 'pending'
+			  AND l.created_at > strftime('%s','now') - 3600
+			ORDER BY l.created_at DESC LIMIT 1
+		`, walletHash).Scan(&existingInvoiceID, &existingAddr, &existingUSD, &existingCrypto, &existingCurrency, &existingListingID)
+	}
 	if idempErr == nil {
 		// Return existing invoice — same address, same amount, no new records created.
 		writeJSON(w, 200, map[string]any{
@@ -314,13 +348,21 @@ func (h *Handler) CreateListing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check no active listing from this wallet (excluding listings that already have a chat).
+	// Check no active listing from this principal/wallet (excluding listings that already have a chat).
 	var activeCount int
-	h.DB.QueryRow(`
-		SELECT COUNT(*) FROM listings
-		WHERE wallet_hash = ? AND status = 'active'
-		AND NOT EXISTS (SELECT 1 FROM chat_rooms cr WHERE cr.listing_id = listings.id AND cr.status = 'active')
-	`, walletHash).Scan(&activeCount)
+	if principalID != "" {
+		h.DB.QueryRow(`
+			SELECT COUNT(*) FROM listings
+			WHERE owner_principal_id = ? AND status = 'active'
+			AND NOT EXISTS (SELECT 1 FROM chat_rooms cr WHERE cr.listing_id = listings.id AND cr.status = 'active')
+		`, principalID).Scan(&activeCount)
+	} else {
+		h.DB.QueryRow(`
+			SELECT COUNT(*) FROM listings
+			WHERE wallet_hash = ? AND status = 'active'
+			AND NOT EXISTS (SELECT 1 FROM chat_rooms cr WHERE cr.listing_id = listings.id AND cr.status = 'active')
+		`, walletHash).Scan(&activeCount)
+	}
 	if activeCount > 0 {
 		writeError(w, 409, "already have active listing")
 		return
@@ -389,22 +431,30 @@ func (h *Handler) CreateListing(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback()
 
 	// Insert listing (pending until payment confirmed) — store hash, not plain address
+	var nullOwnerPrincipal sql.NullString
+	if principalID != "" {
+		nullOwnerPrincipal = sql.NullString{String: principalID, Valid: true}
+	}
 	_, err = tx.Exec(`
 		INSERT INTO listings (id, city, dependency_type, help_type, urgency, languages,
-		                      wallet_hash, visible_until, created_at, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+		                      wallet_hash, owner_principal_id, visible_until, created_at, status)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
 	`, listingID, req.City, req.DependencyType, req.HelpType, req.Urgency,
-		string(langsJSON), walletHash, 0, now)
+		string(langsJSON), walletHash, nullOwnerPrincipal, 0, now)
 	if err != nil {
 		writeError(w, 500, "db error")
 		return
 	}
 
 	// Insert invoice — payer_address column stores a hash, never plain address
+	var nullPayerPrincipal sql.NullString
+	if principalID != "" {
+		nullPayerPrincipal = sql.NullString{String: principalID, Valid: true}
+	}
 	_, err = tx.Exec(`
-		INSERT INTO invoices (id, type, address, amount_usd, amount_crypto, currency, listing_id, payer_address, price_at_creation, status, created_at)
-		VALUES (?, 'listing', ?, 5.0, ?, ?, ?, ?, ?, 'pending', ?)
-	`, invoiceID, invoiceAddr, amountCrypto, req.Currency, listingID, payerHash, priceAtCreation, now)
+		INSERT INTO invoices (id, type, address, amount_usd, amount_crypto, currency, listing_id, payer_address, payer_principal_id, price_at_creation, status, created_at)
+		VALUES (?, 'listing', ?, 5.0, ?, ?, ?, ?, ?, ?, 'pending', ?)
+	`, invoiceID, invoiceAddr, amountCrypto, req.Currency, listingID, payerHash, nullPayerPrincipal, priceAtCreation, now)
 	if err != nil {
 		writeError(w, 500, "db error")
 		return

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"database/sql"
 	"net/http"
 	"strings"
 	"time"
@@ -22,17 +23,23 @@ func (h *Handler) SessionRefresh(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().Unix()
 
 	var walletHash, role, currency string
+	var principalIDNull sql.NullString
 	err := h.DB.QueryRow(`
-		SELECT wallet_hash, role, currency FROM sessions
+		SELECT wallet_hash, role, currency, principal_id FROM sessions
 		WHERE token_hash = ? AND expires_at > ? AND revoked_at IS NULL
-	`, oldHash, now).Scan(&walletHash, &role, &currency)
+	`, oldHash, now).Scan(&walletHash, &role, &currency, &principalIDNull)
 	if err != nil {
 		writeError(w, 401, "invalid or expired session")
 		return
 	}
 
+	principalID := ""
+	if principalIDNull.Valid {
+		principalID = principalIDNull.String
+	}
+
 	// Issue new token
-	newToken, err := h.issueSession(walletHash, role, currency)
+	newToken, err := h.issueSession(principalID, walletHash, role, currency)
 	if err != nil {
 		writeError(w, 500, "session creation failed")
 		return

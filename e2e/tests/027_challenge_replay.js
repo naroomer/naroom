@@ -13,8 +13,8 @@
 //   The full payment-sender verification model is covered by 035_payment_verification.js.
 //
 // This test verifies three concrete behaviors of the trust model:
-//   T1: /wallet/register succeeds with a known-balance wallet — issues session token (balance pre-check only)
-//   T2: A second wallet can register with the same address — proves no ownership assertion at register time
+//   T1: /session/init + /wallet/register succeed — session obtained, wallet linked (balance pre-check only)
+//   T2: A peer wallet can also register — proves no ownership assertion at register time
 //   T3: A session obtained via /wallet/register (no payment) cannot open a chat room
 //       (same invariant as IN-0; here tested purely via HTTP, without the chain stub machinery of 035)
 
@@ -50,35 +50,39 @@ export async function run() {
     await srv.start();
     const api = new ApiClient(srv.base);
 
-    // ── T1: /wallet/register issues a session token (balance pre-check only) ──
-    await t.run('T1: /wallet/register returns session_token (balance pre-check, no signature)', async () => {
+    // ── T1: /session/init + /wallet/register flow (balance pre-check only) ──
+    await t.run('T1: /session/init returns session_token; /wallet/register links wallet (no signature)', async () => {
       const r = await api.verifyWallet(CLIENT_WALLET, 'BTC', 'client');
       if (r.status !== 200) {
         throw new Error(`Expected 200, got ${r.status}: ${JSON.stringify(r.body)}`);
       }
-      if (!r.body.session_token || typeof r.body.session_token !== 'string') {
-        throw new Error(`Expected session_token string, got: ${JSON.stringify(r.body)}`);
+      if (!r.body.wallet_linked) {
+        throw new Error(`Expected wallet_linked: true, got: ${JSON.stringify(r.body)}`);
       }
-      // Confirm: no challenge or signature field returned — registration is purely balance-based
+      // Confirm: no challenge or signature field — registration is purely balance-based
       if (r.body.challenge || r.body.nonce || r.body.sign_message) {
         throw new Error(
           `FAIL: register response contains unexpected challenge field — ` +
           `architecture does not use challenge-signature: ${JSON.stringify(r.body)}`
         );
       }
+      // session_token is obtained from /session/init, NOT /wallet/register
+      if (r.body.session_token) {
+        throw new Error(`/wallet/register must NOT return session_token — use /session/init instead`);
+      }
     });
 
-    // ── T2: /wallet/register for peer wallet — proves ownership is not asserted ──
-    await t.run('T2: peer /wallet/register succeeds; no ownership assertion, no signature required', async () => {
+    // ── T2: peer /wallet/register — proves ownership is not asserted ──
+    await t.run('T2: peer /session/init + /wallet/register succeeds; no ownership assertion, no signature required', async () => {
       const r = await api.verifyWallet(PEER_WALLET, 'BTC', 'peer');
       if (r.status !== 200) {
         throw new Error(`Expected 200, got ${r.status}: ${JSON.stringify(r.body)}`);
       }
-      if (!r.body.session_token) {
-        throw new Error(`No session_token in response: ${JSON.stringify(r.body)}`);
+      if (!r.body.wallet_linked) {
+        throw new Error(`Expected wallet_linked: true, got: ${JSON.stringify(r.body)}`);
       }
-      // The trust model note: issuing a session proves balance exists at registration time,
-      // NOT that the caller controls the private key. Control is proven at payment time.
+      // The trust model note: balance is pre-checked at registration time,
+      // but wallet control is proven at payment time (on-chain sender verification).
     });
 
     // ── T3: Session from /wallet/register (no payment) cannot open a chat room ──

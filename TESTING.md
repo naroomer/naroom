@@ -73,7 +73,6 @@ Each test file is a standalone module that boots its own server instance. Tests 
 | `009_session_lifecycle.js` | Session token issue, authenticate, refresh (old token becomes 401), revoke (revoked token becomes 401) |
 | `010_ws_auth.js` | WebSocket auth via `Sec-WebSocket-Protocol` header; no token → rejected; invalid token → rejected; URL contains no token |
 | `011_peer_left_expiry.js` | Peer closes WebSocket → room enters `peer_left`; after TTL, room closes and listing is restored to active; no review token issued |
-| `012_abuse_report.js` | Abuse report requires prior chat room participation (403 without); duplicate report from same pair returns 409 |
 | `013_invoice_scoping.js` | Invoice status requires session (401 without); non-owner session returns 403; owner returns 200 |
 | `014_reputation.js` | Fresh peer reputation row has `sessions_completed=0`; completed session increments it; board shows peer with region and stats; thumbs up/down recorded |
 | `015_region_lock.js` | Peer responds in tbilisi → region locked; subsequent response attempt in batumi returns 403 with `locked_region=tbilisi` |
@@ -86,7 +85,6 @@ Each test file is a standalone module that boots its own server instance. Tests 
 | `022_message_ttl.js` | TTL worker deletes encrypted messages older than 24 hours from the database |
 | `023_wallet_session_ttl.js` | `wallet_sessions` row is pruned when all auth sessions for that wallet have expired |
 | `024_log_privacy.js` | Server log output during a full flow contains no raw IP address, wallet address, or session token |
-| `025_abuse_ban.js` | Three abuse reports against a client sets `banned_until = now + 72h`; five reports sets a long-term ban |
 | `026_analytics_privacy.js` | **(Playwright)** Browser-level check that analytics (GoatCounter) does not load on private pages (`/new`, `/helper`, `/chat/*`, `/listing/*`) |
 | `043_browser_renewal.js` | **(Playwright)** Browser-level renewal flow: expired listing page shows wallet auth form; wrong wallet cannot unlock renewal; correct owner wallet → renew button visible → click → success UI; renewed listing appears on board; listing with >1h left does not show renew button |
 | `027_challenge_replay.js` | Wallet trust model: balance pre-check only at register; payment-time sender verification is the ownership proof; `/wallet/challenge` absent by design |

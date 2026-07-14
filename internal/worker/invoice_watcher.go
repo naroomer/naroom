@@ -72,7 +72,7 @@ func (iw *InvoiceWatcher) Run(ctx context.Context) {
 
 func (iw *InvoiceWatcher) watch(ctx context.Context) {
 	rows, err := iw.DB.Query(`
-		SELECT id, type, address, amount_crypto, currency, listing_id, response_id, client_pubkey, payer_address, created_at, payment_detected_at, price_at_creation
+		SELECT id, type, address, amount_crypto, currency, listing_id, response_id, client_pubkey, payer_address, payer_principal_id, created_at, payment_detected_at, price_at_creation
 		FROM invoices
 		WHERE status = 'pending'
 	`)
@@ -83,18 +83,19 @@ func (iw *InvoiceWatcher) watch(ctx context.Context) {
 	defer rows.Close()
 
 	type invoice struct {
-		id                string
-		typ               string
-		address           string
-		amountCrypto      string
-		currency          string
-		listingID         sql.NullString
-		responseID        sql.NullString
-		clientPubkey      sql.NullString
-		payerAddress      sql.NullString
-		createdAt         int64
-		paymentDetectedAt sql.NullInt64
-		priceAtCreation   sql.NullFloat64
+		id                 string
+		typ                string
+		address            string
+		amountCrypto       string
+		currency           string
+		listingID          sql.NullString
+		responseID         sql.NullString
+		clientPubkey       sql.NullString
+		payerAddress       sql.NullString
+		payerPrincipalID   sql.NullString
+		createdAt          int64
+		paymentDetectedAt  sql.NullInt64
+		priceAtCreation    sql.NullFloat64
 	}
 
 	var invoices []invoice
@@ -102,7 +103,7 @@ func (iw *InvoiceWatcher) watch(ctx context.Context) {
 		var inv invoice
 		if err := rows.Scan(&inv.id, &inv.typ, &inv.address, &inv.amountCrypto,
 			&inv.currency, &inv.listingID, &inv.responseID, &inv.clientPubkey, &inv.payerAddress,
-			&inv.createdAt, &inv.paymentDetectedAt, &inv.priceAtCreation); err != nil {
+			&inv.payerPrincipalID, &inv.createdAt, &inv.paymentDetectedAt, &inv.priceAtCreation); err != nil {
 			continue
 		}
 		invoices = append(invoices, inv)
@@ -141,7 +142,7 @@ func (iw *InvoiceWatcher) watch(ctx context.Context) {
 		// Dev mode or SkipPayments: автоматически подтверждаем все pending invoices
 		if iw.DevMode || iw.SkipPayments {
 			iw.confirmInvoice(inv.id, inv.typ, "dev_txid_"+inv.id, 1000000,
-				inv.listingID.String, inv.responseID.String, inv.clientPubkey.String, "")
+				inv.listingID.String, inv.responseID.String, inv.clientPubkey.String, "", inv.payerPrincipalID.String)
 			continue
 		}
 
@@ -172,7 +173,7 @@ func (iw *InvoiceWatcher) watch(ctx context.Context) {
 					continue
 				}
 				iw.confirmInvoice(inv.id, inv.typ, tx.TxID, amount,
-					inv.listingID.String, inv.responseID.String, inv.clientPubkey.String, senderHash)
+					inv.listingID.String, inv.responseID.String, inv.clientPubkey.String, senderHash, inv.payerPrincipalID.String)
 			}
 		} else {
 			tx, amount, senders, err := iw.Blockcypher.FindPayment(inv.address, minRequired)
@@ -190,7 +191,7 @@ func (iw *InvoiceWatcher) watch(ctx context.Context) {
 					continue
 				}
 				iw.confirmInvoice(inv.id, inv.typ, tx.Hash, amount,
-					inv.listingID.String, inv.responseID.String, inv.clientPubkey.String, senderHash)
+					inv.listingID.String, inv.responseID.String, inv.clientPubkey.String, senderHash, inv.payerPrincipalID.String)
 			}
 		}
 	}
@@ -207,7 +208,7 @@ func satoshisFromCryptoStr(s string) int64 {
 }
 
 func (iw *InvoiceWatcher) confirmInvoice(invoiceID, typ, txid string, amount int64,
-	listingID, responseID, clientPubkey string, senderHash string) {
+	listingID, responseID, clientPubkey string, senderHash string, payerPrincipalID string) {
 
 	// Fetch expected amount and currency before confirming.
 	var amountCrypto, currency string
@@ -262,6 +263,31 @@ func (iw *InvoiceWatcher) confirmInvoice(invoiceID, typ, txid string, amount int
 		if listingID == "" {
 			log.Printf("invoice_watcher: listing invoice %s has no listing_id", invoiceID)
 			return
+		}
+		// If senderHash differs from current principal billing wallet, rebind both principal and active sessions.
+		if senderHash != "" && payerPrincipalID != "" {
+			var currentHash sql.NullString
+			if scanErr := tx.QueryRow(`SELECT wallet_hash FROM principals WHERE id = ?`, payerPrincipalID).Scan(&currentHash); scanErr != nil {
+				log.Printf("invoice_watcher: fetch principal %s for rebind check: %v", payerPrincipalID, scanErr)
+				return
+			}
+			if !currentHash.Valid || currentHash.String != senderHash {
+				if _, rebindErr := tx.Exec(`UPDATE principals SET wallet_hash = ?, currency = ? WHERE id = ?`,
+					senderHash, currency, payerPrincipalID); rebindErr != nil {
+					log.Printf("invoice_watcher: rebind principal %s: %v", payerPrincipalID, rebindErr)
+					return
+				}
+				sessRes, sessErr := tx.Exec(`UPDATE sessions SET wallet_hash = ? WHERE principal_id = ? AND revoked_at IS NULL AND expires_at > ?`,
+					senderHash, payerPrincipalID, now)
+				if sessErr != nil {
+					log.Printf("invoice_watcher: rebind sessions for principal %s: %v", payerPrincipalID, sessErr)
+					return
+				}
+				if n, _ := sessRes.RowsAffected(); n == 0 {
+					log.Printf("invoice_watcher: rebind sessions for principal %s: no active sessions updated", payerPrincipalID)
+				}
+				log.Printf("invoice_watcher: rebound principal %s billing wallet → %s", payerPrincipalID, senderHash[:8])
+			}
 		}
 		// Activate on payment alone — Telegram is notifications only, not a gate.
 		{
@@ -342,10 +368,11 @@ func (iw *InvoiceWatcher) confirmInvoice(invoiceID, typ, txid string, amount int
 
 		// Получить данные из response — counselor_hash уже хранится хешем
 		var listingIDFromResp, counselorHash, counselorPubkey string
+		var counselorPrincipalIDNull sql.NullString
 		err = tx.QueryRow(`
-			SELECT listing_id, counselor_hash, counselor_pubkey
+			SELECT listing_id, counselor_hash, counselor_pubkey, counselor_principal_id
 			FROM responses WHERE id = ?
-		`, responseID).Scan(&listingIDFromResp, &counselorHash, &counselorPubkey)
+		`, responseID).Scan(&listingIDFromResp, &counselorHash, &counselorPubkey, &counselorPrincipalIDNull)
 		if err != nil {
 			log.Printf("invoice_watcher: response %s not found: %v", responseID, err)
 			return
@@ -353,15 +380,33 @@ func (iw *InvoiceWatcher) confirmInvoice(invoiceID, typ, txid string, amount int
 
 		// Actual payment sender is the authority for who the counselor is.
 		// If senderHash is set and differs from session wallet, rebind.
+		// Use payerPrincipalID (from invoices.payer_principal_id) as the sole rebind target.
 		counselorHashForRoom := counselorHash
 		if senderHash != "" && senderHash != counselorHash {
 			log.Printf("invoice_watcher: chat invoice %s: rebinding counselor from session wallet to payment sender", invoiceID)
 			counselorHashForRoom = senderHash
+			if payerPrincipalID != "" {
+				if _, rebindErr := tx.Exec(`UPDATE principals SET wallet_hash = ? WHERE id = ?`,
+					senderHash, payerPrincipalID); rebindErr != nil {
+					log.Printf("invoice_watcher: chat rebind principal %s: %v", payerPrincipalID, rebindErr)
+					return
+				}
+				sessRes, sessErr := tx.Exec(`UPDATE sessions SET wallet_hash = ? WHERE principal_id = ? AND revoked_at IS NULL AND expires_at > ?`,
+					senderHash, payerPrincipalID, now)
+				if sessErr != nil {
+					log.Printf("invoice_watcher: chat rebind sessions for principal %s: %v", payerPrincipalID, sessErr)
+					return
+				}
+				if n, _ := sessRes.RowsAffected(); n == 0 {
+					log.Printf("invoice_watcher: chat rebind sessions for principal %s: no active sessions updated", payerPrincipalID)
+				}
+			}
 		}
 
-		// Получить хеш клиента из listing
+		// Получить хеш клиента и principal из listing
 		var clientHash string
-		if err := tx.QueryRow(`SELECT wallet_hash FROM listings WHERE id = ?`, listingIDFromResp).Scan(&clientHash); err != nil {
+		var clientPrincipalIDNull sql.NullString
+		if err := tx.QueryRow(`SELECT wallet_hash, owner_principal_id FROM listings WHERE id = ?`, listingIDFromResp).Scan(&clientHash, &clientPrincipalIDNull); err != nil {
 			log.Printf("invoice_watcher: listing %s not found: %v", listingIDFromResp, err)
 			return
 		}
@@ -408,14 +453,23 @@ func (iw *InvoiceWatcher) confirmInvoice(invoiceID, typ, txid string, amount int
 		if chatTTL == 0 {
 			chatTTL = 86400
 		}
+		var nullClientPrn, nullCounselorPrn sql.NullString
+		if clientPrincipalIDNull.Valid && clientPrincipalIDNull.String != "" {
+			nullClientPrn = clientPrincipalIDNull
+		}
+		if counselorPrincipalIDNull.Valid && counselorPrincipalIDNull.String != "" {
+			nullCounselorPrn = counselorPrincipalIDNull
+		}
 		_, err = tx.Exec(`
 			INSERT INTO chat_rooms (id, listing_id, response_id, client_hash, counselor_hash,
-			                        client_pubkey, counselor_pubkey, started_at, expires_at, status, listing_counted)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 1)
+			                        client_pubkey, counselor_pubkey, started_at, expires_at, status, listing_counted,
+			                        client_principal_id, counselor_principal_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?)
 		`, roomID, listingIDFromResp, responseID,
 			clientHash, counselorHashForRoom,
 			clientPubkey, counselorPubkey,
-			now, now+chatTTL)
+			now, now+chatTTL,
+			nullClientPrn, nullCounselorPrn)
 		if err != nil {
 			log.Printf("invoice_watcher: create chat_room: %v", err)
 			return

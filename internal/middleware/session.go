@@ -18,6 +18,7 @@ const (
 	ctxWalletHash contextKey = iota
 	ctxWalletRole
 	ctxSessionTokenHash
+	ctxPrincipalID
 )
 
 // SessionWalletHash returns the HMAC wallet hash stored in ctx after session validation, or "".
@@ -37,6 +38,13 @@ func SessionRole(ctx context.Context) string {
 // Set by RequireSession for Bearer-token auth; empty in dev-mode wallet-bypass path.
 func SessionTokenHash(ctx context.Context) string {
 	v, _ := ctx.Value(ctxSessionTokenHash).(string)
+	return v
+}
+
+// SessionPrincipalID returns the principal_id stored in ctx, or "".
+// Empty for dev-mode wallet-bypass and for legacy sessions created before principal model.
+func SessionPrincipalID(ctx context.Context) string {
+	v, _ := ctx.Value(ctxPrincipalID).(string)
 	return v
 }
 
@@ -85,13 +93,19 @@ func RequireSession(db *sql.DB, devMode bool, hashKey []byte) func(http.Handler)
 			now := time.Now().Unix()
 
 			var walletHash, role string
+			var principalIDNull sql.NullString
 			err := db.QueryRow(`
-				SELECT wallet_hash, role FROM sessions
+				SELECT wallet_hash, role, principal_id FROM sessions
 				WHERE token_hash = ? AND expires_at > ? AND revoked_at IS NULL
-			`, tokenHash, now).Scan(&walletHash, &role)
+			`, tokenHash, now).Scan(&walletHash, &role, &principalIDNull)
 			if err != nil {
 				http.Error(w, `{"error":"invalid or expired session"}`, http.StatusUnauthorized)
 				return
+			}
+
+			principalID := ""
+			if principalIDNull.Valid {
+				principalID = principalIDNull.String
 			}
 
 			// Update last_seen_at asynchronously (non-critical)
@@ -100,6 +114,7 @@ func RequireSession(db *sql.DB, devMode bool, hashKey []byte) func(http.Handler)
 			ctx := context.WithValue(r.Context(), ctxWalletHash, walletHash)
 			ctx = context.WithValue(ctx, ctxWalletRole, role)
 			ctx = context.WithValue(ctx, ctxSessionTokenHash, tokenHash)
+			ctx = context.WithValue(ctx, ctxPrincipalID, principalID)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

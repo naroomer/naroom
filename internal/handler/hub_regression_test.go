@@ -47,24 +47,27 @@ func openHubTestDB(t *testing.T) *sql.DB {
 	db.SetMaxOpenConns(1)
 	for _, q := range []string{
 		`CREATE TABLE sessions (
-			token_hash TEXT PRIMARY KEY,
-			wallet_hash TEXT NOT NULL,
-			currency TEXT, role TEXT,
-			created_at INTEGER, expires_at INTEGER, revoked_at INTEGER
+			token_hash   TEXT PRIMARY KEY,
+			wallet_hash  TEXT NOT NULL,
+			currency     TEXT, role TEXT,
+			created_at   INTEGER, expires_at INTEGER, revoked_at INTEGER,
+			principal_id TEXT
 		)`,
 		`CREATE TABLE chat_rooms (
-			id TEXT PRIMARY KEY,
-			listing_id TEXT, response_id TEXT,
-			client_hash TEXT NOT NULL,
-			counselor_hash TEXT NOT NULL,
-			client_pubkey TEXT NOT NULL,
-			counselor_pubkey TEXT NOT NULL,
-			started_at INTEGER NOT NULL,
-			expires_at INTEGER NOT NULL,
-			closed_at INTEGER, closed_by TEXT,
-			peer_left_at INTEGER, client_left_at INTEGER,
-			listing_counted INTEGER DEFAULT 0,
-			status TEXT DEFAULT 'active'
+			id                     TEXT PRIMARY KEY,
+			listing_id             TEXT, response_id TEXT,
+			client_hash            TEXT NOT NULL,
+			counselor_hash         TEXT NOT NULL,
+			client_pubkey          TEXT NOT NULL,
+			counselor_pubkey       TEXT NOT NULL,
+			started_at             INTEGER NOT NULL,
+			expires_at             INTEGER NOT NULL,
+			closed_at              INTEGER, closed_by TEXT,
+			peer_left_at           INTEGER, client_left_at INTEGER,
+			listing_counted        INTEGER DEFAULT 0,
+			status                 TEXT DEFAULT 'active',
+			client_principal_id    TEXT,
+			counselor_principal_id TEXT
 		)`,
 		`CREATE TABLE encrypted_messages (
 			id TEXT PRIMARY KEY,
@@ -84,14 +87,16 @@ func openHubTestDB(t *testing.T) *sql.DB {
 }
 
 const (
-	testRoomID       = "room_regression_test"
-	testClientHash   = "clienthash_regression"
-	testHelperHash   = "helperhash_regression"
-	testClientPub    = "clientpubkey_regression"
-	testHelperPub    = "helperpubkey_regression"
-	testClientToken  = "clienttoken_regression_aaa"   // session A (first browser)
-	testClientToken2 = "clienttoken_regression_bbb"   // session B (second browser, same wallet)
-	testHelperToken  = "helpertoken_regression_ccc"
+	testRoomID            = "room_regression_test"
+	testClientHash        = "clienthash_regression"
+	testHelperHash        = "helperhash_regression"
+	testClientPub         = "clientpubkey_regression"
+	testHelperPub         = "helperpubkey_regression"
+	testClientToken       = "clienttoken_regression_aaa"   // session A (first browser)
+	testClientToken2      = "clienttoken_regression_bbb"   // session B (second browser, same wallet)
+	testHelperToken       = "helpertoken_regression_ccc"
+	testClientPrincipalID = "prn_client_regression_0000000000000000000000000000"
+	testHelperPrincipalID = "prn_helper_regression_0000000000000000000000000000"
 )
 
 func seedHubRoom(t *testing.T, db *sql.DB) {
@@ -99,18 +104,20 @@ func seedHubRoom(t *testing.T, db *sql.DB) {
 	now := time.Now().Unix()
 	exp := now + 3600
 	db.Exec(`INSERT INTO chat_rooms
-		(id, client_hash, counselor_hash, client_pubkey, counselor_pubkey, started_at, expires_at, status)
-		VALUES (?,?,?,?,?,?,?,'active')`,
-		testRoomID, testClientHash, testHelperHash, testClientPub, testHelperPub, now, exp)
-	// Session A — first browser
-	db.Exec(`INSERT INTO sessions (token_hash, wallet_hash, role, created_at, expires_at) VALUES (?,?,'client',?,?)`,
-		middleware.HashToken(testClientToken), testClientHash, now, exp)
-	// Session B — second browser (same wallet, different token)
-	db.Exec(`INSERT INTO sessions (token_hash, wallet_hash, role, created_at, expires_at) VALUES (?,?,'client',?,?)`,
-		middleware.HashToken(testClientToken2), testClientHash, now, exp)
+		(id, client_hash, counselor_hash, client_pubkey, counselor_pubkey, started_at, expires_at, status,
+		 client_principal_id, counselor_principal_id)
+		VALUES (?,?,?,?,?,?,?,'active',?,?)`,
+		testRoomID, testClientHash, testHelperHash, testClientPub, testHelperPub, now, exp,
+		testClientPrincipalID, testHelperPrincipalID)
+	// Session A — first browser (includes principal_id)
+	db.Exec(`INSERT INTO sessions (token_hash, wallet_hash, role, created_at, expires_at, principal_id) VALUES (?,?,'client',?,?,?)`,
+		middleware.HashToken(testClientToken), testClientHash, now, exp, testClientPrincipalID)
+	// Session B — second browser (same wallet + same principal, different token)
+	db.Exec(`INSERT INTO sessions (token_hash, wallet_hash, role, created_at, expires_at, principal_id) VALUES (?,?,'client',?,?,?)`,
+		middleware.HashToken(testClientToken2), testClientHash, now, exp, testClientPrincipalID)
 	// Helper session
-	db.Exec(`INSERT INTO sessions (token_hash, wallet_hash, role, created_at, expires_at) VALUES (?,?,'peer',?,?)`,
-		middleware.HashToken(testHelperToken), testHelperHash, now, exp)
+	db.Exec(`INSERT INTO sessions (token_hash, wallet_hash, role, created_at, expires_at, principal_id) VALUES (?,?,'peer',?,?,?)`,
+		middleware.HashToken(testHelperToken), testHelperHash, now, exp, testHelperPrincipalID)
 }
 
 // ── WS helpers ───────────────────────────────────────────────────────────────
@@ -311,7 +318,7 @@ func TestChatHub_DifferentSession_SecondBrowser_Rejected(t *testing.T) {
 
 	// Verify session A is still the registered connection (by token hash).
 	hub.mu.RLock()
-	registered := hub.rooms[testRoomID][testClientHash]
+	registered := hub.rooms[testRoomID][testClientPrincipalID]
 	hub.mu.RUnlock()
 	if registered == nil {
 		t.Error("client slot unexpectedly empty after rejection")
@@ -354,7 +361,7 @@ func TestChatHub_NoPublickeyReplacement(t *testing.T) {
 
 	// Record registered session hash before second-browser attempt.
 	hub.mu.RLock()
-	beforeHash := hub.rooms[testRoomID][testClientHash].sessionTokenHash
+	beforeHash := hub.rooms[testRoomID][testClientPrincipalID].sessionTokenHash
 	hub.mu.RUnlock()
 
 	// Second browser tries to connect.
@@ -365,7 +372,7 @@ func TestChatHub_NoPublickeyReplacement(t *testing.T) {
 
 	// Session token hash must be unchanged.
 	hub.mu.RLock()
-	afterHash := hub.rooms[testRoomID][testClientHash].sessionTokenHash
+	afterHash := hub.rooms[testRoomID][testClientPrincipalID].sessionTokenHash
 	hub.mu.RUnlock()
 	if beforeHash != afterHash {
 		t.Errorf("session token hash changed after rejection: before=%q after=%q", beforeHash, afterHash)
@@ -411,7 +418,7 @@ func TestChatHub_SlotFreeAfterClose_NewSessionCanConnect(t *testing.T) {
 
 	// Verify it's session B in the hub.
 	hub.mu.RLock()
-	registered := hub.rooms[testRoomID][testClientHash]
+	registered := hub.rooms[testRoomID][testClientPrincipalID]
 	hub.mu.RUnlock()
 	if registered.sessionTokenHash != middleware.HashToken(testClientToken2) {
 		t.Error("hub should have session B's token hash after reconnect")
@@ -690,7 +697,7 @@ func TestChatHub_SecondBrowser_CloseCode_Is4000(t *testing.T) {
 	// First browser's slot must still be in the hub, with session A's token hash.
 	time.Sleep(30 * time.Millisecond)
 	hub.mu.RLock()
-	rc := hub.rooms[testRoomID][testClientHash]
+	rc := hub.rooms[testRoomID][testClientPrincipalID]
 	hub.mu.RUnlock()
 	if rc == nil {
 		t.Error("first browser slot should still be in hub after second-browser rejection")
@@ -816,7 +823,7 @@ func TestChatHub_ThreeBrowser_ABH_FullSequence(t *testing.T) {
 		t.Errorf("hub count after B: want 2, got %d", c)
 	}
 	hub.mu.RLock()
-	rc := hub.rooms[testRoomID][testClientHash]
+	rc := hub.rooms[testRoomID][testClientPrincipalID]
 	hub.mu.RUnlock()
 	if rc == nil {
 		t.Error("A's hub slot missing after B's attempt")
