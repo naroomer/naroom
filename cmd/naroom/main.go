@@ -199,7 +199,7 @@ func main() {
 	// Telegram notification bots
 	r.With(requireSession, middleware.LimitBody(4*1024), rlGeneral.Limit(rateFn)).Post("/telegram/client/token", h.TelegramClientToken)
 	r.With(requireSession, middleware.LimitBody(4*1024), rlGeneral.Limit(rateFn)).Post("/telegram/helper/token", h.TelegramHelperToken)
-	r.With(rlGeneral.Limit(rateFn)).Get("/telegram/client/confirm", h.TelegramClientConfirm)
+	r.With(requireSession, rlGeneral.Limit(rateFn)).Get("/telegram/client/confirm", h.TelegramClientConfirm)
 	r.With(rlGeneral.Limit(rateFn)).Get("/telegram/helper/confirm", h.TelegramHelperConfirm)
 	// Webhooks are called by Telegram servers — no session, but validated by secret token
 	r.With(middleware.LimitBody(64*1024)).Post("/telegram/client/webhook", h.TelegramClientWebhook)

@@ -49,7 +49,12 @@ type telegramUpdate struct {
 }
 
 // TelegramClientToken handles POST /api/telegram/client/token.
-// Requires session (client role). Generates a one-time linking token for the client bot.
+// Requires session (client role). Issues a one-time linking token for the client bot.
+//
+// Transaction boundary: ownership check, invalidation of previous unused tokens, and
+// insertion of the new token all run inside one database transaction. If the INSERT
+// fails the rollback leaves previous tokens untouched and usable. Every SQL error is
+// checked; any failure returns 500 before commit.
 func (h *Handler) TelegramClientToken(w http.ResponseWriter, r *http.Request) {
 	var req telegramClientTokenReq
 	if err := decodeJSON(r, &req); err != nil {
@@ -67,17 +72,31 @@ func (h *Handler) TelegramClientToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 401, "session required")
 		return
 	}
-	// Strict authorization: owner_principal_id only, no wallet_hash fallback.
+	// Strict: principal required — wallet-hash-only (legacy) sessions cannot issue tokens.
 	if principalID == "" {
 		writeError(w, 401, "session requires /session/init")
 		return
 	}
 
-	// Verify listing ownership: owner_principal_id only
+	now := time.Now().Unix()
+
+	// Open the transaction that covers all three steps: check, invalidate, insert.
+	// defer-Rollback is a no-op after a successful Commit.
+	tx, err := h.DB.Begin()
+	if err != nil {
+		writeError(w, 500, "db error")
+		return
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// Read listing state inside the transaction for a consistent snapshot.
 	var status string
 	var ownerPrincipalID sql.NullString
-	if err := h.DB.QueryRow(`SELECT owner_principal_id, status FROM listings WHERE id = ?`,
-		req.ListingID).Scan(&ownerPrincipalID, &status); err != nil {
+	var visibleUntil int64
+	if err := tx.QueryRow(
+		`SELECT owner_principal_id, status, visible_until FROM listings WHERE id = ?`,
+		req.ListingID,
+	).Scan(&ownerPrincipalID, &status, &visibleUntil); err != nil {
 		writeError(w, 404, "listing not found")
 		return
 	}
@@ -93,12 +112,43 @@ func (h *Handler) TelegramClientToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 409, "listing cannot connect telegram in current state")
 		return
 	}
+	// Reject immediately if the listing window has already closed.
+	if status == "active" && visibleUntil > 0 && visibleUntil <= now {
+		writeError(w, 409, "listing window has expired")
+		return
+	}
 
-	token, err := h.createTelegramToken("client", req.ListingID, "", "")
-	if err != nil {
+	// Invalidate all previous unused client tokens for this listing.
+	// Runs inside the same transaction: if the INSERT below fails and we rollback,
+	// this UPDATE is also rolled back and the previous tokens stay live.
+	if _, err := tx.Exec(
+		`UPDATE telegram_link_tokens SET used = TRUE
+		 WHERE listing_id = ? AND token_type = 'client' AND used = FALSE`,
+		req.ListingID,
+	); err != nil {
 		writeError(w, 500, "db error")
 		return
 	}
+
+	// Insert the replacement token in the same transaction.
+	token := crypto.RandomToken()
+	if _, err := tx.Exec(
+		`INSERT INTO telegram_link_tokens
+		     (id, token, token_type, listing_id, helper_filters_json, counselor_hash, principal_id,
+		      created_at, expires_at, used)
+		 VALUES (?, ?, 'client', ?, NULL, NULL, ?, ?, ?, FALSE)`,
+		crypto.NewID("tgl"), token, req.ListingID, principalID, now, now+telegramTokenTTL,
+	); err != nil {
+		// Rollback restores any invalidated tokens to used=FALSE — they remain live.
+		writeError(w, 500, "db error")
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		writeError(w, 500, "db error")
+		return
+	}
+
 	writeJSON(w, 201, map[string]any{
 		"token":      token,
 		"bot_url":    fmt.Sprintf("https://t.me/%s?start=%s", h.TelegramClientBotName, token),
@@ -171,7 +221,7 @@ func (h *Handler) TelegramHelperToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "encode error")
 		return
 	}
-	token, err := h.createTelegramToken("helper", "", string(filtersJSON), walletHash)
+	token, err := h.createTelegramToken("helper", "", string(filtersJSON), walletHash, "")
 	if err != nil {
 		writeError(w, 500, "db error")
 		return
@@ -184,19 +234,45 @@ func (h *Handler) TelegramHelperToken(w http.ResponseWriter, r *http.Request) {
 }
 
 // TelegramClientConfirm handles GET /api/telegram/client/confirm?listing_id=<id>.
-// Frontend polls this to detect when the bot confirmed the binding.
+// Requires session. Returns {confirmed: true} when an active, non-expired binding exists.
+// Returns 500 (not false) when the binding COUNT query itself fails — callers must not
+// misinterpret a server error as "not connected".
 func (h *Handler) TelegramClientConfirm(w http.ResponseWriter, r *http.Request) {
 	listingID := r.URL.Query().Get("listing_id")
 	if listingID == "" {
 		writeError(w, 400, "listing_id required")
 		return
 	}
+
+	// Require principal — no wallet-bypass fallback, no legacy session fallback.
+	principalID := middleware.SessionPrincipalID(r.Context())
+	if principalID == "" {
+		writeError(w, 403, "session requires /session/init")
+		return
+	}
+
+	// Verify the caller owns the listing.
+	var ownerPrincipalID sql.NullString
+	if err := h.DB.QueryRow(`SELECT owner_principal_id FROM listings WHERE id = ?`,
+		listingID).Scan(&ownerPrincipalID); err != nil {
+		writeError(w, 404, "listing not found")
+		return
+	}
+	if !ownerPrincipalID.Valid || ownerPrincipalID.String == "" || ownerPrincipalID.String != principalID {
+		writeError(w, 403, "not your listing")
+		return
+	}
+
 	now := time.Now().Unix()
 	var n int
-	_ = h.DB.QueryRow(`
+	// A query error returns 500 — never silently report false on a DB failure.
+	if err := h.DB.QueryRow(`
 		SELECT COUNT(*) FROM client_listing_notifications
 		WHERE listing_id = ? AND active = TRUE AND expires_at > ?
-	`, listingID, now).Scan(&n)
+	`, listingID, now).Scan(&n); err != nil {
+		writeError(w, 500, "db error")
+		return
+	}
 	writeJSON(w, 200, map[string]bool{"confirmed": n > 0})
 }
 
@@ -320,9 +396,11 @@ func (h *Handler) TelegramHelperWebhook(w http.ResponseWriter, r *http.Request) 
 }
 
 // createTelegramToken generates and stores a one-time linking token.
-// wallet_address is never stored. counselorHash is stored for helper tokens only — it enables
-// direct "chat opened" notifications without exposing the wallet address.
-func (h *Handler) createTelegramToken(tokenType, listingID, filtersJSON, counselorHash string) (string, error) {
+// Used only by TelegramHelperToken. Client tokens are now issued inline in
+// TelegramClientToken inside the atomic invalidation+insert transaction.
+// counselorHash is stored for helper tokens only (enables direct "chat opened"
+// notifications). principalID is passed for client tokens; pass "" for helper tokens.
+func (h *Handler) createTelegramToken(tokenType, listingID, filtersJSON, counselorHash, principalID string) (string, error) {
 	now := time.Now().Unix()
 	token := crypto.RandomToken()
 
@@ -338,27 +416,38 @@ func (h *Handler) createTelegramToken(tokenType, listingID, filtersJSON, counsel
 	if counselorHash != "" {
 		nullCounselor = sql.NullString{String: counselorHash, Valid: true}
 	}
+	var nullPrincipal sql.NullString
+	if principalID != "" {
+		nullPrincipal = sql.NullString{String: principalID, Valid: true}
+	}
 	_, err := h.DB.Exec(`
 		INSERT INTO telegram_link_tokens
-			(id, token, token_type, listing_id, helper_filters_json, counselor_hash, created_at, expires_at, used)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, FALSE)
-	`, crypto.NewID("tgl"), token, tokenType, nullListing, nullFilters, nullCounselor, now, now+telegramTokenTTL)
+			(id, token, token_type, listing_id, helper_filters_json, counselor_hash, principal_id, created_at, expires_at, used)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, FALSE)
+	`, crypto.NewID("tgl"), token, tokenType, nullListing, nullFilters, nullCounselor, nullPrincipal, now, now+telegramTokenTTL)
 	return token, err
 }
 
 // consumeClientToken validates a client one-time token and creates the notification binding.
 // Returns the listing_id so the caller can attempt ActivateListingIfReady.
-// Token is claimed atomically via UPDATE+RowsAffected to prevent double-consumption on
-// concurrent Telegram webhook retries.
+//
+// All six steps run inside a single database transaction:
+//   1. Claim the token (UPDATE used=TRUE) — RowsAffected=0 means invalid/expired/consumed.
+//   2. Read token's principal_id — fail closed if NULL or empty.
+//   3. Read listing: fail closed if owner_principal_id does not exactly match token's principal.
+//   4. Reject if active listing's visible_until has already passed.
+//   5. Deactivate existing active binding — SQL error rolls back steps 1-4.
+//   6. Insert new binding — SQL error rolls back everything including the token claim.
+//   7. Commit.
 func (h *Handler) consumeClientToken(token, chatID string) (string, error) {
 	now := time.Now().Unix()
 	tx, err := h.DB.Begin()
 	if err != nil {
 		return "", fmt.Errorf("db error")
 	}
-	defer tx.Rollback()
+	defer tx.Rollback() //nolint:errcheck
 
-	// Claim the token atomically — prevents race on concurrent Telegram retries.
+	// Step 1 — Claim the token atomically.
 	res, err := tx.Exec(`
 		UPDATE telegram_link_tokens SET used = TRUE
 		WHERE token = ? AND token_type = 'client' AND used = FALSE AND expires_at > ?
@@ -370,24 +459,65 @@ func (h *Handler) consumeClientToken(token, chatID string) (string, error) {
 		return "", fmt.Errorf("invalid or expired token")
 	}
 
+	// Step 2 — Read token metadata.
 	var listingID string
-	if err = tx.QueryRow(`SELECT listing_id FROM telegram_link_tokens WHERE token = ?`,
-		token).Scan(&listingID); err != nil {
+	var tokenPrincipalID sql.NullString
+	if err = tx.QueryRow(`SELECT listing_id, principal_id FROM telegram_link_tokens WHERE token = ?`,
+		token).Scan(&listingID, &tokenPrincipalID); err != nil {
 		return "", fmt.Errorf("db error")
 	}
 
+	// Fail closed: NULL or empty principal_id is rejected outright.
+	// Tokens issued before the reconnect feature lack a principal and cannot be consumed.
+	if !tokenPrincipalID.Valid || tokenPrincipalID.String == "" {
+		return "", fmt.Errorf("token missing principal")
+	}
+
+	// Step 3 — Verify listing ownership.
+	var ownerPrincipalID sql.NullString
+	var listingStatus string
+	var visibleUntil int64
+	if err = tx.QueryRow(`SELECT owner_principal_id, status, visible_until FROM listings WHERE id = ?`,
+		listingID).Scan(&ownerPrincipalID, &listingStatus, &visibleUntil); err != nil {
+		return "", fmt.Errorf("db error")
+	}
+	// Exact equality required — if ownership changed between issuance and consumption, reject.
+	if !ownerPrincipalID.Valid || ownerPrincipalID.String != tokenPrincipalID.String {
+		return "", fmt.Errorf("principal no longer owns listing")
+	}
+
+	// Step 4 — Reject if the listing's visibility window is already closed.
+	if listingStatus == "active" && visibleUntil > 0 && visibleUntil <= now {
+		return "", fmt.Errorf("listing window has expired")
+	}
+
+	// Step 5 — Deactivate any existing active binding. Failure here is a hard error
+	// that triggers rollback: the token claim is also undone so the caller can retry.
+	if _, err := tx.Exec(`
+		UPDATE client_listing_notifications SET active = FALSE
+		WHERE listing_id = ? AND active = TRUE
+	`, listingID); err != nil {
+		return "", fmt.Errorf("db error")
+	}
+
+	// Step 6 — Insert the new binding.
 	expiresAt := now + int64(h.ListingTTL)
 	if h.ListingTTL == 0 {
 		expiresAt = now + 21600
 	}
-	_, err = tx.Exec(`
+	if listingStatus == "active" && visibleUntil > 0 && visibleUntil < expiresAt {
+		expiresAt = visibleUntil
+	}
+
+	if _, err = tx.Exec(`
 		INSERT INTO client_listing_notifications
 			(id, listing_id, telegram_chat_id, created_at, expires_at, active)
 		VALUES (?, ?, ?, ?, ?, TRUE)
-	`, crypto.NewID("tgc"), listingID, chatID, now, expiresAt)
-	if err != nil {
+	`, crypto.NewID("tgc"), listingID, chatID, now, expiresAt); err != nil {
 		return "", fmt.Errorf("db error")
 	}
+
+	// Step 7 — Commit.
 	if err := tx.Commit(); err != nil {
 		return "", fmt.Errorf("db error")
 	}
@@ -395,17 +525,14 @@ func (h *Handler) consumeClientToken(token, chatID string) (string, error) {
 }
 
 // consumeHelperToken validates a helper one-time token and creates/replaces the subscription.
-// Token is claimed atomically via UPDATE+RowsAffected to prevent double-consumption on
-// concurrent Telegram webhook retries.
 func (h *Handler) consumeHelperToken(token, chatID string) error {
 	now := time.Now().Unix()
 	tx, err := h.DB.Begin()
 	if err != nil {
 		return fmt.Errorf("db error")
 	}
-	defer tx.Rollback()
+	defer tx.Rollback() //nolint:errcheck
 
-	// Claim the token atomically — prevents race on concurrent Telegram retries.
 	res, err := tx.Exec(`
 		UPDATE telegram_link_tokens SET used = TRUE
 		WHERE token = ? AND token_type = 'helper' AND used = FALSE AND expires_at > ?
@@ -429,20 +556,16 @@ func (h *Handler) consumeHelperToken(token, chatID string) error {
 		_ = json.Unmarshal([]byte(filtersRaw.String), &filters)
 	}
 
-	// Deactivate any existing subscription for this chat_id (same Telegram account, new subscribe).
 	_, _ = tx.Exec(`
 		UPDATE helper_board_subscriptions SET active = FALSE
 		WHERE telegram_chat_id = ? AND active = TRUE
 	`, chatID)
 
-	// counselor_hash is stored to enable direct "chat opened" notifications. It is derived
-	// from the helper's wallet and set when the link token was created (see TelegramHelperToken).
 	var nullCounselor sql.NullString
 	if counselorHashRaw.Valid && counselorHashRaw.String != "" {
 		nullCounselor = counselorHashRaw
 	}
 
-	// expires_at: 24h TTL as documented in schema.
 	_, err = tx.Exec(`
 		INSERT INTO helper_board_subscriptions
 			(id, telegram_chat_id, counselor_hash, city, language, problem, help_type, urgency,

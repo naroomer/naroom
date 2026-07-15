@@ -149,6 +149,8 @@ CREATE TABLE IF NOT EXISTS encrypted_messages (
 -- it allows the "chat opened" notification to locate the helper's Telegram chat_id.
 -- This is an intentional opt-in: the helper explicitly links Telegram and thereby consents
 -- to having their counselor_hash associated with their Telegram chat_id for direct notifications.
+-- principal_id is stored on client tokens: consumeClientToken verifies that the principal who
+-- issued the token still owns the listing at consumption time. NULL/empty is rejected (fail closed).
 CREATE TABLE IF NOT EXISTS telegram_link_tokens (
     id TEXT PRIMARY KEY,
     token TEXT NOT NULL UNIQUE,
@@ -156,6 +158,7 @@ CREATE TABLE IF NOT EXISTS telegram_link_tokens (
     listing_id TEXT REFERENCES listings(id),
     helper_filters_json TEXT,
     counselor_hash TEXT,           -- helper tokens only: HMAC-SHA256 of helper wallet; enables direct chat notifications
+    principal_id TEXT REFERENCES principals(id),  -- client tokens only: issuing principal; NULL/empty rejected at consumption
     created_at INTEGER NOT NULL,
     expires_at INTEGER NOT NULL,   -- 10 minutes
     used BOOLEAN DEFAULT FALSE

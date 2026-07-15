@@ -300,7 +300,10 @@
 				return;
 			}
 			try {
-				const res = await fetch(`/api/telegram/client/confirm?listing_id=${invoice.listing_id}`);
+				const tgToken = sessionStorage.getItem('naroom_session_client') ?? '';
+				const res = await fetch(`/api/telegram/client/confirm?listing_id=${invoice.listing_id}`, {
+					headers: tgToken ? { 'Authorization': `Bearer ${tgToken}` } : {},
+				});
 				if (!res.ok) return;
 				const data = await res.json();
 				if (data.confirmed) {

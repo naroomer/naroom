@@ -522,12 +522,91 @@
 				}
 			} catch {}
 		}
+
+		// Check Telegram notification status for owner (non-blocking, runs after critical checks).
+		await checkOwnerTelegram();
 	});
+
+	// ── Owner Telegram section ────────────────────────────────────────────
+	// States: idle | checking | not_owner | disconnected | connecting | connected | expired | error
+	let ownerTgState  = $state('idle');
+	let ownerTgBotUrl = $state('');
+	let ownerTgError  = $state('');
+	let ownerTgPollTimer;
+
+	async function checkOwnerTelegram() {
+		if (listing.status !== 'active' || listing.time_left <= 0) return;
+		const clientToken = sessionStorage.getItem('naroom_session_client') ?? '';
+		if (!clientToken) return;
+		ownerTgState = 'checking';
+		try {
+			const sr = await fetch('/api/session/status', { headers: { 'Authorization': `Bearer ${clientToken}` } });
+			if (!sr.ok) { ownerTgState = 'idle'; return; }
+			const cr = await fetch(`/api/telegram/client/confirm?listing_id=${listing.id}`, {
+				headers: { 'Authorization': `Bearer ${clientToken}` },
+			});
+			if (cr.status === 403 || cr.status === 404) { ownerTgState = 'not_owner'; return; }
+			if (!cr.ok) { ownerTgState = 'idle'; return; }
+			const cd = await cr.json();
+			ownerTgState = cd.confirmed ? 'connected' : 'disconnected';
+		} catch { ownerTgState = 'idle'; }
+	}
+
+	async function connectTelegram() {
+		const clientToken = sessionStorage.getItem('naroom_session_client') ?? '';
+		if (!clientToken) return;
+		ownerTgState = 'connecting';
+		ownerTgError = '';
+		ownerTgBotUrl = '';
+		try {
+			const res = await fetch('/api/telegram/client/token', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${clientToken}` },
+				body: JSON.stringify({ listing_id: listing.id }),
+			});
+			if (!res.ok) {
+				const e = await res.json().catch(() => ({}));
+				ownerTgError = e.error ?? 'Failed to get token';
+				ownerTgState = 'error';
+				return;
+			}
+			const d = await res.json();
+			ownerTgBotUrl = d.bot_url;
+			startOwnerTgPoll(clientToken, d.expires_in ?? 600);
+		} catch (e) {
+			ownerTgError = e.message;
+			ownerTgState = 'error';
+		}
+	}
+
+	function startOwnerTgPoll(clientToken, expiresIn) {
+		clearInterval(ownerTgPollTimer);
+		const deadline = Date.now() + expiresIn * 1000;
+		ownerTgPollTimer = setInterval(async () => {
+			if (Date.now() > deadline) {
+				clearInterval(ownerTgPollTimer);
+				ownerTgState = 'expired';
+				return;
+			}
+			try {
+				const res = await fetch(`/api/telegram/client/confirm?listing_id=${listing.id}`, {
+					headers: { 'Authorization': `Bearer ${clientToken}` },
+				});
+				if (!res.ok) return;
+				const d = await res.json();
+				if (d.confirmed) {
+					clearInterval(ownerTgPollTimer);
+					ownerTgState = 'connected';
+				}
+			} catch {}
+		}, 3000);
+	}
 
 	// Cleanup poll timers on unmount
 	onDestroy(() => {
 		clearInterval(chatPollTimer);
 		clearInterval(peerPollTimer);
+		clearInterval(ownerTgPollTimer);
 	});
 </script>
 
@@ -747,6 +826,37 @@
 				</div>
 			{/if}
 		</div>
+
+	<!-- ── OWNER TELEGRAM SECTION (shown only to authenticated owner of active listing) ── -->
+	{#if ownerTgState !== 'idle' && ownerTgState !== 'not_owner' && ownerTgState !== 'checking'}
+	<div class="section">
+		<div class="section-title">{t('listing.tg_section')}</div>
+
+		{#if ownerTgState === 'connected'}
+			<div class="tg-connected">
+				<span class="tg-check">✓</span>
+				<div>
+					<div class="tg-connected-title">{t('listing.tg_connected')}</div>
+					<div class="tg-connected-sub">{t('listing.tg_connected_sub')}</div>
+				</div>
+			</div>
+		{:else if ownerTgState === 'disconnected' || ownerTgState === 'error'}
+			<p class="section-desc">{t('listing.tg_connect_body')}</p>
+			{#if ownerTgError}<div class="error">{ownerTgError}</div>{/if}
+			<button class="btn-primary" onclick={connectTelegram}>{t('listing.tg_connect')}</button>
+		{:else if ownerTgState === 'connecting' && ownerTgBotUrl}
+			<p class="section-desc">{t('listing.tg_connect_body')}</p>
+			<a class="btn-primary" href={ownerTgBotUrl} target="_blank" rel="noopener noreferrer">{t('listing.tg_open_bot')}</a>
+			<div class="poll-row">
+				<span class="dot"></span>
+				{t('listing.tg_waiting')}
+			</div>
+		{:else if ownerTgState === 'expired'}
+			<p class="section-desc">{t('listing.tg_expired')}</p>
+			<button class="btn-primary" onclick={connectTelegram}>{t('listing.tg_retry')}</button>
+		{/if}
+	</div>
+	{/if}
 
 	{:else if listing.status === 'expired'}
 		<!-- Expired listing: show owner wallet form to unlock renewal, or a note for others -->
@@ -1040,6 +1150,16 @@
 		border-radius: 8px; padding: 14px; font-family: monospace;
 		font-size: 12px; word-break: break-all; color: var(--text); line-height: 1.6;
 	}
+
+	/* Owner Telegram section */
+	.tg-connected {
+		display: flex; gap: 14px; align-items: center;
+		background: rgba(123, 166, 142, 0.1); border: 1px solid var(--accent);
+		border-radius: 10px; padding: 16px;
+	}
+	.tg-check { font-size: 20px; color: var(--accent); flex-shrink: 0; }
+	.tg-connected-title { font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+	.tg-connected-sub   { font-size: 13px; color: var(--text-dim); }
 
 	/* Renew section */
 	.renew-section { border-color: var(--warn); margin-top: 4px; }
