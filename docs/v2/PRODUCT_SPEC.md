@@ -124,8 +124,8 @@ Current product position:
 
 Unresolved Client journey points:
 
-- Whether the Client has a persistent pseudonymous identity across listings.
-- Whether Client reputation carries across listings.
+- Whether the Client has a persistent pseudonymous identity across listings. (`FIXED Task 06`: Client has no public pseudonym; only aggregate review counts from Helpers are stored per wallet-bound profile — not displayed as a public name.)
+- Whether Client reputation carries across listings. (`FIXED Task 06`: Yes — Client profile uses `HMAC-SHA256(serverKey, "naroom:v2:wallet:" + chain + ":" + wallet)` as fingerprint; same wallet across listings shares one profile and carries cumulative positive/negative counts.)
 - Whether Client and Helper are permanently separate roles.
 
 ## 5A. Task 04C: Backend HTTP Client Journey Contract
@@ -194,21 +194,28 @@ Ordering: newest `last_activated_at` first, then listing `id` ascending (determi
 9. Platform creates a $10 contact invoice bound to the entered wallet and this purchase attempt.
 10. After payment confirmation, platform verifies that payment came from the expected entered wallet and checks that wallet's post-payment USD balance.
 11. If sender verification succeeds and post-payment balance is at least $1,000, platform grants access to this one Client contact.
-12. On the wallet's first successful contact purchase, platform creates the Helper profile. The recommended country-lock commit point is this successful purchase, but the exact commit point still requires explicit confirmation. Existing profiles keep their original country.
+12. On the wallet's first successful contact purchase, platform creates the Helper profile. The country lock is committed at the first successful sender verification and post-payment balance check (≥ $1,000). Existing profiles keep their original country.
 13. Platform increments the Helper aggregate purchase count and immediately displays the purchased Client contact on the current website payment/result page.
-14. If payment came from another wallet or the expected wallet's post-payment balance is below $1,000, the contact is not revealed and there is no refund. Retry/top-up behavior remains unresolved.
+14. If payment came from another wallet or the expected wallet's post-payment balance is below $1,000, the contact is not revealed and there is no refund. If balance was low, Helper may call the recheck-balance endpoint to retry the post-payment balance check until `confirmation_deadline_at + 24 h`; after that deadline the purchase moves to the terminal `failed` state.
 15. After revealing the contact, platform may issue a separate single-use review code/link. It authorizes only a later review of this purchased contact/Client and can never reveal the contact again.
 16. Helper does not register Telegram as part of the purchase flow. No Helper Telegram channel is required.
 17. Helper leaves NA Room and communicates with the Client through the purchased external contact.
-18. The listing remains available to other buyers.
+18. The listing remains available to other buyers. Contact purchases do not change listing visibility.
+19. If payment confirms after the listing's daily window or five-day entitlement ends, the contact is still revealed, because listing visibility is checked only at the time of invoice creation, not at the time of payment confirmation or reveal.
+
+`FIXED`
+
+- Browser generates a cryptographically random 256-bit lowercase-hex `purchase_token` before the create POST. The backend stores only an HMAC hash; the raw token is never stored or logged. Token is returned once in the `201` create response. Subsequent retries with the same token return `200` with the existing purchase, no new rows created.
+- A new token does not create a parallel purchase for the same profile and listing while a non-terminal purchase already exists. After terminal states (`invoice_expired`, `failed`, `receipt_expired`) a new token may start an independent purchase on the same listing.
+- Contact is shown immediately on the current website result page. The `receipt_expires_at` window is 24 h from first reveal.
 
 Unresolved Helper journey points:
 
 - Exact public Helper pseudonym/name generation and whether it is immutable.
 - Exact pre-invoice balance formula needed to leave at least $1,000 after the $10 payment, network fees, and price movement.
-- Whether a short-lived automatic same-browser purchase session resumes payment polling after refresh/closure; no user-facing purchase recovery code is planned.
 - Whether Helper and Client roles are fixed or the same wallet-bound identity can perform both actions.
 - Expiry and exact format of the review-only code/link.
+- Same-browser behavior if the page is refreshed or closed before payment confirmation completes.
 
 ## 7. Listing Management Code
 
@@ -249,27 +256,28 @@ Unresolved Helper journey points:
 
 ### 8.2 Permanent public pseudonym
 
-`FIXED FOR HELPER, UNRESOLVED FOR CLIENT`
+`FIXED`
 
 - Helper keeps one random platform pseudonym under the same wallet-bound Helper profile.
 - Helper account age and aggregate rating are attached to that pseudonym.
 - The platform must never expose the Helper's Telegram username, chat ID, wallet address, or wallet fingerprint as the public name.
 - Exact pseudonym vocabulary, generation, and whether a name can ever be regenerated remain unresolved.
-- A permanent Client pseudonym across separate paid listings has not been approved.
-- If a permanent Client pseudonym is later approved, public observers and returning Helpers could link that Client's separate listings, reducing unlinkability.
+- Client has a wallet-bound reputation profile (not a public pseudonym) created at first $5 payment confirmation. The profile carries aggregate positive and negative review counts submitted by Helpers after contact purchases. The profile has no public display name — it is not exposed to the board or to other users as a named identity.
+- `FIXED Task 06 (was stale)`: Client does NOT have a public pseudonym. Public observers and Helpers cannot link purchases to a named Client identity. The `client_reputation` field in public listing and board DTOs exposes only `{member_since, positive_count, negative_count}` — no name, no pseudonym.
+- The platform must never expose the Client's wallet address, wallet fingerprint, Telegram chat_id, or internal profile ID as the public name.
 
 ### 8.3 Wallet-derived reputation
 
-`FIXED FOR HELPER, DETAILS UNRESOLVED`
+`FIXED (Task 06)`
 
-- One wallet fingerprint can anchor a permanent name and rating.
-- A plain `SHA256(wallet_address)` is insufficient because a known address can be hashed and matched after a database leak.
-- A keyed fingerprint such as `HMAC(server_secret, chain || normalized_address)` is safer.
+- Both Helper and Client profiles use a keyed wallet fingerprint: `HMAC-SHA256(serverHMACKey, "naroom:v2:helper-wallet:" + chain + ":" + normalizedAddress)` for Helpers and `HMAC-SHA256(serverHMACKey, "naroom:v2:wallet:" + chain + ":" + normalizedAddress)` for Clients. Using distinct domain prefixes prevents cross-role fingerprint collisions.
+- A plain `SHA256(wallet_address)` is insufficient because a known address can be hashed and matched after a database leak. The keyed HMAC is safe under server-secret confidentiality.
 - The fingerprint must never be exposed through public API, HTML, logs, analytics, or Telegram.
 - A different wallet produces a different identity unless an explicit migration/link mechanism exists.
 - BTC/LTC receive addresses may change, so an address is not always a durable wallet identity.
 - Informer eligibility is unrelated to Helper identity and does not create this wallet fingerprint.
 - A Helper profile begins from the person's own wallet entered for a specific contact purchase, and a successful purchase requires the $10 payment to come from that same expected wallet.
+- A Client profile is created when the $5 payment is confirmed. Its wallet fingerprint is derived from the same wallet that funded the listing payment.
 - Because the address is public, knowing or typing it cannot securely authenticate a person to the wallet-bound profile.
 - A separate unguessable Helper management/recovery capability or later proof of wallet control is required if the same profile must be securely reopened; the exact mechanism is unresolved.
 
@@ -587,26 +595,36 @@ If the process crashes after step 11 (send succeeded) but before the commit in s
 
 ## 13. Reviews
 
-`PARTIALLY FIXED`
+`FIXED (Task 06)`
 
-- Client can be offered a Telegram action to rate the Helper after a confirmed contact purchase.
-- After successful contact purchase, Helper can receive a separate single-use review code/link for a later review of the purchased contact/Client. No Helper Telegram connection is required.
-- Review is not forced immediately.
-- The purchase notification may show the Helper pseudonym, account age, aggregate confirmed purchases, positive reviews, and negative reviews.
-- The review action uses a short-lived, single-use opaque token tied to the confirmed purchase and the correct Helper target.
-- A review can increment the Helper's positive or negative aggregate exactly once.
+**Bidirectional binary reviews — one per purchase per side.**
+
+### Client → Helper (via Telegram)
+
+- After a Helper's $10 payment confirms and the contact is revealed, platform sends a Telegram message to the Client's active binding with an inline keyboard (Positive / Negative).
+- The Telegram callback payload is `"rv:" + hex(raw16bytes) + ":" + action` (~37 chars, fits the 64-byte Telegram callback_data limit).
+- Client can rate anytime within 24 hours of the purchase `contact_ready_at`. After expiry the buttons do nothing.
+- Review is not forced; Client may simply not press any button. The Telegram message is sent at most once per purchase.
+- If no active, consistent Client Telegram binding+destination exists at purchase creation time, `CreatePurchase` returns `ErrReviewNoBinding` (HTTP 409 `client_notification_unavailable`). The transaction rolls back completely — zero orphan profile, purchase, invoice, entitlement, or snapshot rows.
+
+### Helper → Client (via website)
+
+- After contact reveal, the Helper calls `POST /v2/helper/reviews/capability` with purchase_id + purchase_token + wallet_address to obtain a `review_token` and `expires_at` (24 hours from `contact_ready_at`). The review token is NOT returned in the contact-ready HTTP response.
+- Review token format: `base64url(raw16bytes) + "." + base64url(HMAC-SHA256(hmacKey, "naroom:v2:review-token:" + reviewRef))` — 66 characters.
+- `POST /v2/helper/reviews/capability` validates purchase ownership and returns the review token plus Client reputation snapshot.
+- `POST /v2/helper/reviews` consumes the review token and increments the Client's profile aggregate counters.
+- Wrong purchase_token and wrong wallet_address return byte-identical 404 (no enumeration).
+- Review tokens are never logged. Encrypted fields (Telegram chat_id) are NULLed after delivery.
+
+### Common rules (both directions)
+
+- A review can increment the target's positive or negative aggregate exactly once per purchase per reviewer side.
+- Exact repeat (same token, same rating) is idempotent: returns 200/accepted=true without re-incrementing.
+- Conflicting re-use (same token, different rating) returns 409 `review_already_consumed`.
 - Free-text reviews are not part of the current model.
-
-Still unresolved:
-
-- A review cannot carry across Client listings if no persistent Client identifier exists.
-- Exact review expiry period.
-- Whether Client can skip permanently or return later.
-- Whether Helper can rate Client, and what persistent Client identity would receive that rating.
-- If no persistent Client identity is approved, whether Helper's review is attached only to the individual listing/contact transaction.
-- Whether ratings become visible immediately or only after a minimum number of reviews.
-
-Client-to-Helper review can be implemented after its expiry and retention rules are fixed. Helper-to-Client review must not be implemented until Client identity is decided.
+- Ratings become visible immediately; no minimum-count gate.
+- `Cache-Control: no-store, private` on both Helper review HTTP endpoints.
+- Review expiry is 24 hours from purchase `contact_ready_at` for both directions.
 
 ## 14. Payments
 
@@ -643,12 +661,12 @@ Client-to-Helper review can be implemented after its expiry and retention rules 
 - API/RPC outage does not change invoice state. Watcher retries with bounded exponential backoff (min 5s, max 5 min, factor 2).
 - HD address derivation contract: `HDAllocatorAdapter` wraps the V1 `crypto.HDWallet` and **shares** the V1 `invoice_index` atomic counter. This is intentionally correct — same xpub with one shared counter guarantees unique derivation indexes across V1 and V2. A separate V2 counter for the same xpub would collide with V1-derived addresses.
 
-`UNRESOLVED`
+`FIXED (Task 05-FIX / Task 05-FIX2)`
 
-- Exact pre-invoice balance formula and volatility/network-fee buffer.
-- Whether and how a low-balance Helper can top up and retry the check without paying again.
-- Contact behavior when payment confirms after the current listing visibility window ends.
-- Contact behavior when payment confirms after the overall entitlement ends.
+- Pre-invoice balance floor: $1,010 (= $10 invoice + $1,000 post-payment minimum). Implemented as `helperPreInvoiceFloorUSD = 1010.0` in the HTTP handler; balance provider returns a value below this floor → 402, no rows created.
+- Low-balance retry: a Helper who paid but holds < $1,000 post-payment may call `/recheck-balance` until `confirmation_deadline_at + 24 h`; after that the purchase moves to `failed`. Implemented via `RecheckHelperBalance` / `NormalizeHelperExpired`.
+- Late listing-window payment: contact is still revealed; listing visibility is checked only at invoice creation time, not at payment confirmation or reveal.
+- Late entitlement payment: same rule — entitlement expiry is checked only at invoice creation.
 
 `CONSTRAINT`
 
@@ -717,25 +735,33 @@ Helper is not given a user-facing purchase recovery code and is not promised cro
 - A fresh service Telegram connection is required for each publication window (first and every reactivation). The previous window's binding is deleted when the window closes. Client may use a different Telegram account per window. Successful bot response at `/start` is the delivery proof.
 - Client display name is listing-scoped, generated randomly at first publication, stable for five days, new for each new paid listing, and is not a persistent identity.
 
+### Fixed (Task 06 — 2026-07-21)
+
+- Client has a persistent wallet-bound reputation profile (v2_client_profiles): created at first $5 payment confirmation, anchored to HMAC-SHA256(serverKey, "naroom:v2:wallet:" + chain + ":" + wallet). Carries positive_count and negative_count. Not a public pseudonym or login credential. Same wallet+currency shares one profile across all listings.
+- Reviews are bidirectional and binary (positive/negative). One review per purchase per reviewer side. Exact repeat is idempotent; conflicting re-use is 409.
+- Client → Helper review: Telegram inline button (Positive / Negative — no Skip button) sent at purchase contact_ready. Callback payload fits Telegram 64-byte limit. Expiry: 24 h from contact_ready_at. Client skips by not pressing. Missing or inconsistent Client binding at purchase creation → hard failure (ErrReviewNoBinding, HTTP 409 `client_notification_unavailable`, full rollback, zero orphan rows).
+- Helper → Client review: review token (66-char HMAC-signed opaque string) issued via POST /v2/helper/reviews/capability (NOT returned automatically in the contact-ready response). POST /v2/helper/reviews/capability + POST /v2/helper/reviews. Expiry: 24 h from contact_ready_at. Wrong token and wrong wallet return byte-identical 404. Cache-Control: no-store on both endpoints.
+- Review entitlements created atomically with purchase_count++ inside the contact_ready transition (one DB transaction). Both sides created at the same moment; one row per (purchase_id, reviewer_side) with UNIQUE constraint.
+
 ### Unresolved
 
-- Temporary per-listing Client name versus permanent Client pseudonym (for reviews and reputation; display name model is fixed above).
-- Whether reviews persist across listings/sessions.
-- What anchors Client reputation, if Client reputation exists at all.
 - Whether Client reputation transfers between wallets or listings.
 - Whether Client/Helper roles are fixed.
 - Contact and payment-record retention periods.
 - Same-browser behavior when the page is refreshed or closed while payment confirmation is pending.
-- Client-to-Helper review expiry, skip behavior, and temporary linkage retention.
-- Exact Telegram notification fields and Telegram-based rating interaction.
-- Exact country-lock commit point; the current recommendation is the first successful paid contact purchase, not invoice creation.
 - Whether Informer eligibility is rechecked periodically and whether one subscription may change or include multiple selected cities.
-- Low-balance retry behavior after a confirmed $10 payment.
 - Authoritative BTC/LTC funding-wallet resolution for multi-input or custodial transactions.
-- Review-only code/link format and expiry.
 - Whether the contact remains visible after an ordinary refresh of the same result page or is strictly shown once.
 
 ## 18. Change Log
+
+- 2026-07-21: Task 06-FIX — Closed 7 blockers from Task 06 review. (1) **Binding gate restored**: missing/expired/inconsistent Client binding → `ErrReviewNoBinding` (HTTP 409 `client_notification_unavailable`), full tx rollback, zero orphan rows; `snapshotClientDestinationTx` now requires `state=active`, `valid_until>now`, destination exists, `d.expires_at=b.valid_until`; soft-skip removed. (2) **Two-phase snapshot lifetime**: Phase 1 (`awaiting_contact_ready`) expires at `detection_deadline_at+86400`; Phase 2 (`pending_send`) activated at contact_ready with `expires_at=contact_ready_at+86400` via CAS touching exactly 1 row; mismatch → rollback. (3) **Client reputation in public DTO**: `PublicListingView` and `publicListingJSON` now include `client_reputation:{member_since,positive_count,negative_count}` via LEFT JOIN with `v2_client_profiles`; reads live counts directly; subsequent reads after committed review see increment immediately. (4) **Telegram callback validation hardened**: before any DB mutation: `cq.ID!=""`, message non-nil, chat non-nil, `chat.type=="private"`, `chat.id>0`, `message_id>0`; malformed → neutral 200, zero mutation, zero Bot API call. (5) **Schema `CHECK (expires_at = created_at + 86400)`**: in `v2_review_entitlements`; `createReviewEntitlementsTx` uses `created_at=contact_ready_at` so equation holds by construction. (6) **Tests rewritten/added**: `TestReview_NoBillNoOrphanRows` now asserts `ErrReviewNoBinding`+rollback; new: `TestReview_ExpiredBindingBlocksPurchase`, `TestReview_InconsistentBindingBlocksPurchase`, `TestReview_ConcurrentContactReady`, `TestReview_ConcurrentClientProfileCreation`, `TestReview_PublicReputationCounts`, `TestHelperHTTP_NoBindingReturns409`, `TestWebhookCallbackMalformedMatrix` (13 cases); all helper tests now create active binding via `mustInsertActiveBindingForFlow`. (7) **PRODUCT_SPEC.md**: removed Skip button, fixed client fingerprint domain to `naroom:v2:wallet:`, fixed review token source (capability endpoint, not contact-ready), corrected `id` vs `review_ref` pseudo-schema, described two-phase snapshot lifetime, updated binding-missing contract. All 0 FAIL 0 SKIP under `-race` and `go test ./...`.
+
+- 2026-07-21: Task 06 — Bidirectional wallet-bound reputation and one-time post-purchase reviews. New schema tables: `v2_client_profiles` (wallet_fingerprint UNIQUE 64-hex, currency BTC|LTC, positive_count, negative_count), `v2_review_entitlements` (UNIQUE(purchase_id, reviewer_side), rating NULL until consumed, 24h window from contact_ready_at), `v2_review_delivery_snapshots` (snapshot lifecycle: awaiting_contact_ready → pending_send → sent|permanent_failure; encrypted chat_id NULLed after delivery). New files: `internal/v2/review_service.go` (ReviewService with GetHelperReviewCapability, SubmitHelperReview, createReviewEntitlementsTx, snapshotClientDestinationTx), `internal/v2/review_http.go` (HelperReviewHandler: POST /v2/helper/reviews/capability, POST /v2/helper/reviews; Cache-Control: no-store; byte-identical 404 for wrong token/wallet; idempotent repeat 200; conflicting re-use 409; rate limiter 10 req/min per IP). Modified: `schema.sql` (added 3 tables + covering indexes + v2_client_flows CHECK client_profile_id NOT NULL for non-awaiting_payment states), `service.go` (CreatePurchase creates client profile atomically with payment confirmation), `helper_service.go` (setHelperContactReady calls createReviewEntitlementsTx; snapshotClientDestinationTx soft-fails if no active Client binding — purchase proceeds without review snapshot), `telegram_transport.go` (HandleWebhook processes "rv:<hex>:<action>" review callbacks; CAS consume + profile counter increment + edit message). Key decisions: (1) Client profile created at $5 payment confirmation, not at listing publication; wallet_fingerprint domain prefix "naroom:v2:wallet:" distinct from Helper prefix. (2) Review expiry: 24 h from contact_ready_at, both directions. (3) Helper review token: base64url(raw16) + "." + base64url(HMAC) = 66 chars; Telegram review callback_data: "rv:" + hex(raw16) + ":" + action ≈ 37 chars (fits 64-byte Telegram limit). (4) Missing Client binding at purchase creation → ErrReviewNoBinding, HTTP 409, full rollback [CORRECTED in Task 06-FIX]. (5) Privacy: review tokens never logged; wallet_fingerprint and chat_id never in error responses; encrypted fields NULLed post-delivery. Tests: 21 review service tests + 16 HTTP tests (all 0 FAIL 0 SKIP under -race and go test ./...). Updated §8.2, §8.3, §13, §17, §20, §22, §24.2.
+
+- 2026-07-21: Task 05-FIX2 — Closed four P1 blockers left open by Task 05-FIX. (1) **Exact create idempotency before external calls**: `LookupPurchaseByToken` lookup added to `handleCreate` BEFORE balance-provider and invoice-issuer calls; keyed in-process lock serializes concurrent same-token requests so only one winner calls provider/issuer; loser re-reads under lock and returns `200`. Lock key is `HMAC(token)`, never raw token. Partial UNIQUE index `uniq_v2_helper_purchases_active ON v2_helper_purchases(helper_profile_id, listing_id) WHERE state NOT IN (...)` enforces at most one non-terminal purchase per pair at DB level; INSERT collision → `ErrHelperDuplicateActivePurchase` (409). (2) **Real reveal CAS miss**: `_testRevealHook func(tx *sql.Tx, purchaseID string) error` field added to `HelperPurchaseService`; hook fires inside RevealHelperContact's transaction BEFORE the CAS UPDATE, writes `first_revealed_at` via the same tx so the UPDATE sees `RowsAffected==0` deterministically. `TestHelperReveal_DeterministicCASMiss` rewritten: hook called flag verified, CAS-miss path exercised (not the pre-injected already-revealed path), exact winner expiry returned. (3) **Strict schema positive/negative tests for all 8 purchase states**: fixed 6 existing negative subtests that were passing due to UNIQUE masking (added fresh profiles so target CHECK constraint fires); added `awaiting_payment_ok`, `awaiting_payment_with_balance_deadline_rejected`, `payment_detected_ok`, `payment_confirmed_missing_retry_deadline_rejected`, `invoice_expired_ok/with_contact_ready_at_rejected`, `failed_ok/with_contact_ready_at_rejected`, `receipt_expired_ok_unrevealed/ok_revealed/missing_contact_ready_at_rejected`, `partial_unique_terminal_does_not_block_new`, `receipt_expires_at_wrong_equation_rejected`, `invoice_confirmation_deadline_wrong_equation_rejected`, `invoice_confirmed_at_before_payment_detected_rejected` (15 new subtests). (4) **Five HTTP create idempotency/concurrency tests** in `TestHelperHTTP_ConcurrentCreate`: sequential retry (provider=1, issuer=1, rows 1/1/1, second call 200); concurrent same-token ×8 (1×201, 7×200, same purchaseID, provider=1, issuer=1); same token+different wallet (404, provider=1 total, no second provider call); concurrent different-token same pair (1×201, 3×409, 1 active purchase); terminal+new token (201, new purchaseID, same profile, provider=2, issuer=2). Synced §14 FIXED, §17 Unresolved (removed country-lock commit and low-balance retry), §23.4 (split backend capability FIXED from frontend UX Task 08). All tests 0 FAIL 0 SKIP under `-race` and `go test ./...`.
+
+- 2026-07-20: Task 05-FIX — Closed seven P1 blockers identified in the Task 05 review. (1) **Precheck no orphan rows**: `GetOrCreateProfile` moved inside the write transaction; low-balance, issuer failure, and listing/country race leave zero new profile/purchase/invoice rows. (2) **Idempotent create**: browser-generated 64-hex `purchase_token` stored as `HMAC("naroom:v2:helper-browser-token:", token)`; same token+wallet+listing returns existing purchase (200, no token in response); different token for same profile+listing while non-terminal returns `ErrHelperDuplicateActivePurchase` (409); new token allowed after terminal. (3) **Atomic expiry**: `ExpireHelperInvoice` updates invoice and purchase in one transaction; rollback on any failure. (4) **Country CAS loser → failed**: when `setHelperContactReady` country CAS returns 0 rows, purchase transitions to `failed` in the same transaction; contact_ready_at stays NULL; purchase excluded from watcher. (5) **Reveal CAS miss single-commit path**: CAS loser re-reads winner's `receipt_expires_at` inside the tx; single commit; zero-expiry/double-commit branch removed. (6) **Strict schema CHECKs**: 64-hex IDs and HMAC fields, 2-uppercase country codes, non-negative bounded balance, state-specific required/forbidden fields (all 8 purchase states), timestamp ordering on invoices. (7) **Stable HTTP error codes**: closed set of snake_case `code` constants in `{"error":"…","code":"…"}` envelope; NaN/Inf/negative balance → 503 `balance_provider_unavailable`, no rows created. No-store headers on reveal set before capability check. Note: `_testRevealHook` used a pre-injection approach in this version that exercised the already-revealed early-exit path rather than the true CAS-miss branch; corrected in Task 05-FIX2. Added 10 new tests: `TestHelperSchema_StrictConstraints` (16 subtests), `TestHelperCreate_NoOrphanRowsOnFailure` (3 subtests), `TestHelperCreate_Idempotent`, `TestHelperExpiry_AtomicRollback`, `TestHelperCountryCASLoser_AtomicFailed`, `TestHelperReveal_DeterministicCASMiss`, `TestHelperReveal_RealCipherBothTypes` (telegram+signal), `TestHelperHTTP_NaNBalanceIs503` (3 subtests), `TestHelperHTTP_IdempotentCreate`, `TestHelperHTTP_ErrorCodes`. Synced §6, §20, §23.2, §23.4, §23.5, §24.2 with confirmed FIXED contracts. Removed stale UNRESOLVED items for country lock, recheck deadline, late payment, same-browser token, receipt window. All tests 0 FAIL 0 SKIP under `-race` and `go test ./...`.
 
 - 2026-07-20: Task 05 — Complete V2 Helper contact purchase backend. New files: `internal/v2/helper_service.go`, `internal/v2/helper_watcher.go`, `internal/v2/helper_http.go` (production); `internal/v2/helper_service_test.go`, `internal/v2/helper_watcher_test.go`, `internal/v2/helper_http_test.go` (tests). Schema additions (appended to `schema.sql`): `v2_helper_profiles` (wallet_fingerprint UNIQUE, currency BTC|LTC, public_name UNIQUE, country_code nullable, purchase/positive/negative counts), `v2_helper_invoices` (status enum pending/detected/confirmed/expired, detected_txid_hash 64-hex nullable, all state-field consistency CHECKs), `v2_helper_purchases` (state 8-enum, browser_token_hash UNIQUE, country_code_snapshot, contact_ready_at, first_revealed_at, receipt_expires_at, balance_retry_deadline_at, timestamp-pair CHECKs); 6 covering indexes. Domain-separation HMAC prefixes: `"naroom:v2:helper-wallet:"`, `"naroom:v2:helper-browser-token:"`, `"naroom:v2:helper-txid:"` (distinct from Client prefixes). Raw txid never stored — only `HMAC-SHA256(txid)` is persisted; watcher computes hash of each candidate tx to match. Browser token returned once at create (rawToken), stored only as HMAC hash; wallet fingerprint alone does not authorize. Country CAS: `UPDATE … WHERE country_code IS NULL OR country_code = ?`; 0 rows = `ErrHelperCountryMismatch`. Contact decrypt AAD uses Client `flow_id` from `v2_listings.flow_id`, not purchase ID. First reveal: CAS `WHERE first_revealed_at IS NULL`, sets `receipt_expires_at = now + 24h`; idempotent on retry. Balance floors: $1010 pre-invoice (HTTP handler), $1000 post-payment (service). `balance_retry_deadline_at = confirmation_deadline_at + 86400s`; deadline equality is allowed; strictly after = expired. `NormalizeHelperExpired` covers 5 transitions in one tx (pending→expired, detected→expired, confirmed+low_balance+overdeadline→failed, contact_ready+unrevealed+over24h→receipt_expired, revealed+over_expiry→receipt_expired). HelperPurchaseWatcher mirrors V2Watcher: `ProcessOnce`/`Run`/`cappedBackoff`/`CycleResult`. HTTP handler (`HelperPurchaseHandler`): 4 POST endpoints with HMAC-IP rate limiters (separate buckets); strict body (application/json, 4 KiB, no unknown fields, no trailing JSON); wrong token/wallet → identical 404; unavailable listing → identical 404; provider/issuer → 503; DB/cipher → 500. Reveal sets `Cache-Control: no-store, private`, `Pragma: no-cache`, `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`. 35 regression tests (schema, privacy, domain separation, create/precheck, watcher payment flow, country concurrency, browser capability, receipt lifecycle, HTTP discipline, full lifecycle). All pass 0 FAIL 0 SKIP under `-race` and `go test ./...`. Does NOT implement reviews, Informer, or production routing.
 
@@ -865,7 +891,7 @@ Helper opens listing
 
 Each purchase is independent. `CONTACT_RECEIPT_READY` does not change the listing state, daily timer, or five-day deadline. Wrong-sender or post-payment low-balance results withhold the contact without refund. Full Helper transitions are defined in section 23.
 
-`UNRESOLVED`: Decide what happens if the $10 invoice is created while the listing is visible but confirms after the daily window or five-day entitlement expires.
+`FIXED (Task 05-FIX)`: If the $10 invoice is created while the listing is visible but confirms after the daily window or five-day entitlement expires, the contact is still revealed. Listing visibility state is checked only at invoice creation time, not at payment confirmation or reveal.
 
 ### 19.5 Final expiry
 
@@ -886,17 +912,27 @@ In `ENTITLEMENT_FINISHED`:
 
 Priority order is based on dependency, not recommendation.
 
-1. **Client identity and reputation:** whether a permanent Client pseudonym exists across separate listings, and what anchors reputation if Client reputation exists.
-2. **Role model:** fixed Client/Helper identities or both actions available to one wallet-bound profile.
-3. **Helper pending purchase:** automatic same-browser invoice continuity without a user-facing recovery code.
-4. **Helper country lock:** exact commit point and enforcement against the chosen wallet-bound profile.
-5. **Helper payment authority:** authoritative BTC/LTC funding-wallet resolution and low-balance retry after confirmed payment.
-6. **Late payment and result page:** reveal after daily/final listing expiry and behavior when the browser closes before confirmation or refreshes after reveal.
-7. **Reviews:** Client-to-Helper expiry/skip behavior and whether Helper-to-Client rating exists.
-8. **Retention:** contact ciphertext, invoices, management-code hash, temporary purchase links, aggregate reputation, and expired listings.
-9. **Informer operation:** selected-city changes, multiple-city subscriptions, and periodic balance recheck policy.
+`FIXED (Task 05-FIX)`
 
-No coding brief is valid until decisions 1-6 are fixed. Review, retention, and Informer implementation additionally require decisions 7-9.
+- **Helper country lock:** committed at the first successful sender verification and post-payment balance check (≥ $1,000). Enforced by CAS update: if the profile already holds a different country code the purchase transitions atomically to `failed`. Section 23.5.
+- **Helper payment authority (retry):** a Helper who paid but holds < $1,000 post-payment may call `/recheck-balance` until `confirmation_deadline_at + 24 h`; after that deadline the purchase moves to `failed`. The authoritative BTC/LTC funding-wallet resolution rule remains unresolved (see §23.2 CONSTRAINT).
+- **Late payment and reveal:** if payment confirms after the listing's daily window or five-day entitlement expires, the contact is still revealed. Listing visibility is checked only at the time of invoice creation, not at confirmation or reveal.
+- **Same-browser Helper continuity:** browser-generated `purchase_token` (64 lowercase hex) is returned once in the `201` create response and stored only as an HMAC hash. Restore/recheck/reveal use token + original wallet. Same token + same wallet = idempotent 200.
+- **Receipt window:** `receipt_expires_at = first_revealed_at + 24 h`.
+
+`FIXED (Task 06)`
+
+- **Client identity and reputation (was item 1):** Client has a persistent wallet-bound profile (v2_client_profiles) created at $5 payment confirmation. Carries positive_count and negative_count. HMAC-keyed fingerprint. Not a public pseudonym.
+- **Reviews (was item 4):** Both directions implemented. Client → Helper via Telegram inline button (24 h window). Helper → Client via HMAC review token on website (24 h window). One review per purchase per side. See §13 and §22.
+
+`UNRESOLVED`
+
+1. **Role model:** fixed Client/Helper identities or both actions available to one wallet-bound profile.
+2. **Authoritative BTC/LTC funding-wallet resolution:** multi-input, custodial (exchange), and CoinJoin-like transactions.
+3. **Retention:** contact ciphertext, invoices, management-code hash, temporary purchase links, aggregate reputation, and expired listings.
+4. **Informer operation:** selected-city changes, multiple-city subscriptions, and periodic balance recheck policy.
+
+No coding brief for the role model is valid until item 1 above is fixed. Retention and Informer additionally require items 3-4.
 
 `POST-LAUNCH (non-blocking)`
 
@@ -930,20 +966,20 @@ The Client journey is not implementation-complete until these points are fixed:
 
 Until the remaining open items are fixed, the Client flow is understandable but not yet a complete coding contract.
 
-## 22. Telegram Purchase Notification and Client Review - Working Design
+## 22. Telegram Purchase Notification and Client Review
 
-`PROPOSED WORKING DESIGN, NOT YET FIXED`
+`FIXED (Task 06)`
 
 ### 22.1 Purchase event
 
-After a Helper's $10 payment is confirmed:
+After a Helper's $10 payment is confirmed and `contact_ready` state is reached:
 
-1. Contact is revealed to that purchase attempt.
+1. Contact is revealed to that purchase attempt (website).
 2. Listing remains visible and unchanged.
-3. Server creates one single-use Client-review entitlement for this confirmed purchase.
-4. Client Telegram bot receives a message.
+3. Server atomically creates both review entitlements (client-side and helper-side) and increments the Helper's purchase_count in the same transaction.
+4. Client Telegram bot receives a message (active binding required; `FIXED Task 06-FIX`: missing/expired/inconsistent binding → `ErrReviewNoBinding` → HTTP 409 `client_notification_unavailable`, full transaction rollback, zero orphan rows — the soft-skip was removed).
 
-Working message shape:
+Message shape (implemented):
 
 ```text
 NA Room: ваш контакт куплен.
@@ -955,44 +991,56 @@ Helper: <public pseudonym>
 Отрицательных отзывов: <N>
 
 Оцените Helper после общения:
-[Положительно] [Отрицательно] [Не оценивать]
+[Положительно] [Отрицательно]
 ```
 
 This message uses only the Helper's public pseudonym and aggregate counters. It must not contain Telegram identity, wallet address/fingerprint, listing management code, Client contact, transaction inputs, or internal principal identifiers.
 
 ### 22.2 Rating timing
 
-The Telegram message is sent immediately when contact purchase confirms, but Client is not expected to rate immediately. Client communicates externally first and returns to the existing Telegram message later.
+The Telegram message is sent at purchase `contact_ready` time. Client communicates externally first and may return to the existing Telegram message later to rate.
 
-The Telegram buttons remain usable for an unresolved review period. A review period must be chosen before implementation.
+Review window: 24 hours from purchase `contact_ready_at` for both directions.
 
 ### 22.3 Telegram callback security
 
+`FIXED (Task 06)`
+
 Buttons contain only an opaque single-use callback token. They never contain wallet hash, contact, listing management code, `helper_id`, or plaintext purchase data.
 
-Server stores temporarily:
+Telegram callback_data format: `"rv:" + hex(raw16bytes) + ":" + action` — approximately 37 characters, within Telegram's 64-byte limit.
+
+Server stores in `v2_review_entitlements`:
 
 ```text
-review_token_hash
-purchase_event_id
-reviewer_side = client
-review_target_id
+id            — internal row ID (64-char hex)
+review_ref    — opaque token key ("rev_" + 32 lowercase hex chars); stored hashed
+purchase_id
+reviewer_side   — "client" | "helper"
+target_profile_id — the profile whose counters are incremented
+rating          — NULL until consumed
 expires_at
-consumed_at
+consumed_at     — NULL until consumed
 ```
+
+Callback validation (before any DB mutation): non-empty callback query ID; `rv:<32 lowercase hex>:p|n` data format; non-nil message and chat; `message_id > 0`; `chat.type == "private"`; `chat.id > 0`. Malformed/missing → neutral 200, zero mutation, zero Bot API call.
+
+Delivery snapshot two-phase lifetime:
+- **Phase 1 (`awaiting_contact_ready`)**: created atomically with the purchase inside `CreatePurchase`. `expires_at = detection_deadline_at + 86400`. Survives Client binding deletion.
+- **Phase 2 (`pending_send`)**: activated at `contact_ready` inside the same transaction as review entitlements and `purchase_count++`. `expires_at` reset to `contact_ready_at + 86400` (matching review entitlement window). CAS must touch exactly 1 row; 0 or >1 → rollback.
 
 On button press:
 
-1. Bot validates token and expiry.
-2. Bot atomically changes it from unused to consumed.
-3. Positive or negative aggregate counter is incremented exactly once.
-4. Telegram message is edited to show that the rating was accepted.
-5. Second button press cannot create another review.
-6. Temporary purchase-to-review linkage is deleted after both review completion and the required audit/idempotency retention period.
+1. Bot parses `rv:<hex>:<action>` from callback_data.
+2. Looks up entitlement by review_ref, checks expiry.
+3. Atomically CAS: `UPDATE … SET rating=?, consumed_at=? WHERE id=? AND rating IS NULL`. 0 rows affected = already consumed.
+4. Increments the target profile's positive_count or negative_count.
+5. Telegram message is edited to confirm the rating.
+6. Second button press with same action returns idempotent success; different action returns conflict.
 
 ### 22.4 Rating shape
 
-The current notification concept implies a binary rating:
+Binary rating:
 
 ```text
 positive
@@ -1001,18 +1049,21 @@ negative
 
 Free-text reviews, star ratings, editing, dispute handling, and public review text are not part of the current agreed model and must not be added silently.
 
-### 22.5 Helper-to-Client review - proposed mechanism
+### 22.5 Helper-to-Client review
 
-After successful contact purchase, Helper receives a single-use review code/link for the purchased contact/Client. No Helper Telegram connection is required. The review code/link cannot reopen or reveal the purchased contact.
+`FIXED (Task 06)`
+
+`FIXED Task 06-FIX (was stale)`: The review token is NOT returned in the contact-ready or reveal HTTP response. After successful contact reveal, the Helper calls `POST /v2/helper/reviews/capability` separately to obtain the `review_token` (66-char opaque string) and `expires_at` (unix seconds, 24 h from `contact_ready_at`).
+
+Review token format: `base64url(raw16bytes) + "." + base64url(HMAC-SHA256(hmacKey, "naroom:v2:review-token:" + reviewRef))`.
+
+Endpoints:
+- `POST /v2/helper/reviews/capability` — validates purchase_id + purchase_token + wallet_address; returns review_token + expires_at + client_reputation snapshot + client_display_name.
+- `POST /v2/helper/reviews` — consumes the review token; increments Client's profile counter.
 
 The Informer bot is not involved because its only function is selected-city new-listing notification.
-
-Still unresolved:
-
-- review timing and expiry;
-- whether the review targets only the individual listing/contact transaction;
-- whether a persistent Client profile and aggregate rating exist;
-- exact review-code/link presentation and what happens if the Helper loses it.
+No Helper Telegram connection is required for the Helper review flow.
+The review token cannot reopen or reveal the purchased contact.
 
 ## 23. Helper State Machine - Working Draft
 
@@ -1077,7 +1128,7 @@ expected wallet balance < $1,000
   -> PAID_CONTACT_WITHHELD_LOW_BALANCE
 ```
 
-There is no refund for wrong-sender or low-balance results. Top-up/recheck behavior remains unresolved.
+There is no refund for wrong-sender or low-balance results. A Helper who paid but holds < $1,000 post-payment may call `/recheck-balance` to retry the balance check until `balance_retry_deadline_at` (`confirmation_deadline_at + 24 h`). After that deadline the purchase moves to the terminal `failed` state.
 
 ### 23.3 Immediate contact result and review code
 
@@ -1093,13 +1144,23 @@ The review capability authorizes one later rating only. It cannot reveal the con
 
 ### 23.4 Return and interruption requirements
 
-An internal short-lived same-browser token may allow return to:
+`FIXED (Task 05-FIX / Task 05-FIX2)` — backend capability contract:
 
-- `CONTACT_INVOICE_PENDING` after refresh or browser closure;
-- `PAYMENT_CONFIRMED` while sender/balance verification is still running;
-- a withheld result if a retry is later approved.
+The purchase token (64 lowercase hex, browser-generated, returned once in the `201` create response) is the sole short-lived capability for this purchase. It is stored only as `HMAC-SHA256("naroom:v2:helper-browser-token:", token)` and never re-issued. Using the same token + same wallet:
 
-There is no user-facing purchase recovery code, no cross-browser promise, and no later contact-reveal right attached to the review code. The public wallet address alone must not grant access to a purchased Client contact. Behavior after closing the browser before confirmation or refreshing after reveal remains unresolved.
+- `/contact-purchases` (create) → idempotent `200` with existing purchase, no new provider/issuer call;
+- `/contact-purchases/restore` → restores purchase phase/state at any point within the allowed lifetime;
+- `/recheck-balance` → retries the balance check until `confirmation_deadline_at + 24 h`;
+- `/contact-purchases/reveal` → reveals the contact within `receipt_expires_at` (24 h from first reveal).
+
+Different token or different wallet for the same purchase → generic `404` (no enumeration). There is no user-facing purchase recovery code and no cross-browser promise. The public wallet address alone does not grant access.
+
+`UNRESOLVED (Task 08)` — frontend UX after browser interruption:
+
+- Exact frontend behavior when the Helper closes the browser tab or refreshes the page during payment confirmation.
+- Whether the contact remains visible after an ordinary refresh of the reveal page or is strictly shown once.
+
+These are frontend presentation decisions, not backend contract changes.
 
 ### 23.5 Country enforcement
 
@@ -1116,7 +1177,7 @@ helper.country_code != listing.country_code
   -> purchase action is blocked before invoice creation
 ```
 
-The same rule must be enforced by the backend even if a user bypasses the frontend notice or opens a direct listing URL. The exact transition that commits the first country lock remains unresolved; the current recommendation is the first successful sender and post-payment balance verification.
+The same rule must be enforced by the backend even if a user bypasses the frontend notice or opens a direct listing URL. The country lock is committed at the first successful sender verification and post-payment balance check (≥ $1,000) via atomic CAS update; a concurrent purchase for a different country causes the new purchase to transition to `failed` in the same transaction, leaving the existing lock intact.
 
 ## 24. Helper Journey Completeness Audit
 
@@ -1135,14 +1196,24 @@ The same rule must be enforced by the backend even if a user bypasses the fronte
 
 ### 24.2 Helper path still not fully closed
 
-1. Exact point at which the country lock becomes permanent.
-2. Exact BTC/LTC funding-wallet resolution rule for multi-input and custodial transactions.
-3. Whether a low-balance paid Helper can top up and rerun the check without another $10 payment.
-4. Same-browser behavior when the page is refreshed or closed before payment confirmation.
-5. Whether the contact remains visible after refreshing the same result page or is strictly shown once.
-6. How long pending invoices and temporary purchase-to-review links remain stored.
-7. Whether the same wallet-bound profile may also act as a Client.
-8. Exact Helper review-code/link lifetime and what identity or listing receives the review.
-9. What happens when payment confirms after the daily visibility window or five-day listing entitlement has ended.
+`FIXED (Task 05-FIX)`
 
-These nine points remain in the Helper decision queue. Informer decisions are tracked separately. No implementation agent may choose them silently.
+- **Country lock commit point** (was item 1): first successful sender verification and post-payment balance check ≥ $1,000. Atomic CAS; concurrent conflict → purchase `failed`.
+- **Low-balance retry** (was item 3): allowed via `/recheck-balance` until `confirmation_deadline_at + 24 h`; after that the purchase is `failed`.
+- **Late payment** (was item 9): contact is still revealed; listing visibility is checked only at invoice create time.
+- **Same-browser continuity**: browser-generated `purchase_token` returned once at `201`; same token + wallet = idempotent `200`.
+- **Receipt window**: `receipt_expires_at = first_revealed_at + 24 h`.
+
+`FIXED (Task 06)`
+
+- **Helper review-code/link lifetime and target (was item 6):** review token expires 24 h from `contact_ready_at`. Review targets the Client's wallet-bound profile (v2_client_profiles). Token is HMAC-signed and single-use. Format and endpoints defined in §22.5.
+
+`UNRESOLVED`
+
+1. Exact BTC/LTC funding-wallet resolution rule for multi-input and custodial transactions.
+2. Same-browser behavior when the page is refreshed or closed before payment confirmation completes.
+3. Whether the contact remains visible after refreshing the same result page or is strictly shown once.
+4. How long pending invoices and temporary purchase-to-review links remain stored.
+5. Whether the same wallet-bound profile may also act as a Client.
+
+These points remain open. Informer decisions are tracked separately. No implementation agent may choose them silently.

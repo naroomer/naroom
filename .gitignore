@@ -15,6 +15,8 @@
 /naroom-linux
 naroom_*
 naroom-*
+!cmd/naroom-v2-dev/
+!cmd/naroom-v2-dev/**
 
 # Frontend build artifacts
 frontend/node_modules/
@@ -36,3 +38,11 @@ e2e/node_modules/
 
 # Local diagnostics
 e2e/diagnose_*.js
+
+# E2E test artifacts
+e2e/screenshots/
+
+# Root-level node_modules (should not exist — E2E uses e2e/node_modules/)
+/node_modules/
+/package.json
+/package-lock.json

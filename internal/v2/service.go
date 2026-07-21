@@ -723,12 +723,25 @@ func (s *Service) ConfirmPayment(flowID, invoiceID string, observedAt time.Time)
 		confirmedTxid = storedTxid.String
 	}
 
-	// Update flow state.
+	// Get-or-create Client profile atomically inside the same transaction.
+	// walletFP and currency are already stored in v2_client_flows; read them inside the tx.
+	var walletFP, flowCurrency string
+	fpErr := tx.QueryRow(`SELECT wallet_fingerprint, currency FROM v2_client_flows WHERE id = ?`, flowID).
+		Scan(&walletFP, &flowCurrency)
+	if fpErr != nil {
+		return FlowView{}, fmt.Errorf("v2: ConfirmPayment: read wallet fp: %w", fpErr)
+	}
+	clientProfileID, profErr := getOrCreateClientProfileTx(tx, walletFP, flowCurrency, now)
+	if profErr != nil {
+		return FlowView{}, fmt.Errorf("v2: ConfirmPayment: get-or-create client profile: %w", profErr)
+	}
+
+	// Update flow state and set client_profile_id atomically.
 	flowRes, err := tx.Exec(`
 		UPDATE v2_client_flows
-		SET state = ?, updated_at = ?
+		SET state = ?, client_profile_id = ?, updated_at = ?
 		WHERE id = ? AND state = ?`,
-		StatePaymentConfirmed, now, flowID, StateAwaitingPayment,
+		StatePaymentConfirmed, clientProfileID, now, flowID, StateAwaitingPayment,
 	)
 	if err != nil {
 		return FlowView{}, fmt.Errorf("v2: ConfirmPayment: update flow: %w", err)

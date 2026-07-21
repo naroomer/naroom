@@ -13,8 +13,15 @@ CREATE TABLE IF NOT EXISTS v2_client_flows (
     state                TEXT NOT NULL DEFAULT 'awaiting_payment'
                               CHECK (state IN ('awaiting_payment', 'payment_confirmed',
                                                'paid_low_balance', 'form_ready')),
+    -- FK to v2_client_profiles; NULL only while state='awaiting_payment'.
+    -- Set atomically at first successful $5 payment confirmation.
+    -- v2_client_profiles is defined later in this file; SQLite does not validate
+    -- the referenced table at DDL time (only at DML time with PRAGMA foreign_keys=ON).
+    client_profile_id    TEXT REFERENCES v2_client_profiles(id),
     created_at           INTEGER NOT NULL,
-    updated_at           INTEGER NOT NULL
+    updated_at           INTEGER NOT NULL,
+    -- awaiting_payment may have NULL profile; all post-confirm states require one.
+    CHECK (state = 'awaiting_payment' OR client_profile_id IS NOT NULL)
 );
 
 -- One invoice per flow (UNIQUE enforces 1:1).
@@ -298,9 +305,8 @@ CREATE INDEX IF NOT EXISTS idx_v2_attempts_flow    ON v2_telegram_link_attempts(
 CREATE INDEX IF NOT EXISTS idx_v2_attempts_state   ON v2_telegram_link_attempts(state);
 CREATE INDEX IF NOT EXISTS idx_v2_destinations_ref ON v2_telegram_destinations(binding_ref);
 
--- ─────────────────────────────────────────────────────────────────────────────
--- Helper contact purchase tables (Task 05)
--- ─────────────────────────────────────────────────────────────────────────────
+
+-- Helper contact purchase tables (Task 05, hardened Task 05-FIX)
 
 -- v2_helper_profiles: one row per unique Helper wallet.
 -- wallet_fingerprint: HMAC-SHA256("naroom:v2:helper-wallet:"+currency+":"+normalized_addr).
@@ -317,23 +323,24 @@ CREATE TABLE IF NOT EXISTS v2_helper_profiles (
     negative_count     INTEGER NOT NULL DEFAULT 0 CHECK (negative_count >= 0),
     created_at         INTEGER NOT NULL,
     updated_at         INTEGER NOT NULL,
-    -- id: 64 lowercase hex
+    -- id: exactly 64 lowercase hex chars
     CHECK (length(id) = 64 AND NOT (id GLOB '*[^0-9a-f]*')),
-    -- wallet_fingerprint: 64 lowercase hex
+    -- wallet_fingerprint: exactly 64 lowercase hex chars
     CHECK (length(wallet_fingerprint) = 64 AND NOT (wallet_fingerprint GLOB '*[^0-9a-f]*')),
     -- public_name non-empty
     CHECK (length(public_name) > 0),
     -- country_code: NULL or exactly 2 uppercase ASCII letters
-    CHECK (country_code IS NULL OR (length(country_code) = 2 AND NOT (country_code GLOB '*[^A-Z]*'))),
+    CHECK (country_code IS NULL
+        OR (length(country_code) = 2 AND NOT (country_code GLOB '*[^A-Z]*'))),
     CHECK (updated_at >= created_at)
 );
 
 -- v2_helper_purchases: one row per Helper contact purchase attempt.
 -- browser_token_hash: HMAC-SHA256("naroom:v2:helper-browser-token:"+raw_token); raw token never stored.
--- State machine: awaiting_payment → payment_detected → payment_confirmed
---               → paid_low_balance (balance < $1000) or contact_ready (balance >= $1000)
+-- State machine: awaiting_payment -> payment_detected -> payment_confirmed
+--               -> paid_low_balance (balance < $1000) or contact_ready (balance >= $1000)
 --               invoice_expired: invoice expired before payment
---               failed: retry deadline passed while paid_low_balance
+--               failed: country CAS loss or retry deadline passed
 --               receipt_expired: receipt window closed
 CREATE TABLE IF NOT EXISTS v2_helper_purchases (
     id                        TEXT PRIMARY KEY,
@@ -347,50 +354,90 @@ CREATE TABLE IF NOT EXISTS v2_helper_purchases (
                                        'contact_ready', 'failed',
                                        'invoice_expired', 'receipt_expired'
                                    )),
-    country_code_snapshot     TEXT NOT NULL
-                                   CHECK (length(country_code_snapshot) = 2
-                                          AND NOT (country_code_snapshot GLOB '*[^A-Z]*')),
+    country_code_snapshot     TEXT NOT NULL,
     contact_ready_at          INTEGER,
     first_revealed_at         INTEGER,
     receipt_expires_at        INTEGER,
     balance_retry_deadline_at INTEGER,
-    last_balance_usd          REAL CHECK (last_balance_usd IS NULL OR (last_balance_usd >= 0 AND last_balance_usd < 1e15)),
+    last_balance_usd          REAL CHECK (last_balance_usd IS NULL
+                                          OR (last_balance_usd >= 0 AND last_balance_usd < 1e15)),
     last_balance_checked_at   INTEGER,
     created_at                INTEGER NOT NULL,
     updated_at                INTEGER NOT NULL,
 
-    -- id: 64 lowercase hex
+    -- id: exactly 64 lowercase hex chars
     CHECK (length(id) = 64 AND NOT (id GLOB '*[^0-9a-f]*')),
-    -- browser_token_hash: 64 lowercase hex
+    -- browser_token_hash: exactly 64 lowercase hex chars
     CHECK (length(browser_token_hash) = 64 AND NOT (browser_token_hash GLOB '*[^0-9a-f]*')),
-    -- balance pair: both present or both absent
-    CHECK ((last_balance_usd IS NULL) = (last_balance_checked_at IS NULL)),
-    -- reveal pair: receipt_expires_at present IFF first_revealed_at present
-    CHECK ((first_revealed_at IS NULL) = (receipt_expires_at IS NULL)),
-    -- receipt_expires_at > first_revealed_at (exactly 24h more)
-    CHECK (first_revealed_at IS NULL OR receipt_expires_at > first_revealed_at),
-    -- first_revealed_at >= contact_ready_at
-    CHECK (first_revealed_at IS NULL OR contact_ready_at IS NULL OR first_revealed_at >= contact_ready_at),
-    -- receipt_expires_at = first_revealed_at + 86400 (enforced here as range check)
-    CHECK (receipt_expires_at IS NULL OR (receipt_expires_at > first_revealed_at AND receipt_expires_at <= first_revealed_at + 86401)),
-    -- contact_ready_at only set in contact_ready or receipt_expired
-    CHECK (contact_ready_at IS NULL OR state IN ('contact_ready', 'receipt_expired')),
-    -- balance_retry_deadline_at only after payment confirmation
-    CHECK (balance_retry_deadline_at IS NULL
-        OR state IN ('payment_confirmed', 'paid_low_balance', 'contact_ready', 'failed', 'receipt_expired')),
-    -- first_revealed_at only in contact_ready or receipt_expired
-    CHECK (first_revealed_at IS NULL OR state IN ('contact_ready', 'receipt_expired')),
-    -- paid_low_balance requires balance < 1000 and balance_retry_deadline_at
-    CHECK (state != 'paid_low_balance' OR (
-        last_balance_usd IS NOT NULL AND last_balance_usd < 1000
-        AND balance_retry_deadline_at IS NOT NULL
-    )),
-    -- contact_ready requires balance >= 1000, contact_ready_at, balance_retry_deadline_at
-    CHECK (state != 'contact_ready' OR (
-        last_balance_usd IS NOT NULL AND last_balance_usd >= 1000
-        AND contact_ready_at IS NOT NULL
-        AND balance_retry_deadline_at IS NOT NULL
-    )),
+    -- country_code_snapshot: exactly 2 uppercase ASCII letters
+    CHECK (length(country_code_snapshot) = 2
+           AND NOT (country_code_snapshot GLOB '*[^A-Z]*')),
+    -- receipt_expires_at must be exactly first_revealed_at + 86400 (not just > it)
+    CHECK (first_revealed_at IS NULL OR receipt_expires_at = first_revealed_at + 86400),
+    -- first_revealed_at not before contact_ready_at
+    CHECK (first_revealed_at IS NULL OR contact_ready_at IS NULL
+           OR first_revealed_at >= contact_ready_at),
+    -- Comprehensive state-specific field requirements for all 8 purchase states.
+    -- Each state enforces required/forbidden fields; no state can hold fields
+    -- that belong only to a later lifecycle phase.
+    CHECK (
+        -- awaiting_payment: all balance/retry/contact/reveal fields NULL
+        (state = 'awaiting_payment'
+            AND last_balance_usd IS NULL AND last_balance_checked_at IS NULL
+            AND balance_retry_deadline_at IS NULL
+            AND contact_ready_at IS NULL
+            AND first_revealed_at IS NULL AND receipt_expires_at IS NULL)
+        OR
+        -- payment_detected: same as awaiting_payment
+        (state = 'payment_detected'
+            AND last_balance_usd IS NULL AND last_balance_checked_at IS NULL
+            AND balance_retry_deadline_at IS NULL
+            AND contact_ready_at IS NULL
+            AND first_revealed_at IS NULL AND receipt_expires_at IS NULL)
+        OR
+        -- payment_confirmed: retry deadline required; balance/contact/reveal NULL
+        (state = 'payment_confirmed'
+            AND balance_retry_deadline_at IS NOT NULL
+            AND last_balance_usd IS NULL AND last_balance_checked_at IS NULL
+            AND contact_ready_at IS NULL
+            AND first_revealed_at IS NULL AND receipt_expires_at IS NULL)
+        OR
+        -- paid_low_balance: retry deadline + balance pair (< 1000); contact/reveal NULL
+        (state = 'paid_low_balance'
+            AND balance_retry_deadline_at IS NOT NULL
+            AND last_balance_usd IS NOT NULL AND last_balance_usd < 1000
+            AND last_balance_checked_at IS NOT NULL
+            AND contact_ready_at IS NULL
+            AND first_revealed_at IS NULL AND receipt_expires_at IS NULL)
+        OR
+        -- contact_ready: retry deadline + balance (>= 1000) + contact_ready_at; reveal pair both or neither
+        (state = 'contact_ready'
+            AND balance_retry_deadline_at IS NOT NULL
+            AND last_balance_usd IS NOT NULL AND last_balance_usd >= 1000
+            AND last_balance_checked_at IS NOT NULL
+            AND contact_ready_at IS NOT NULL
+            AND (first_revealed_at IS NULL) = (receipt_expires_at IS NULL))
+        OR
+        -- invoice_expired: all balance/retry/contact/reveal fields NULL
+        (state = 'invoice_expired'
+            AND last_balance_usd IS NULL AND last_balance_checked_at IS NULL
+            AND balance_retry_deadline_at IS NULL
+            AND contact_ready_at IS NULL
+            AND first_revealed_at IS NULL AND receipt_expires_at IS NULL)
+        OR
+        -- failed: contact/reveal NULL; balance/retry snapshot preserved (optional)
+        (state = 'failed'
+            AND contact_ready_at IS NULL
+            AND first_revealed_at IS NULL AND receipt_expires_at IS NULL)
+        OR
+        -- receipt_expired: contact_ready_at + balance/retry snapshot required; reveal pair both or neither
+        (state = 'receipt_expired'
+            AND contact_ready_at IS NOT NULL
+            AND balance_retry_deadline_at IS NOT NULL
+            AND last_balance_usd IS NOT NULL AND last_balance_usd >= 1000
+            AND last_balance_checked_at IS NOT NULL
+            AND (first_revealed_at IS NULL) = (receipt_expires_at IS NULL))
+    ),
     CHECK (updated_at >= created_at)
 );
 
@@ -400,7 +447,8 @@ CREATE TABLE IF NOT EXISTS v2_helper_invoices (
     id                       TEXT PRIMARY KEY,
     purchase_id              TEXT NOT NULL UNIQUE REFERENCES v2_helper_purchases(id),
     status                   TEXT NOT NULL DEFAULT 'pending'
-                                  CHECK (status IN ('pending', 'payment_detected', 'confirmed', 'expired')),
+                                  CHECK (status IN ('pending', 'payment_detected',
+                                                    'confirmed', 'expired')),
     payment_address          TEXT NOT NULL CHECK (length(payment_address) > 0),
     amount_usd_cents         INTEGER NOT NULL CHECK (amount_usd_cents = 1000),
     amount_atomic            INTEGER NOT NULL CHECK (amount_atomic > 0),
@@ -412,17 +460,21 @@ CREATE TABLE IF NOT EXISTS v2_helper_invoices (
     created_at               INTEGER NOT NULL,
     updated_at               INTEGER NOT NULL,
 
-    -- id: 64 lowercase hex
+    -- id: exactly 64 lowercase hex chars
     CHECK (length(id) = 64 AND NOT (id GLOB '*[^0-9a-f]*')),
-    -- purchase_id: 64 lowercase hex
+    -- purchase_id: exactly 64 lowercase hex chars
     CHECK (length(purchase_id) = 64 AND NOT (purchase_id GLOB '*[^0-9a-f]*')),
     CHECK (detection_deadline_at > created_at),
     CHECK (updated_at >= created_at),
-    -- payment_detected_at <= confirmation_deadline_at when both present
-    CHECK (payment_detected_at IS NULL OR confirmation_deadline_at IS NULL OR payment_detected_at <= confirmation_deadline_at),
-    -- confirmed_at >= payment_detected_at when both present
-    CHECK (payment_detected_at IS NULL OR confirmed_at IS NULL OR confirmed_at >= payment_detected_at),
-    -- detected_txid_hash: 64 lowercase hex when set
+    -- confirmation_deadline_at = payment_detected_at + 86400 exactly
+    CHECK (payment_detected_at IS NULL OR confirmation_deadline_at IS NULL
+           OR confirmation_deadline_at = payment_detected_at + 86400),
+    -- confirmed_at must lie within [payment_detected_at, confirmation_deadline_at]
+    CHECK (confirmed_at IS NULL OR payment_detected_at IS NULL
+           OR (confirmed_at >= payment_detected_at
+               AND (confirmation_deadline_at IS NULL
+                    OR confirmed_at <= confirmation_deadline_at))),
+    -- detected_txid_hash when set must be exactly 64 lowercase hex chars
     CHECK (detected_txid_hash IS NULL OR (
         length(detected_txid_hash) = 64
         AND NOT (detected_txid_hash GLOB '*[^0-9a-f]*')
@@ -450,12 +502,138 @@ CREATE TABLE IF NOT EXISTS v2_helper_invoices (
         (status = 'expired'
             AND confirmed_at IS NULL
             AND (
-                (detected_txid_hash IS NULL AND payment_detected_at IS NULL AND confirmation_deadline_at IS NULL)
+                (detected_txid_hash IS NULL AND payment_detected_at IS NULL
+                    AND confirmation_deadline_at IS NULL)
                 OR
-                (detected_txid_hash IS NOT NULL AND payment_detected_at IS NOT NULL AND confirmation_deadline_at IS NOT NULL)
+                (detected_txid_hash IS NOT NULL AND payment_detected_at IS NOT NULL
+                    AND confirmation_deadline_at IS NOT NULL)
             ))
     )
 );
+
+-- ── Task 06: Client reputation and bidirectional reviews ─────────────────────
+
+-- v2_client_profiles: one row per unique Client wallet (keyed by HMAC fingerprint).
+-- wallet_fingerprint: HMAC-SHA256("naroom:v2:wallet:"+currency+":"+normalized_addr).
+-- This is the same fingerprint stored in v2_client_flows.wallet_fingerprint.
+-- No raw address, no permanent display name, no flow/invoice/management data.
+CREATE TABLE IF NOT EXISTS v2_client_profiles (
+    id                 TEXT PRIMARY KEY,
+    wallet_fingerprint TEXT NOT NULL UNIQUE,
+    currency           TEXT NOT NULL CHECK (currency IN ('BTC', 'LTC')),
+    positive_count     INTEGER NOT NULL DEFAULT 0 CHECK (positive_count >= 0),
+    negative_count     INTEGER NOT NULL DEFAULT 0 CHECK (negative_count >= 0),
+    created_at         INTEGER NOT NULL,
+    updated_at         INTEGER NOT NULL,
+    -- id: exactly 64 lowercase hex chars
+    CHECK (length(id) = 64 AND NOT (id GLOB '*[^0-9a-f]*')),
+    -- wallet_fingerprint: exactly 64 lowercase hex chars
+    CHECK (length(wallet_fingerprint) = 64 AND NOT (wallet_fingerprint GLOB '*[^0-9a-f]*')),
+    CHECK (updated_at >= created_at)
+);
+
+-- v2_review_entitlements: one row per purchase × reviewer_side.
+-- Created atomically in the same transaction as the contact_ready transition.
+-- review_ref: opaque, random. Format: "rev_" + 32 lowercase hex chars (16 random bytes).
+-- The Helper website review token is derived server-side from review_ref + HMAC secret;
+-- the raw token is never stored. Telegram callback_data encodes the raw_ref only.
+CREATE TABLE IF NOT EXISTS v2_review_entitlements (
+    id                       TEXT PRIMARY KEY,
+    purchase_id              TEXT NOT NULL REFERENCES v2_helper_purchases(id),
+    reviewer_side            TEXT NOT NULL CHECK (reviewer_side IN ('client', 'helper')),
+    -- Opaque reference stored in DB; the deliverable token is HMAC-derived.
+    review_ref               TEXT NOT NULL UNIQUE,
+    -- Exactly one target profile set per side (XOR).
+    -- client reviewer → target Helper profile
+    -- helper reviewer → target Client profile
+    target_helper_profile_id TEXT REFERENCES v2_helper_profiles(id),
+    target_client_profile_id TEXT REFERENCES v2_client_profiles(id),
+    -- expires_at = contact_ready_at + 86400 (enforced at application layer)
+    expires_at               INTEGER NOT NULL,
+    -- Before consume: both NULL. After consume: both NOT NULL.
+    rating                   TEXT CHECK (rating IN ('positive', 'negative')),
+    consumed_at              INTEGER,
+    created_at               INTEGER NOT NULL,
+    updated_at               INTEGER NOT NULL,
+
+    -- One entitlement per purchase per side.
+    UNIQUE (purchase_id, reviewer_side),
+
+    -- review_ref format: "rev_" + 32 lowercase hex chars = 36 total
+    CHECK (
+        length(review_ref) = 36
+        AND substr(review_ref, 1, 4) = 'rev_'
+        AND NOT (substr(review_ref, 5) GLOB '*[^0-9a-f]*')
+    ),
+
+    -- Side-target XOR: client → helper set; helper → client set
+    CHECK (
+        (reviewer_side = 'client'
+            AND target_helper_profile_id IS NOT NULL
+            AND target_client_profile_id IS NULL)
+        OR
+        (reviewer_side = 'helper'
+            AND target_client_profile_id IS NOT NULL
+            AND target_helper_profile_id IS NULL)
+    ),
+
+    -- Atomic consume: both NULL pre-consume, both NOT NULL post-consume
+    CHECK ((rating IS NULL) = (consumed_at IS NULL)),
+
+    -- Post-consume timestamp bounds
+    CHECK (consumed_at IS NULL OR (consumed_at >= created_at AND consumed_at <= expires_at)),
+
+    -- Exact 24-hour window: createReviewEntitlementsTx uses created_at=contactReadyAt
+    -- so expires_at = contactReadyAt + 86400 = created_at + 86400.
+    CHECK (expires_at = created_at + 86400),
+    CHECK (updated_at >= created_at)
+);
+
+-- v2_review_delivery_snapshots: encrypted Client Telegram destination snapshot.
+-- Created atomically with the Helper purchase while the Client binding is live.
+-- Survives daily binding deletion; deleted after the 24h review window closes.
+-- state transitions: awaiting_contact_ready → pending_send → sent | permanent_failure
+-- After send or permanent failure: encrypted fields (chat_id_ciphertext, nonce) are NULLed.
+CREATE TABLE IF NOT EXISTS v2_review_delivery_snapshots (
+    id                   TEXT PRIMARY KEY,
+    purchase_id          TEXT NOT NULL UNIQUE REFERENCES v2_helper_purchases(id),
+    -- Snapshot of the binding_ref used as AAD at encryption time.
+    binding_ref_snapshot TEXT NOT NULL,
+    -- AES-GCM encrypted chat_id (hex); NULLed after delivery or permanent failure.
+    chat_id_ciphertext   TEXT,
+    chat_id_nonce        TEXT,
+    key_version          TEXT NOT NULL,
+    state                TEXT NOT NULL DEFAULT 'awaiting_contact_ready'
+                             CHECK (state IN (
+                                 'awaiting_contact_ready', 'pending_send',
+                                 'sent', 'permanent_failure'
+                             )),
+    -- max confirmation horizon: invoice.detection_deadline_at + 86400
+    expires_at           INTEGER NOT NULL,
+    created_at           INTEGER NOT NULL,
+    updated_at           INTEGER NOT NULL,
+
+    -- Encrypted fields present only while state is awaiting_contact_ready or pending_send
+    CHECK (
+        (state IN ('awaiting_contact_ready', 'pending_send')
+            AND chat_id_ciphertext IS NOT NULL
+            AND chat_id_nonce IS NOT NULL)
+        OR
+        (state IN ('sent', 'permanent_failure')
+            AND chat_id_ciphertext IS NULL
+            AND chat_id_nonce IS NULL)
+    ),
+    CHECK (length(binding_ref_snapshot) > 0),
+    CHECK (length(key_version) > 0),
+    CHECK (updated_at >= created_at),
+    CHECK (expires_at > created_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_v2_client_profiles_fp    ON v2_client_profiles(wallet_fingerprint);
+CREATE INDEX IF NOT EXISTS idx_v2_review_entitlements_purchase ON v2_review_entitlements(purchase_id);
+CREATE INDEX IF NOT EXISTS idx_v2_review_entitlements_ref      ON v2_review_entitlements(review_ref);
+CREATE INDEX IF NOT EXISTS idx_v2_review_snapshots_purchase    ON v2_review_delivery_snapshots(purchase_id);
+CREATE INDEX IF NOT EXISTS idx_v2_review_snapshots_state       ON v2_review_delivery_snapshots(state);
 
 CREATE INDEX IF NOT EXISTS idx_v2_helper_profiles_fp       ON v2_helper_profiles(wallet_fingerprint);
 CREATE INDEX IF NOT EXISTS idx_v2_helper_purchases_profile ON v2_helper_purchases(helper_profile_id);
@@ -463,3 +641,9 @@ CREATE INDEX IF NOT EXISTS idx_v2_helper_purchases_listing ON v2_helper_purchase
 CREATE INDEX IF NOT EXISTS idx_v2_helper_purchases_state   ON v2_helper_purchases(state);
 CREATE INDEX IF NOT EXISTS idx_v2_helper_invoices_status   ON v2_helper_invoices(status);
 CREATE INDEX IF NOT EXISTS idx_v2_helper_invoices_purchase ON v2_helper_invoices(purchase_id);
+-- Partial UNIQUE: at most one non-terminal purchase per (profile, listing).
+-- Terminal states (invoice_expired, failed, receipt_expired) are excluded so that
+-- a new purchase can be created after the previous one ends.
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_v2_helper_purchases_active
+ON v2_helper_purchases(helper_profile_id, listing_id)
+WHERE state NOT IN ('invoice_expired', 'failed', 'receipt_expired');

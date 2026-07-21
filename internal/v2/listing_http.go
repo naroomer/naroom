@@ -149,16 +149,17 @@ type restoreNavResponse struct {
 // publicListingJSON is the board and detail public shape.
 // Contains no contact data, no capability, no payment, no Telegram, no internal IDs.
 type publicListingJSON struct {
-	ID             string   `json:"id"`
-	DisplayName    string   `json:"display_name"`
-	City           string   `json:"city"`
-	CountryCode    string   `json:"country_code"`
-	DependencyType string   `json:"dependency_type"`
-	HelpType       string   `json:"help_type"`
-	Urgency        string   `json:"urgency"`
-	Languages      []string `json:"languages"`
-	VisibleUntil   int64    `json:"visible_until"` // unix seconds
-	TimeLeftSec    int64    `json:"time_left_sec"` // non-negative
+	ID               string               `json:"id"`
+	DisplayName      string               `json:"display_name"`
+	City             string               `json:"city"`
+	CountryCode      string               `json:"country_code"`
+	DependencyType   string               `json:"dependency_type"`
+	HelpType         string               `json:"help_type"`
+	Urgency          string               `json:"urgency"`
+	Languages        []string             `json:"languages"`
+	VisibleUntil     int64                `json:"visible_until"` // unix seconds
+	TimeLeftSec      int64                `json:"time_left_sec"` // non-negative
+	ClientReputation clientReputationJSON `json:"client_reputation"`
 }
 
 func publicViewToJSON(p PublicListingView) publicListingJSON {
@@ -177,6 +178,11 @@ func publicViewToJSON(p PublicListingView) publicListingJSON {
 		Languages:      p.Languages,
 		VisibleUntil:   p.VisibleUntil.Unix(),
 		TimeLeftSec:    tls,
+		ClientReputation: clientReputationJSON{
+			MemberSince:   p.ClientReputation.MemberSince.Unix(),
+			PositiveCount: p.ClientReputation.PositiveCount,
+			NegativeCount: p.ClientReputation.NegativeCount,
+		},
 	}
 }
 

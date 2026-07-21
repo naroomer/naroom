@@ -1182,6 +1182,121 @@ func TestWebhookEntitlementExpiryCleanupDeleteFailureReturns503(t *testing.T) {
 	}
 }
 
+// ── Telegram malformed callback matrix (Category 11) ──────────────────────────
+
+// buildCallbackBody constructs a callback_query webhook JSON.
+func buildCallbackBody(queryID string, chatID int64, chatType string, messageID int64, data string) []byte {
+	return []byte(fmt.Sprintf(
+		`{"callback_query":{"id":%q,"data":%q,"message":{"message_id":%d,"chat":{"id":%d,"type":%q}}}}`,
+		queryID, data, messageID, chatID, chatType,
+	))
+}
+
+// validCallbackData returns a valid rv: callback data for testing.
+func validCallbackData() string {
+	return "rv:" + strings.Repeat("a", 32) + ":p"
+}
+
+func TestWebhookCallbackMalformedMatrix(t *testing.T) {
+	transport, svc, _, db := newTestTransport(t, nil)
+	rs, err := NewReviewService(db, testHMACKey, time.Now)
+	if err != nil {
+		t.Fatalf("NewReviewService: %v", err)
+	}
+	stubSender := &stubReviewSender{}
+	transport.SetReviewService(rs, stubSender)
+
+	_ = svc // keep reference
+
+	sendCB := func(body []byte) int {
+		req := httptest.NewRequest(http.MethodPost, "/v2/telegram/client/webhook", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Telegram-Bot-Api-Secret-Token", string(testWebhookSecret))
+		w := httptest.NewRecorder()
+		transport.HandleWebhook(w, req)
+		return w.Code
+	}
+
+	// Count consumed reviews before test.
+	countReviews := func() int {
+		var n int
+		db.QueryRow(`SELECT COUNT(*) FROM v2_review_entitlements WHERE consumed_at IS NOT NULL`).Scan(&n) //nolint:errcheck
+		return n
+	}
+	before := countReviews()
+
+	cases := []struct {
+		name string
+		body []byte
+	}{
+		{
+			"empty_query_id",
+			buildCallbackBody("", 123, "private", 1, validCallbackData()),
+		},
+		{
+			"nil_message",
+			[]byte(`{"callback_query":{"id":"qid","data":"` + validCallbackData() + `"}}`),
+		},
+		{
+			"nil_chat",
+			[]byte(`{"callback_query":{"id":"qid","data":"` + validCallbackData() + `","message":{"message_id":1}}}`),
+		},
+		{
+			"non_private_group",
+			buildCallbackBody("qid", 123, "group", 1, validCallbackData()),
+		},
+		{
+			"non_private_channel",
+			buildCallbackBody("qid", 123, "channel", 1, validCallbackData()),
+		},
+		{
+			"zero_chat_id",
+			buildCallbackBody("qid", 0, "private", 1, validCallbackData()),
+		},
+		{
+			"negative_chat_id",
+			buildCallbackBody("qid", -1, "private", 1, validCallbackData()),
+		},
+		{
+			"zero_message_id",
+			buildCallbackBody("qid", 123, "private", 0, validCallbackData()),
+		},
+		{
+			"negative_message_id",
+			buildCallbackBody("qid", 123, "private", -1, validCallbackData()),
+		},
+		{
+			"malformed_data_no_prefix",
+			buildCallbackBody("qid", 123, "private", 1, "bad:data:here"),
+		},
+		{
+			"malformed_data_uppercase_hex",
+			buildCallbackBody("qid", 123, "private", 1, "rv:"+strings.Repeat("A", 32)+":p"),
+		},
+		{
+			"malformed_data_wrong_length",
+			buildCallbackBody("qid", 123, "private", 1, "rv:"+strings.Repeat("a", 16)+":p"),
+		},
+		{
+			"malformed_data_invalid_action",
+			buildCallbackBody("qid", 123, "private", 1, "rv:"+strings.Repeat("a", 32)+":x"),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			code := sendCB(tc.body)
+			if code != http.StatusOK {
+				t.Errorf("%s: want 200, got %d", tc.name, code)
+			}
+			after := countReviews()
+			if after != before {
+				t.Errorf("%s: want 0 new reviews, got %d new rows", tc.name, after-before)
+			}
+		})
+	}
+}
+
 // ── Mock sender with context ───────────────────────────────────────────────
 
 // mockContextSender records context cancellation.

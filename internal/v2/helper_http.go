@@ -12,6 +12,7 @@ import (
 	"math"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -19,6 +20,14 @@ import (
 // Separated from the domain package to avoid import cycles.
 type HelperInvoiceIssuerHTTP interface {
 	CreateHelperInvoice(ctx context.Context, currency string) (HelperInvoiceDraft, error)
+}
+
+// tokenEntry serializes concurrent create requests for the same purchase token.
+// The handler acquires the entry's mutex before calling balance/issuer/CreatePurchase.
+// Losers retry LookupPurchaseByToken under the lock and get the winner's view.
+type tokenEntry struct {
+	mu      sync.Mutex
+	waiters int // protected by HelperPurchaseHandler.tokenMu
 }
 
 // HelperPurchaseHandler holds dependencies for the four V2 Helper HTTP endpoints.
@@ -31,23 +40,27 @@ type HelperPurchaseHandler struct {
 	restoreLim   *fixedWindowLimiter
 	recheckLim   *fixedWindowLimiter
 	revealLim    *fixedWindowLimiter
+	// keyed lock for concurrent create requests with the same token hash
+	tokenMu    sync.Mutex
+	tokenLocks map[string]*tokenEntry
 }
 
 // Stable error code constants for all Helper routes.
 const (
-	codeInvalidRequest      = "invalid_request"
-	codeRateLimited         = "rate_limited"
-	codeListingNotFound     = "listing_not_found"
-	codePurchaseNotFound    = "purchase_not_found"
-	codeInsufficientBalance = "insufficient_pre_balance"
-	codeBalanceUnavailable  = "balance_provider_unavailable"
-	codeInvoiceUnavailable  = "invoice_provider_unavailable"
-	codeCountryConflict     = "country_conflict"
-	codeStateConflict       = "state_conflict"
-	codeRetryExpired        = "balance_retry_expired"
-	codeReceiptExpired      = "receipt_expired"
-	codeDuplicatePurchase   = "duplicate_active_purchase"
-	codeInternalError       = "internal_error"
+	codeInvalidRequest                = "invalid_request"
+	codeRateLimited                   = "rate_limited"
+	codeListingNotFound               = "listing_not_found"
+	codePurchaseNotFound              = "purchase_not_found"
+	codeInsufficientBalance           = "insufficient_pre_balance"
+	codeBalanceUnavailable            = "balance_provider_unavailable"
+	codeInvoiceUnavailable            = "invoice_provider_unavailable"
+	codeCountryConflict               = "country_conflict"
+	codeStateConflict                 = "state_conflict"
+	codeRetryExpired                  = "balance_retry_expired"
+	codeReceiptExpired                = "receipt_expired"
+	codeClientNotificationUnavailable = "client_notification_unavailable"
+	codeDuplicatePurchase             = "duplicate_active_purchase"
+	codeInternalError                 = "internal_error"
 )
 
 // helperError writes {"error":"...","code":"..."} with the given HTTP status.
@@ -96,7 +109,33 @@ func NewHelperPurchaseHandler(
 		restoreLim:   newFixedWindowLimiter(10, time.Minute, maxE, now),
 		recheckLim:   newFixedWindowLimiter(5, time.Minute, maxE, now),
 		revealLim:    newFixedWindowLimiter(5, time.Minute, maxE, now),
+		tokenLocks:   make(map[string]*tokenEntry),
 	}, nil
+}
+
+// acquireTokenLock increments the waiter count for the given opaque key and
+// acquires its mutex. Returns a release function the caller must defer.
+// The key must be opaque (HMAC of the raw token), never the raw token itself.
+func (h *HelperPurchaseHandler) acquireTokenLock(key string) func() {
+	h.tokenMu.Lock()
+	te, ok := h.tokenLocks[key]
+	if !ok {
+		te = &tokenEntry{}
+		h.tokenLocks[key] = te
+	}
+	te.waiters++
+	h.tokenMu.Unlock()
+
+	te.mu.Lock()
+	return func() {
+		te.mu.Unlock()
+		h.tokenMu.Lock()
+		te.waiters--
+		if te.waiters == 0 {
+			delete(h.tokenLocks, key)
+		}
+		h.tokenMu.Unlock()
+	}
 }
 
 // Routes returns an http.Handler with the four Helper endpoints.
@@ -199,9 +238,52 @@ func (h *HelperPurchaseHandler) handleCreate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// ── Idempotency fast path: token lookup BEFORE any listing/balance/issuer call ──
+	// Exact same token + same wallet + same listing → return existing purchase immediately.
+	// Same token + different wallet or listing → 404 (no enumeration).
+	// Unknown token → proceed to acquire lock and create.
+	existingView, found, lookupErr := h.svc.LookupPurchaseByToken(req.PurchaseToken, req.ListingID, currency, normalized)
+	if lookupErr != nil {
+		if errors.Is(lookupErr, ErrHelperNotFound) {
+			helperError(w, http.StatusNotFound, "purchase not found", codePurchaseNotFound)
+			return
+		}
+		helperError(w, http.StatusInternalServerError, "internal error", codeInternalError)
+		return
+	}
+	if found {
+		// Idempotent retry: return existing purchase, 200, no token in response.
+		writeHelperCreateResponse(w, false, existingView, "")
+		return
+	}
+
+	// ── Keyed lock: serialize concurrent requests with the same token ──
+	// The lock key is the HMAC of the raw token (opaque; raw token never in map).
+	lockKey := h.svc.helperBrowserTokenHash(req.PurchaseToken)
+	release := h.acquireTokenLock(lockKey)
+	defer release()
+
+	// Second lookup under the lock: if a concurrent winner already created the
+	// purchase while we were waiting, return it now without calling balance/issuer.
+	existingView, found, lookupErr = h.svc.LookupPurchaseByToken(req.PurchaseToken, req.ListingID, currency, normalized)
+	if lookupErr != nil {
+		if errors.Is(lookupErr, ErrHelperNotFound) {
+			helperError(w, http.StatusNotFound, "purchase not found", codePurchaseNotFound)
+			return
+		}
+		helperError(w, http.StatusInternalServerError, "internal error", codeInternalError)
+		return
+	}
+	if found {
+		writeHelperCreateResponse(w, false, existingView, "")
+		return
+	}
+
+	// ── We are the winner: proceed with listing/balance/issuer ──
+
 	now := h.svc.now()
 
-	// Verify listing effective visibility and get country (read-only early check for fast 404).
+	// Verify listing effective visibility and get country (read-only fast 404).
 	listingCountry, err := h.svc.GetListingForPurchase(req.ListingID, now)
 	if err != nil {
 		helperError(w, http.StatusNotFound, "listing not found", codeListingNotFound)
@@ -229,7 +311,7 @@ func (h *HelperPurchaseHandler) handleCreate(w http.ResponseWriter, r *http.Requ
 		helperError(w, http.StatusServiceUnavailable, "balance service unavailable", codeBalanceUnavailable)
 		return
 	}
-	// NaN/Inf/negative → 503.
+	// NaN/Inf/negative → 503; no rows created.
 	if math.IsNaN(balanceUSD) || math.IsInf(balanceUSD, 0) || balanceUSD < 0 {
 		helperError(w, http.StatusServiceUnavailable, "balance service returned invalid value", codeBalanceUnavailable)
 		return
@@ -251,7 +333,7 @@ func (h *HelperPurchaseHandler) handleCreate(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Atomic: re-verify listing + country + create purchase + invoice.
-	isNew, view, err := h.svc.CreatePurchase(req.PurchaseToken, req.ListingID, currency, normalized, draft)
+	_, view, err := h.svc.CreatePurchase(req.PurchaseToken, req.ListingID, currency, normalized, draft)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			helperError(w, http.StatusNotFound, "listing not found", codeListingNotFound)
@@ -265,14 +347,25 @@ func (h *HelperPurchaseHandler) handleCreate(w http.ResponseWriter, r *http.Requ
 			helperError(w, http.StatusConflict, "profile locked to a different country", codeCountryConflict)
 			return
 		}
-		if errors.Is(err, ErrConflict) {
+		if errors.Is(err, ErrHelperDuplicateActivePurchase) {
 			helperError(w, http.StatusConflict, "active purchase already exists for this listing", codeDuplicatePurchase)
+			return
+		}
+		if errors.Is(err, ErrReviewNoBinding) {
+			helperError(w, http.StatusConflict, "client notification binding unavailable for review", codeClientNotificationUnavailable)
 			return
 		}
 		helperError(w, http.StatusInternalServerError, "internal error", codeInternalError)
 		return
 	}
 
+	// New purchase: 201 with token in body.
+	writeHelperCreateResponse(w, true, view, req.PurchaseToken)
+}
+
+// writeHelperCreateResponse sends the create/idempotent response.
+// isNew=true → 201 with purchase_token; isNew=false → 200 without token.
+func writeHelperCreateResponse(w http.ResponseWriter, isNew bool, view HelperPurchaseView, rawToken string) {
 	resp := helperCreateResponse{
 		PurchaseID:                    view.PurchaseID,
 		Currency:                      view.Currency,
@@ -285,9 +378,8 @@ func (h *HelperPurchaseHandler) handleCreate(w http.ResponseWriter, r *http.Requ
 		SameExpectedWalletRequired:    true,
 	}
 	if isNew {
-		resp.PurchaseToken = req.PurchaseToken
+		resp.PurchaseToken = rawToken
 	}
-
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if isNew {
 		w.WriteHeader(http.StatusCreated)

@@ -171,6 +171,35 @@ func (c *DestinationCipher) DecryptChatID(ciphertextHex, nonceHex, keyVersion, b
 	return id, nil
 }
 
+// sendReviewPromptBody is the JSON payload for sendMessage with inline keyboard.
+type sendReviewPromptBody struct {
+	ChatID      int64              `json:"chat_id"`
+	Text        string             `json:"text"`
+	ReplyMarkup inlineKeyboardJSON `json:"reply_markup"`
+}
+
+type inlineKeyboardJSON struct {
+	InlineKeyboard [][]inlineButtonJSON `json:"inline_keyboard"`
+}
+
+type inlineButtonJSON struct {
+	Text         string `json:"text"`
+	CallbackData string `json:"callback_data"`
+}
+
+// answerCallbackBody is the JSON payload for answerCallbackQuery.
+type answerCallbackBody struct {
+	CallbackQueryID string `json:"callback_query_id"`
+	Text            string `json:"text,omitempty"`
+}
+
+// editMessageBody is the JSON payload for editMessageText.
+type editMessageBody struct {
+	ChatID    int64  `json:"chat_id"`
+	MessageID int64  `json:"message_id"`
+	Text      string `json:"text"`
+}
+
 // ── BotAPISender ──────────────────────────────────────────────────────────────
 
 // ErrPermanentDelivery wraps errors where the delivery cannot succeed (e.g. bot blocked, chat not found).
@@ -301,6 +330,17 @@ type TelegramTransport struct {
 	now                 func() time.Time
 	bindingRefGen       bindingRefGenerator // injectable for tests
 	_testAfterSendHook  func() error        // nil in production, injectable for tests
+
+	// Review components (optional; nil until SetReviewService is called).
+	reviewSvc    *ReviewService
+	reviewSender ReviewNotificationSender
+}
+
+// SetReviewService wires the review service and notification sender into the transport.
+// Must be called before HandleWebhook and SendPendingReviewNotifications are used for reviews.
+func (t *TelegramTransport) SetReviewService(rs *ReviewService, sender ReviewNotificationSender) {
+	t.reviewSvc = rs
+	t.reviewSender = sender
 }
 
 // botUsernameRe validates bot username length/charset: 5-32 chars, letters/digits/underscores.
@@ -622,8 +662,9 @@ func (t *TelegramTransport) QueryLinkStatus(rawCode, walletAddress string) (stri
 
 // ── Webhook ───────────────────────────────────────────────────────────────────
 
-// webhookMessage is the minimal Telegram Update struct we parse.
-type webhookMessage struct {
+// webhookUpdate is the minimal Telegram Update struct we parse.
+// Handles both message (for /start linking) and callback_query (for review ratings).
+type webhookUpdate struct {
 	Message *struct {
 		Chat *struct {
 			ID   int64  `json:"id"`
@@ -631,7 +672,22 @@ type webhookMessage struct {
 		} `json:"chat"`
 		Text string `json:"text"`
 	} `json:"message"`
+	CallbackQuery *struct {
+		ID      string `json:"id"`   // callback query ID for answerCallbackQuery
+		Data    string `json:"data"` // callback_data from the inline button
+		Message *struct {
+			MessageID int64 `json:"message_id"`
+			Chat      *struct {
+				ID   int64  `json:"id"`
+				Type string `json:"type"`
+			} `json:"chat"`
+		} `json:"message"`
+	} `json:"callback_query"`
 }
+
+// webhookMessage is kept as an alias for backward compatibility with tests that
+// reference the struct name. Both names refer to the same type.
+type webhookMessage = webhookUpdate
 
 // HandleWebhook processes a Telegram webhook update.
 func (t *TelegramTransport) HandleWebhook(w http.ResponseWriter, r *http.Request) {
@@ -647,7 +703,7 @@ func (t *TelegramTransport) HandleWebhook(w http.ResponseWriter, r *http.Request
 
 	// 2. Read body with 64 KiB limit and parse JSON.
 	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
-	var update webhookMessage
+	var update webhookUpdate
 	dec := json.NewDecoder(r.Body)
 	if err := dec.Decode(&update); err != nil {
 		// Non-JSON / malformed → 200 neutral.
@@ -659,6 +715,12 @@ func (t *TelegramTransport) HandleWebhook(w http.ResponseWriter, r *http.Request
 	if decErr := dec.Decode(&trailingCheck); !errors.Is(decErr, io.EOF) {
 		// Trailing content present → neutral 200.
 		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// 2b. Dispatch: callback_query → review handler; message → link handler.
+	if update.CallbackQuery != nil {
+		t.handleCallbackQuery(w, r, update.CallbackQuery)
 		return
 	}
 
@@ -1112,6 +1174,277 @@ func defaultBindingRefGen() (string, error) {
 		return "", fmt.Errorf("v2: defaultBindingRefGen: %w", err)
 	}
 	return "bnd_" + hex.EncodeToString(b), nil
+}
+
+// ── Review callback_query handler ─────────────────────────────────────────────
+
+// handleCallbackQuery processes a Telegram callback_query update for Client reviews.
+// callback_data format: "rv:" + hex(raw_ref_16bytes) + ":" + action ("p"|"n")
+//
+// Security: webhook secret already validated by HandleWebhook before dispatch.
+// Malformed/unknown/expired callbacks → neutral 200, no mutation.
+// DB commit precedes best-effort answer/edit.
+func (t *TelegramTransport) handleCallbackQuery(
+	w http.ResponseWriter,
+	r *http.Request,
+	cq *struct {
+		ID      string `json:"id"`
+		Data    string `json:"data"`
+		Message *struct {
+			MessageID int64 `json:"message_id"`
+			Chat      *struct {
+				ID   int64  `json:"id"`
+				Type string `json:"type"`
+			} `json:"chat"`
+		} `json:"message"`
+	},
+) {
+	if t.reviewSvc == nil || t.reviewSender == nil {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// Strict shape validation: all fields required before any DB mutation.
+	// Non-empty callback query ID is required for answerCallbackQuery.
+	if cq.ID == "" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	// Message, chat, private type, positive chat ID, and positive message ID are all required.
+	if cq.Message == nil {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if cq.Message.Chat == nil {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if cq.Message.Chat.Type != "private" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if cq.Message.Chat.ID <= 0 {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if cq.Message.MessageID <= 0 {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// Parse callback_data.
+	reviewRef, isPositive, ok := parseTelegramCallbackData(cq.Data)
+	if !ok {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	rating := "negative"
+	if isPositive {
+		rating = "positive"
+	}
+
+	nowUnix := t.now().Unix()
+
+	// Consume the Client entitlement atomically.
+	err := t.reviewSvc.ConsumeClientReview(reviewRef, rating, nowUnix)
+	if err != nil {
+		// Expired, not found, already consumed with different rating → neutral 200.
+		// All cases are non-error from Telegram's perspective.
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// DB committed. Best-effort: answer the callback query and edit the message.
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	ratingText := "👎 Negative"
+	if isPositive {
+		ratingText = "👍 Positive"
+	}
+
+	// Answer callback query (removes the loading spinner from Telegram UI).
+	t.reviewSender.AnswerCallback(ctx, cq.ID, "Rating recorded: "+ratingText) //nolint:errcheck
+
+	// Edit the message to show the recorded rating.
+	if cq.Message != nil && cq.Message.Chat != nil {
+		t.reviewSender.EditMessage(ctx, cq.Message.Chat.ID, cq.Message.MessageID, //nolint:errcheck
+			"Your rating has been recorded: "+ratingText+". Thank you.")
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+// ── Review notification sending ───────────────────────────────────────────────
+
+// SendPendingReviewNotifications loads pending delivery snapshots and sends Telegram
+// review prompts to Clients. Should be called by a worker at regular intervals.
+// Uses injected ReviewNotificationSender; no real Telegram in tests.
+func (t *TelegramTransport) SendPendingReviewNotifications() error {
+	if t.reviewSvc == nil || t.reviewSender == nil {
+		return nil
+	}
+
+	snapshots, err := t.reviewSvc.LoadPendingDeliverySnapshots(t.now())
+	if err != nil {
+		return fmt.Errorf("v2: SendPendingReviewNotifications: load: %w", err)
+	}
+
+	for _, snap := range snapshots {
+		if err := t.sendOneReviewNotification(snap); err != nil {
+			// Log but continue with other snapshots.
+			_ = err
+		}
+	}
+	return nil
+}
+
+func (t *TelegramTransport) sendOneReviewNotification(snap PendingDeliverySnapshot) error {
+	// Decrypt the chat ID from the snapshot using the binding_ref as AAD.
+	chatID, err := t.destCipher.DecryptChatID(
+		snap.ChatIDCiphertext, snap.ChatIDNonce, snap.KeyVersion, snap.BindingRefSnapshot,
+	)
+	if err != nil {
+		// Decryption failure → permanent (likely key rotation or corrupt data).
+		return t.reviewSvc.MarkSnapshotPermanentFailure(snap.SnapshotID)
+	}
+
+	// Build the review notification text with Helper reputation.
+	helperRep, err := t.reviewSvc.GetHelperReputationForReview(snap.HelperProfileID)
+	if err != nil {
+		return fmt.Errorf("v2: sendOneReviewNotification: helper rep: %w", err)
+	}
+
+	text := fmt.Sprintf(
+		"A Helper purchased your contact.\n\nHelper: %s\nMember since: %s\nPurchases: %d\n👍 %d  👎 %d\n\nDid this Helper help you?",
+		helperRep.PublicName,
+		helperRep.MemberSince.Format("2006-01-02"),
+		helperRep.PurchaseCount,
+		helperRep.PositiveCount,
+		helperRep.NegativeCount,
+	)
+
+	// Derive callback data from the client review_ref.
+	// review_ref = "rev_" + 32 hex = 36 chars; raw bytes = hex[4:]
+	if len(snap.ClientReviewRef) != 36 || snap.ClientReviewRef[:4] != "rev_" {
+		return t.reviewSvc.MarkSnapshotPermanentFailure(snap.SnapshotID)
+	}
+	rawRefBytes, hexErr := hex.DecodeString(snap.ClientReviewRef[4:])
+	if hexErr != nil || len(rawRefBytes) != 16 {
+		return t.reviewSvc.MarkSnapshotPermanentFailure(snap.SnapshotID)
+	}
+	posData := telegramCallbackData(rawRefBytes, "p")
+	negData := telegramCallbackData(rawRefBytes, "n")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	sendErr := t.reviewSender.SendReviewPrompt(ctx, chatID, text, posData, negData)
+	if sendErr != nil {
+		if errors.Is(sendErr, ErrPermanentDelivery) {
+			return t.reviewSvc.MarkSnapshotPermanentFailure(snap.SnapshotID)
+		}
+		// Retryable: leave in pending_send.
+		return nil
+	}
+
+	// Delivery succeeded: mark sent and null out encrypted target.
+	return t.reviewSvc.MarkSnapshotSent(snap.SnapshotID)
+}
+
+// ── HTTPBotAPISender review methods ──────────────────────────────────────────
+
+// SendReviewPrompt implements ReviewNotificationSender.
+// Sends a message with thumb up/down inline keyboard buttons.
+func (s *HTTPBotAPISender) SendReviewPrompt(ctx context.Context, chatID int64, text, posData, negData string) error {
+	apiURL := s.baseURL + "/bot" + s.botToken + "/sendMessage"
+	body, err := json.Marshal(sendReviewPromptBody{
+		ChatID: chatID,
+		Text:   text,
+		ReplyMarkup: inlineKeyboardJSON{
+			InlineKeyboard: [][]inlineButtonJSON{
+				{
+					{Text: "👍", CallbackData: posData},
+					{Text: "👎", CallbackData: negData},
+				},
+			},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("v2: SendReviewPrompt: marshal: [internal]")
+	}
+	return s.postBotAPI(ctx, apiURL, body)
+}
+
+// AnswerCallback implements ReviewNotificationSender.
+func (s *HTTPBotAPISender) AnswerCallback(ctx context.Context, callbackQueryID, text string) error {
+	apiURL := s.baseURL + "/bot" + s.botToken + "/answerCallbackQuery"
+	body, err := json.Marshal(answerCallbackBody{
+		CallbackQueryID: callbackQueryID,
+		Text:            text,
+	})
+	if err != nil {
+		return fmt.Errorf("v2: AnswerCallback: marshal: [internal]")
+	}
+	return s.postBotAPI(ctx, apiURL, body)
+}
+
+// EditMessage implements ReviewNotificationSender.
+func (s *HTTPBotAPISender) EditMessage(ctx context.Context, chatID, messageID int64, text string) error {
+	apiURL := s.baseURL + "/bot" + s.botToken + "/editMessageText"
+	body, err := json.Marshal(editMessageBody{
+		ChatID:    chatID,
+		MessageID: messageID,
+		Text:      text,
+	})
+	if err != nil {
+		return fmt.Errorf("v2: EditMessage: marshal: [internal]")
+	}
+	return s.postBotAPI(ctx, apiURL, body)
+}
+
+// postBotAPI is a shared helper for HTTPBotAPISender POST calls.
+func (s *HTTPBotAPISender) postBotAPI(ctx context.Context, apiURL string, body []byte) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("v2: postBotAPI: build request: [internal]")
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("v2: postBotAPI: context: [internal]")
+		}
+		return fmt.Errorf("v2: postBotAPI: network: [internal]")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024+1)) //nolint:errcheck
+		return fmt.Errorf("v2: postBotAPI: retryable status %d", resp.StatusCode)
+	}
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("%w: status %d", ErrPermanentDelivery, resp.StatusCode)
+	}
+	limitedBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024+1))
+	if readErr != nil {
+		return fmt.Errorf("v2: postBotAPI: read: [internal]")
+	}
+	if len(limitedBody) > 64*1024 {
+		return fmt.Errorf("%w: response too large", ErrPermanentDelivery)
+	}
+	var tgResp struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal(limitedBody, &tgResp); err != nil {
+		return fmt.Errorf("%w: malformed response", ErrPermanentDelivery)
+	}
+	if !tgResp.OK {
+		return fmt.Errorf("%w: ok=false", ErrPermanentDelivery)
+	}
+	return nil
 }
 
 // NormalizeExpiredAttempts deletes expired pending/processing attempts. Idempotent.

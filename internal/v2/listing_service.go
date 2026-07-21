@@ -57,16 +57,17 @@ type ListingView struct {
 // PublicListingView is the board-level public view returned to unauthenticated callers.
 // It contains no contact data, no flow/invoice/wallet/code/fingerprint/binding data.
 type PublicListingView struct {
-	ID             string
-	DisplayName    string
-	City           string
-	CountryCode    string
-	DependencyType string
-	HelpType       string
-	Urgency        string
-	Languages      []string
-	VisibleUntil   time.Time
-	TimeLeftSec    int64
+	ID               string
+	DisplayName      string
+	City             string
+	CountryCode      string
+	DependencyType   string
+	HelpType         string
+	Urgency          string
+	Languages        []string
+	VisibleUntil     time.Time
+	TimeLeftSec      int64
+	ClientReputation ClientReputationView // live from v2_client_profiles; zero if no profile yet
 }
 
 // ListingService implements listing lifecycle operations on top of the core Service.
@@ -709,12 +710,15 @@ func (ls *ListingService) BoardQuery(city string, now time.Time) ([]PublicListin
 	}
 	nowUnix := now.Unix()
 	rows, err := ls.svc.db.Query(`
-		SELECT id, display_name, city, country_code, dependency_type, help_type,
-		       urgency, languages, visible_until, entitlement_expires_at
-		FROM v2_listings
-		WHERE city = ? AND state = 'visible'
-		  AND visible_until > ? AND entitlement_expires_at > ?
-		ORDER BY last_activated_at DESC, id ASC`,
+		SELECT l.id, l.display_name, l.city, l.country_code, l.dependency_type, l.help_type,
+		       l.urgency, l.languages, l.visible_until, l.entitlement_expires_at,
+		       COALESCE(cp.created_at, 0), COALESCE(cp.positive_count, 0), COALESCE(cp.negative_count, 0)
+		FROM v2_listings l
+		JOIN v2_client_flows f ON f.id = l.flow_id
+		LEFT JOIN v2_client_profiles cp ON cp.id = f.client_profile_id
+		WHERE l.city = ? AND l.state = 'visible'
+		  AND l.visible_until > ? AND l.entitlement_expires_at > ?
+		ORDER BY l.last_activated_at DESC, l.id ASC`,
 		city, nowUnix, nowUnix,
 	)
 	if err != nil {
@@ -725,14 +729,17 @@ func (ls *ListingService) BoardQuery(city string, now time.Time) ([]PublicListin
 	var result []PublicListingView
 	for rows.Next() {
 		var (
-			p         PublicListingView
-			visUntil  int64
-			entExp    int64
-			langsJSON string
+			p              PublicListingView
+			visUntil       int64
+			entExp         int64
+			langsJSON      string
+			repMemberSince int64
+			repPos, repNeg int
 		)
 		if err = rows.Scan(&p.ID, &p.DisplayName, &p.City, &p.CountryCode,
 			&p.DependencyType, &p.HelpType, &p.Urgency,
 			&langsJSON, &visUntil, &entExp,
+			&repMemberSince, &repPos, &repNeg,
 		); err != nil {
 			return nil, fmt.Errorf("v2: BoardQuery: scan: %w", err)
 		}
@@ -743,6 +750,11 @@ func (ls *ListingService) BoardQuery(city string, now time.Time) ([]PublicListin
 		}
 		if err = json.Unmarshal([]byte(langsJSON), &p.Languages); err != nil {
 			return nil, fmt.Errorf("v2: BoardQuery: parse languages: %w", err)
+		}
+		p.ClientReputation = ClientReputationView{
+			MemberSince:   time.Unix(repMemberSince, 0),
+			PositiveCount: repPos,
+			NegativeCount: repNeg,
 		}
 		result = append(result, p)
 	}
@@ -759,20 +771,26 @@ func (ls *ListingService) GetPublicListing(listingID string, now time.Time) (Pub
 	}
 	nowUnix := now.Unix()
 	var (
-		p         PublicListingView
-		visUntil  int64
-		langsJSON string
+		p              PublicListingView
+		visUntil       int64
+		langsJSON      string
+		repMemberSince int64
+		repPos, repNeg int
 	)
 	err := ls.svc.db.QueryRow(`
-		SELECT id, display_name, city, country_code, dependency_type, help_type,
-		       urgency, languages, visible_until, entitlement_expires_at
-		FROM v2_listings
-		WHERE id = ? AND state = 'visible'
-		  AND visible_until > ? AND entitlement_expires_at > ?`,
+		SELECT l.id, l.display_name, l.city, l.country_code, l.dependency_type, l.help_type,
+		       l.urgency, l.languages, l.visible_until, l.entitlement_expires_at,
+		       COALESCE(cp.created_at, 0), COALESCE(cp.positive_count, 0), COALESCE(cp.negative_count, 0)
+		FROM v2_listings l
+		JOIN v2_client_flows f ON f.id = l.flow_id
+		LEFT JOIN v2_client_profiles cp ON cp.id = f.client_profile_id
+		WHERE l.id = ? AND l.state = 'visible'
+		  AND l.visible_until > ? AND l.entitlement_expires_at > ?`,
 		listingID, nowUnix, nowUnix,
 	).Scan(&p.ID, &p.DisplayName, &p.City, &p.CountryCode,
 		&p.DependencyType, &p.HelpType, &p.Urgency,
 		&langsJSON, &visUntil, new(int64), // entitlement_expires_at scanned but not exposed
+		&repMemberSince, &repPos, &repNeg,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return PublicListingView{}, ErrNotFound
@@ -787,6 +805,11 @@ func (ls *ListingService) GetPublicListing(listingID string, now time.Time) (Pub
 	}
 	if err = json.Unmarshal([]byte(langsJSON), &p.Languages); err != nil {
 		return PublicListingView{}, fmt.Errorf("v2: GetPublicListing: parse languages: %w", err)
+	}
+	p.ClientReputation = ClientReputationView{
+		MemberSince:   time.Unix(repMemberSince, 0),
+		PositiveCount: repPos,
+		NegativeCount: repNeg,
 	}
 	return p, nil
 }

@@ -69,6 +69,10 @@ var (
 
 	// ErrHelperReceiptExpired: receipt window closed.
 	ErrHelperReceiptExpired = errors.New("v2: contact receipt has expired")
+
+	// ErrHelperDuplicateActivePurchase: a non-terminal purchase already exists
+	// for this profile+listing and the new token is different.
+	ErrHelperDuplicateActivePurchase = errors.New("v2: an active helper purchase already exists for this listing")
 )
 
 // HelperInvoiceDraft carries the $10 invoice snapshot prepared by the issuer.
@@ -152,9 +156,12 @@ type HelperPurchaseService struct {
 	// _testHook is called inside setHelperContactReady between the country read and
 	// the CAS UPDATE. Nil in production; used only for concurrency tests.
 	_testHook func()
-	// _testRevealHook is called just before the CAS UPDATE in RevealHelperContact
-	// (inside the first_revealed_at IS NULL branch). Nil in production.
-	_testRevealHook func()
+	// _testRevealHook is called inside the first-reveal branch of RevealHelperContact
+	// AFTER the initial read but BEFORE the CAS UPDATE, using the same *sql.Tx.
+	// Nil in production. The hook writes winner timestamps via the same tx so that
+	// the CAS UPDATE returns RowsAffected==0, enabling deterministic CAS-miss tests
+	// without a second DB connection (which would deadlock SQLite).
+	_testRevealHook func(tx *sql.Tx, purchaseID string) error
 }
 
 // NewHelperPurchaseService creates a HelperPurchaseService.
@@ -396,6 +403,51 @@ func (hs *HelperPurchaseService) GetListingForPurchase(listingID string, now tim
 	return countryCode, nil
 }
 
+// ── LookupPurchaseByToken ─────────────────────────────────────────────────────
+
+// LookupPurchaseByToken checks whether a browser token already maps to an
+// existing purchase WITHOUT touching balance or issuer.
+//
+//   - Returns (view, true, nil)  if the token maps to a purchase AND the
+//     wallet fingerprint and listing_id both match. Caller may return 200
+//     immediately without any external calls.
+//   - Returns (zero, false, ErrHelperNotFound)  if the token exists but the
+//     wallet or listing_id does NOT match. Caller should return 404.
+//   - Returns (zero, false, nil)  if the token is unknown. Caller should
+//     proceed with a new create (balance + issuer + CreatePurchase).
+func (hs *HelperPurchaseService) LookupPurchaseByToken(
+	rawToken, listingID, currency, normalizedAddr string,
+) (HelperPurchaseView, bool, error) {
+	tokenHash := hs.helperBrowserTokenHash(rawToken)
+	expectedFP := hs.helperWalletFingerprint(currency, normalizedAddr)
+
+	var existingID, storedFP, storedListingID string
+	err := hs.db.QueryRow(`
+		SELECT p.id, hp.wallet_fingerprint, p.listing_id
+		FROM v2_helper_purchases p
+		JOIN v2_helper_profiles hp ON hp.id = p.helper_profile_id
+		WHERE p.browser_token_hash = ?`, tokenHash,
+	).Scan(&existingID, &storedFP, &storedListingID)
+
+	if errors.Is(err, sql.ErrNoRows) {
+		return HelperPurchaseView{}, false, nil // unknown token
+	}
+	if err != nil {
+		return HelperPurchaseView{}, false, fmt.Errorf("v2: LookupPurchaseByToken: %w", err)
+	}
+
+	// Token found: verify wallet fingerprint (constant-time) and listing.
+	if !hmac.Equal([]byte(expectedFP), []byte(storedFP)) {
+		return HelperPurchaseView{}, false, ErrHelperNotFound
+	}
+	if storedListingID != listingID {
+		return HelperPurchaseView{}, false, ErrHelperNotFound
+	}
+
+	v, err := hs.readPurchaseView(existingID)
+	return v, true, err
+}
+
 // ── CreatePurchase ─────────────────────────────────────────────────────────────
 
 // CreatePurchase atomically re-verifies listing visibility and country, then
@@ -506,7 +558,7 @@ func (hs *HelperPurchaseService) CreatePurchase(
 		return false, HelperPurchaseView{}, fmt.Errorf("v2: CreatePurchase: active purchase check: %w", err)
 	}
 	if activeCount > 0 {
-		return false, HelperPurchaseView{}, ErrConflict
+		return false, HelperPurchaseView{}, ErrHelperDuplicateActivePurchase
 	}
 
 	// Insert purchase with the supplied tokenHash.
@@ -519,6 +571,10 @@ func (hs *HelperPurchaseService) CreatePurchase(
 		countryCode, now, now,
 	)
 	if err != nil {
+		// Partial UNIQUE index: concurrent different-token insert for same profile+listing.
+		if isSQLiteUniqueViolation(err) {
+			return false, HelperPurchaseView{}, ErrHelperDuplicateActivePurchase
+		}
 		return false, HelperPurchaseView{}, fmt.Errorf("v2: CreatePurchase: insert purchase: %w", err)
 	}
 
@@ -536,6 +592,13 @@ func (hs *HelperPurchaseService) CreatePurchase(
 		return false, HelperPurchaseView{}, fmt.Errorf("v2: CreatePurchase: insert invoice: %w", err)
 	}
 
+	// Snapshot active Client Telegram destination atomically with the purchase.
+	// If no active Client binding+destination exists, CreatePurchase returns
+	// ErrReviewNoBinding and the transaction rolls back (zero orphan rows).
+	if snapErr := hs.snapshotClientDestinationTx(tx, listingID, purchaseID, detectionDeadlineAt, now); snapErr != nil {
+		return false, HelperPurchaseView{}, fmt.Errorf("v2: CreatePurchase: snapshot destination: %w", snapErr)
+	}
+
 	if err = tx.Commit(); err != nil {
 		return false, HelperPurchaseView{}, fmt.Errorf("v2: CreatePurchase: commit: %w", err)
 	}
@@ -545,6 +608,67 @@ func (hs *HelperPurchaseService) CreatePurchase(
 		return false, HelperPurchaseView{}, err
 	}
 	return true, view, nil
+}
+
+// ── snapshotClientDestinationTx ───────────────────────────────────────────────
+
+// snapshotClientDestinationTx reads the active Client binding+destination for the
+// listing's flow and inserts a v2_review_delivery_snapshots row within the tx.
+// If no active Client binding+destination exists, returns ErrReviewNoBinding and the
+// whole CreatePurchase transaction is rolled back (no orphan rows).
+// snapshotExpiresAt = detectionDeadlineAt + 86400 (phase-1 awaiting lifetime).
+// At contact_ready the snapshot is promoted to pending_send with expires_at reset to 24h.
+func (hs *HelperPurchaseService) snapshotClientDestinationTx(
+	tx *sql.Tx,
+	listingID, purchaseID string,
+	detectionDeadlineAt, nowUnix int64,
+) error {
+	snapshotExpiresAt := detectionDeadlineAt + 86400
+
+	// Read the listing's flow_id.
+	var flowID string
+	err := tx.QueryRow(`SELECT flow_id FROM v2_listings WHERE id = ?`, listingID).Scan(&flowID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("v2: snapshotClientDestinationTx: read flow_id: %w", err)
+	}
+
+	// Read the active binding and its destination for the flow.
+	// Require d.expires_at = b.valid_until to ensure the destination is consistent.
+	var bindingRef, chatIDCiphertext, chatIDNonce, keyVersion string
+	err = tx.QueryRow(`
+		SELECT b.binding_ref, d.chat_id_ciphertext, d.chat_id_nonce, d.key_version
+		FROM v2_client_notification_bindings b
+		JOIN v2_telegram_destinations d ON d.binding_ref = b.binding_ref
+		WHERE b.flow_id = ? AND b.state = 'active' AND b.valid_until > ?
+		  AND d.expires_at = b.valid_until`,
+		flowID, nowUnix,
+	).Scan(&bindingRef, &chatIDCiphertext, &chatIDNonce, &keyVersion)
+	if errors.Is(err, sql.ErrNoRows) {
+		// No active, consistent binding+destination: abort purchase.
+		return ErrReviewNoBinding
+	}
+	if err != nil {
+		return fmt.Errorf("v2: snapshotClientDestinationTx: read binding: %w", err)
+	}
+
+	snapID := newID()
+	_, insErr := tx.Exec(`
+		INSERT INTO v2_review_delivery_snapshots
+		  (id, purchase_id, binding_ref_snapshot,
+		   chat_id_ciphertext, chat_id_nonce, key_version,
+		   state, expires_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, 'awaiting_contact_ready', ?, ?, ?)`,
+		snapID, purchaseID, bindingRef,
+		chatIDCiphertext, chatIDNonce, keyVersion,
+		snapshotExpiresAt, nowUnix, nowUnix,
+	)
+	if insErr != nil {
+		return fmt.Errorf("v2: snapshotClientDestinationTx: insert snapshot: [internal]")
+	}
+	return nil
 }
 
 // ── RestorePurchase ───────────────────────────────────────────────────────────
@@ -919,7 +1043,7 @@ func (hs *HelperPurchaseService) setHelperContactReady(purchaseID string, balanc
 		return HelperPurchaseView{}, fmt.Errorf("v2: setHelperContactReady: read: %w", err)
 	}
 
-	// No downgrade from contact_ready.
+	// Idempotency: if already contact_ready, entitlements already exist.
 	if pState == HPStateContactReady {
 		_ = tx.Commit()
 		return hs.readPurchaseView(purchaseID)
@@ -997,6 +1121,51 @@ func (hs *HelperPurchaseService) setHelperContactReady(purchaseID string, balanc
 	)
 	if err != nil {
 		return HelperPurchaseView{}, fmt.Errorf("v2: setHelperContactReady: update invoice ts: %w", err)
+	}
+
+	// Atomically create both review entitlements and activate delivery snapshot.
+	// Read the Client profile ID from the listing's flow.
+	var listingID string
+	err = tx.QueryRow(`SELECT listing_id FROM v2_helper_purchases WHERE id = ?`, purchaseID).Scan(&listingID)
+	if err != nil {
+		return HelperPurchaseView{}, fmt.Errorf("v2: setHelperContactReady: read listing id: %w", err)
+	}
+	var clientProfileID sql.NullString
+	err = tx.QueryRow(`
+		SELECT f.client_profile_id
+		FROM v2_listings l
+		JOIN v2_client_flows f ON f.id = l.flow_id
+		WHERE l.id = ?`, listingID,
+	).Scan(&clientProfileID)
+	if err != nil {
+		return HelperPurchaseView{}, fmt.Errorf("v2: setHelperContactReady: read client profile: %w", err)
+	}
+	if !clientProfileID.Valid {
+		return HelperPurchaseView{}, fmt.Errorf("v2: setHelperContactReady: client profile not set: [internal]")
+	}
+
+	if entErr := createReviewEntitlementsTx(tx, purchaseID, profileID, clientProfileID.String, contactReadyAt, nowUnix); entErr != nil {
+		return HelperPurchaseView{}, fmt.Errorf("v2: setHelperContactReady: create entitlements: %w", entErr)
+	}
+
+	// Activate the delivery snapshot: awaiting_contact_ready → pending_send.
+	// Phase-2 lifetime: set delivery expires_at = contactReadyAt + 86400 to match
+	// the review entitlement window. CAS must touch exactly one row.
+	snapRes, err := tx.Exec(`
+		UPDATE v2_review_delivery_snapshots
+		SET state = 'pending_send', expires_at = ?, updated_at = ?
+		WHERE purchase_id = ? AND state = 'awaiting_contact_ready'`,
+		contactReadyAt+86400, nowUnix, purchaseID,
+	)
+	if err != nil {
+		return HelperPurchaseView{}, fmt.Errorf("v2: setHelperContactReady: activate snapshot: %w", err)
+	}
+	snapN, snapRAErr := snapRes.RowsAffected()
+	if snapRAErr != nil {
+		return HelperPurchaseView{}, fmt.Errorf("v2: setHelperContactReady: activate snapshot rows: %w", snapRAErr)
+	}
+	if snapN != 1 {
+		return HelperPurchaseView{}, fmt.Errorf("v2: setHelperContactReady: snapshot CAS affected %d rows, expected 1: [internal]", snapN)
 	}
 
 	if err = tx.Commit(); err != nil {
@@ -1168,13 +1337,17 @@ func (hs *HelperPurchaseService) RevealHelperContact(purchaseID, rawToken, norma
 			return HelperRevealResult{}, ErrHelperRevealDeadlinePassed
 		}
 
-		// Test hook: fires before the CAS UPDATE to allow deterministic concurrency tests.
+		// Test hook: fires BEFORE the CAS UPDATE using the SAME tx so that
+		// the hook's write is visible to the UPDATE without a second connection.
+		// This makes the CAS return RowsAffected==0 deterministically in tests.
 		if hs._testRevealHook != nil {
-			hs._testRevealHook()
+			if hookErr := hs._testRevealHook(tx, purchaseID); hookErr != nil {
+				return HelperRevealResult{}, fmt.Errorf("v2: RevealHelperContact: test hook: %w", hookErr)
+			}
 		}
 
 		// Set first_revealed_at and receipt_expires_at atomically.
-		receiptExp := nowUnix + int64(confirmationWindow.Seconds()) // 24h
+		receiptExp := nowUnix + int64(confirmationWindow.Seconds()) // 24h = 86400s
 		res, updErr := tx.Exec(`
 			UPDATE v2_helper_purchases
 			SET first_revealed_at = ?, receipt_expires_at = ?, updated_at = ?
@@ -1185,19 +1358,25 @@ func (hs *HelperPurchaseService) RevealHelperContact(purchaseID, rawToken, norma
 		if updErr != nil {
 			return HelperRevealResult{}, fmt.Errorf("v2: RevealHelperContact: set reveal: %w", updErr)
 		}
-		n, _ := res.RowsAffected()
+		n, raErr := res.RowsAffected()
+		if raErr != nil {
+			return HelperRevealResult{}, fmt.Errorf("v2: RevealHelperContact: rows affected: %w", raErr)
+		}
 		if n == 0 {
-			// Concurrent reveal won. Re-read the winner's expiry inside this tx.
-			var winnerExp sql.NullInt64
+			// CAS miss: a concurrent reveal (or test hook) already set first_revealed_at.
+			// Re-read both fields inside this tx; they must be present.
+			var winnerRevealed, winnerExp sql.NullInt64
 			reReadErr := tx.QueryRow(
-				`SELECT receipt_expires_at FROM v2_helper_purchases WHERE id = ?`, purchaseID,
-			).Scan(&winnerExp)
+				`SELECT first_revealed_at, receipt_expires_at FROM v2_helper_purchases WHERE id = ?`,
+				purchaseID,
+			).Scan(&winnerRevealed, &winnerExp)
 			if reReadErr != nil {
-				return HelperRevealResult{}, fmt.Errorf("v2: RevealHelperContact: re-read expiry: %w", reReadErr)
+				return HelperRevealResult{}, fmt.Errorf("v2: RevealHelperContact: re-read: %w", reReadErr)
 			}
-			if winnerExp.Valid {
-				receiptExpiresAt = winnerExp // use winner's expiry
+			if !winnerExp.Valid {
+				return HelperRevealResult{}, fmt.Errorf("v2: RevealHelperContact: winner expiry missing: [internal]")
 			}
+			receiptExpiresAt = winnerExp
 		} else {
 			receiptExpiresAt = sql.NullInt64{Valid: true, Int64: receiptExp}
 		}

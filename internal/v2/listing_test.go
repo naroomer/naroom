@@ -1160,6 +1160,7 @@ func TestListingSafeViewAllowlist(t *testing.T) {
 		"ID": true, "DisplayName": true, "City": true, "CountryCode": true,
 		"DependencyType": true, "HelpType": true, "Urgency": true,
 		"Languages": true, "VisibleUntil": true, "TimeLeftSec": true,
+		"ClientReputation": true, // public reputation aggregate; no PII
 	}
 
 	for _, tc := range []struct {
@@ -1508,9 +1509,10 @@ func TestDisplayNameUniqueAcrossListings(t *testing.T) {
 
 	// Create prerequisite flows for FK-safe testing.
 	for _, id := range []string{"uniq_flow1", "uniq_flow2"} {
+		profileID := mustInsertClientProfileForFlow(t, db, 1)
 		if _, err := db.Exec(`INSERT INTO v2_client_flows
-			(id, wallet_fingerprint, currency, management_code_hash, state, created_at, updated_at)
-			VALUES (?, 'fp', 'BTC', 'hash', 'form_ready', 1, 1)`, id); err != nil {
+			(id, wallet_fingerprint, currency, management_code_hash, state, client_profile_id, created_at, updated_at)
+			VALUES (?, 'fp', 'BTC', 'hash', 'form_ready', ?, 1, 1)`, id, profileID); err != nil {
 			t.Fatalf("prereq flow: %v", err)
 		}
 	}
@@ -1721,9 +1723,10 @@ func TestSchemaCheckConstraintsNegative(t *testing.T) {
 		"bdup1", "bdup2", // dedicated flows for the duplicate binding_ref subtest
 		"fl1", "fl2", "fl3", "fl4", "fl5", "fl6", "fl7", "flv",
 	} {
+		profileID := mustInsertClientProfileForFlow(t, db, 1)
 		if _, err := db.Exec(`INSERT INTO v2_client_flows
-			(id, wallet_fingerprint, currency, management_code_hash, state, created_at, updated_at)
-			VALUES (?, 'fp', 'BTC', 'hash', 'form_ready', 1, 1)`, id); err != nil {
+			(id, wallet_fingerprint, currency, management_code_hash, state, client_profile_id, created_at, updated_at)
+			VALUES (?, 'fp', 'BTC', 'hash', 'form_ready', ?, 1, 1)`, id, profileID); err != nil {
 			t.Fatalf("prereq flow %q: %v", id, err)
 		}
 	}
