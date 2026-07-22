@@ -439,6 +439,24 @@ en: {
 	'v2.review.positive':  'Positive',
 	'v2.review.negative':  'Negative',
 	'v2.review.submitted': 'Thank you for your feedback.',
+
+	// ── V2 informer ───────────────────────────────────────────────────────────
+	'v2.inf.title':           'Get notified about new listings',
+	'v2.inf.subtitle':        'Enter your wallet to prove work eligibility. Your address is never stored.',
+	'v2.inf.wallet_label':    'BTC or LTC wallet address',
+	'v2.inf.wallet_placeholder': 'bc1q… or ltc1q…',
+	'v2.inf.city_label':      'Choose a city',
+	'v2.inf.check_btn':       'Check eligibility',
+	'v2.inf.checking':        'Checking balance...',
+	'v2.inf.open_bot':        'Open Informer bot',
+	'v2.inf.waiting':         'Waiting for Telegram connection...',
+	'v2.inf.connected':       'Connected! You will receive new listing notifications for {city}.',
+	'v2.inf.low_balance':     'Balance below $1,000 floor. Use a wallet with at least $1,000 in BTC or LTC.',
+	'v2.inf.provider_error':  'Balance check temporarily unavailable. Please try again.',
+	'v2.inf.invalid_address': 'Invalid wallet address. Enter a valid BTC or LTC mainnet address.',
+	'v2.inf.invalid_city':    'City not supported. Choose from the list.',
+	'v2.inf.token_expired':   'Link expired (15 min). Please start again.',
+	'v2.inf.privacy_note':    'Your wallet address is used only for balance verification and is not stored. One subscription per Telegram account.',
 },
 
 // ═══════════════════════════════════════ RUSSIAN ════════════════════════════
@@ -829,6 +847,24 @@ ru: {
 	'v2.review.positive':  'Положительно',
 	'v2.review.negative':  'Отрицательно',
 	'v2.review.submitted': 'Спасибо за обратную связь.',
+
+	// ── V2 informer ───────────────────────────────────────────────────────────
+	'v2.inf.title':           'Получайте уведомления о новых объявлениях',
+	'v2.inf.subtitle':        'Введите кошелёк для подтверждения eligibility. Адрес не сохраняется.',
+	'v2.inf.wallet_label':    'Адрес BTC или LTC кошелька',
+	'v2.inf.wallet_placeholder': 'bc1q… или ltc1q…',
+	'v2.inf.city_label':      'Выберите город',
+	'v2.inf.check_btn':       'Проверить eligibility',
+	'v2.inf.checking':        'Проверяем баланс...',
+	'v2.inf.open_bot':        'Открыть Informer бот',
+	'v2.inf.waiting':         'Ожидаем подключение Telegram...',
+	'v2.inf.connected':       'Подключено! Вы будете получать уведомления о новых объявлениях в {city}.',
+	'v2.inf.low_balance':     'Баланс ниже $1 000. Используйте кошелёк с балансом не менее $1 000 в BTC или LTC.',
+	'v2.inf.provider_error':  'Проверка баланса временно недоступна. Попробуйте позже.',
+	'v2.inf.invalid_address': 'Неверный адрес кошелька. Введите действительный адрес BTC или LTC mainnet.',
+	'v2.inf.invalid_city':    'Город не поддерживается. Выберите из списка.',
+	'v2.inf.token_expired':   'Ссылка истекла (15 мин). Начните заново.',
+	'v2.inf.privacy_note':    'Адрес кошелька используется только для проверки баланса и не сохраняется. Одна подписка на аккаунт Telegram.',
 },
 
 // ═══════════════════════════════════════ SPANISH ════════════════════════════
@@ -1213,6 +1249,24 @@ es: {
 	'v2.review.positive':  'Positivo',
 	'v2.review.negative':  'Negativo',
 	'v2.review.submitted': 'Gracias por tu opinión.',
+
+	// ── V2 informer ───────────────────────────────────────────────────────────
+	'v2.inf.title':           'Recibe notificaciones de nuevos anuncios',
+	'v2.inf.subtitle':        'Ingresa tu billetera para verificar elegibilidad. Tu dirección no se almacena.',
+	'v2.inf.wallet_label':    'Dirección de billetera BTC o LTC',
+	'v2.inf.wallet_placeholder': 'bc1q… o ltc1q…',
+	'v2.inf.city_label':      'Elige una ciudad',
+	'v2.inf.check_btn':       'Verificar elegibilidad',
+	'v2.inf.checking':        'Verificando saldo...',
+	'v2.inf.open_bot':        'Abrir bot Informer',
+	'v2.inf.waiting':         'Esperando conexión de Telegram...',
+	'v2.inf.connected':       'Conectado. Recibirás notificaciones de nuevos anuncios en {city}.',
+	'v2.inf.low_balance':     'Saldo inferior a $1,000. Usa una billetera con al menos $1,000 en BTC o LTC.',
+	'v2.inf.provider_error':  'Verificación de saldo temporalmente no disponible. Intenta de nuevo.',
+	'v2.inf.invalid_address': 'Dirección de billetera inválida. Ingresa una dirección válida de BTC o LTC mainnet.',
+	'v2.inf.invalid_city':    'Ciudad no admitida. Elige de la lista.',
+	'v2.inf.token_expired':   'Enlace expirado (15 min). Empieza de nuevo.',
+	'v2.inf.privacy_note':    'Tu dirección solo se usa para verificar el saldo y no se almacena. Una suscripción por cuenta de Telegram.',
 },
 
 // ═══════════════════════════════════════ GEORGIAN ═══════════════════════════
@@ -1598,6 +1652,24 @@ ka: {
 	'v2.review.positive':  'დადებითი',
 	'v2.review.negative':  'უარყოფითი',
 	'v2.review.submitted': 'მადლობა თქვენი გამოხმაურებისთვის.',
+
+	// ── V2 informer ───────────────────────────────────────────────────────────
+	'v2.inf.title':               'მიიღეთ შეტყობინებები ახალ განცხადებებზე',
+	'v2.inf.subtitle':            'შეიყვანეთ საფულე უფლებამოსილების შესამოწმებლად. Telegram-ბოტი გამოგიგზავნით შეტყობინებას ახალი განცხადების გაჩენისთანავე.',
+	'v2.inf.wallet_label':        'BTC ან LTC საფულის მისამართი',
+	'v2.inf.wallet_placeholder':  'შეიყვანეთ BTC ან LTC მისამართი...',
+	'v2.inf.city_label':          'ქალაქი',
+	'v2.inf.check_btn':           'შემდეგი',
+	'v2.inf.checking':            'შემოწმება...',
+	'v2.inf.open_bot':            'Telegram-ბოტის გახსნა',
+	'v2.inf.waiting':             'ბოტი ელოდება შენს /start-ს. ქვემოთ დააჭირე ღილაკს.',
+	'v2.inf.connected':           'დაკავშირებულია. შეტყობინებები ჩართულია.',
+	'v2.inf.low_balance':         'ბალანსი $1,000-ზე დაბალია. გთხოვთ შეავსოთ საფულე.',
+	'v2.inf.provider_error':      'სერვისი დროებით მიუწვდომელია. სცადეთ მოგვიანებით.',
+	'v2.inf.invalid_address':     'საფულის მისამართი არასწორია.',
+	'v2.inf.invalid_city':        'ქალაქი მხარდაჭერილი არ არის.',
+	'v2.inf.token_expired':       'ბმული ამოიწურა. გადაიტვირთეთ გვერდი და სცადეთ ხელახლა.',
+	'v2.inf.privacy_note':        'მისამართი გამოიყენება მხოლოდ ბალანსის შესამოწმებლად. ჩვენ მას არ ვინახავთ.',
 },
 
 };

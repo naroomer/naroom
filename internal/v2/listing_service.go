@@ -11,6 +11,22 @@ import (
 	"time"
 )
 
+// InformerTxEnqueuer is called inside the FirstPublish transaction to atomically
+// enqueue an outbox event alongside the listing INSERT. A failure rolls back the
+// entire listing transaction so that first publish is never committed without an
+// outbox entry. The external Telegram send is performed later by InformerWorker,
+// outside the listing transaction.
+type InformerTxEnqueuer interface {
+	EnqueueFirstPublishTx(tx *sql.Tx, listingID, city, displayName, helpType, depType, urgency string, now time.Time) error
+}
+
+// InformerNotifier is kept as an alias for backward compatibility with any
+// external code that references the old interface name. New code should use
+// InformerTxEnqueuer directly.
+//
+// Deprecated: use InformerTxEnqueuer.
+type InformerNotifier = InformerTxEnqueuer
+
 // Listing sentinel errors.
 var (
 	ErrListingCapabilityNotFound = errors.New("v2: listing capability not found")
@@ -79,7 +95,14 @@ type ListingService struct {
 	// _testHook is called in FirstPublish and Reactivate between pre-checks and
 	// the atomic DB operation. It is nil in production. It must not accept secret data.
 	_testHook func()
+	// informer enqueues outbox events atomically inside the FirstPublish tx.
+	// Nil if no informer is wired (safe: nil check guards every call site).
+	informer InformerTxEnqueuer
 }
+
+// SetInformerNotifier wires an InformerTxEnqueuer into the ListingService.
+// Must be called before the first FirstPublish; safe to call once after construction.
+func (ls *ListingService) SetInformerNotifier(n InformerTxEnqueuer) { ls.informer = n }
 
 // NewListingService creates a ListingService. All arguments must be non-nil.
 func NewListingService(svc *Service, cipher ContactCipher, names DisplayNameGenerator, cv ContactValidator) (*ListingService, error) {
@@ -422,6 +445,20 @@ func (ls *ListingService) FirstPublish(rawCode, walletAddress string, input List
 		if n == 0 {
 			tx.Rollback() //nolint:errcheck
 			return ListingView{}, ls.classifyPublishFailure(fv.FlowID, entitlementUnix, nowUnix)
+		}
+
+		// Atomically enqueue the informer outbox event in the same transaction.
+		// A failure here rolls back the listing INSERT — publish is never committed
+		// without an outbox entry (atomicity guarantee).
+		// External Telegram send is performed later by InformerWorker, outside this tx.
+		if ls.informer != nil {
+			if eErr := ls.informer.EnqueueFirstPublishTx(
+				tx, listingID, vl.city, displayName,
+				vl.helpType, vl.dependencyType, vl.urgency, ls.now(),
+			); eErr != nil {
+				tx.Rollback() //nolint:errcheck
+				return ListingView{}, fmt.Errorf("v2: FirstPublish: informer enqueue: %w", eErr)
+			}
 		}
 
 		if commitErr := tx.Commit(); commitErr != nil {

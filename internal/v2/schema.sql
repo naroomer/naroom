@@ -647,3 +647,70 @@ CREATE INDEX IF NOT EXISTS idx_v2_helper_invoices_purchase ON v2_helper_invoices
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_v2_helper_purchases_active
 ON v2_helper_purchases(helper_profile_id, listing_id)
 WHERE state NOT IN ('invoice_expired', 'failed', 'receipt_expired');
+
+-- ── Task 07: Informer V2 ──────────────────────────────────────────────────────
+-- Completely isolated from Client/Helper identity. No cross-table FKs to
+-- client/helper tables. Raw wallet is never stored; chat_id encrypted at rest.
+
+-- Pending deep-link attempts (15-min TTL). Raw token never stored; only HMAC.
+CREATE TABLE IF NOT EXISTS v2_informer_tokens (
+    id         TEXT PRIMARY KEY,
+    token_hmac TEXT NOT NULL UNIQUE,
+    city       TEXT NOT NULL,
+    state      TEXT NOT NULL DEFAULT 'pending'
+                   CHECK (state IN ('pending', 'claimed', 'expired')),
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_v2_informer_tokens_expires ON v2_informer_tokens(expires_at);
+
+-- One subscription per Telegram chat (one city per chat).
+-- sub_ref is an opaque non-secret reference: "isub_" + 32 hex chars.
+CREATE TABLE IF NOT EXISTS v2_informer_subscriptions (
+    id         TEXT PRIMARY KEY,
+    sub_ref    TEXT NOT NULL UNIQUE,
+    city       TEXT NOT NULL,
+    state      TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'deleted')),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_v2_informer_subs_city_state ON v2_informer_subscriptions(city, state);
+
+-- Encrypted chat IDs for Informer subscriptions. Cascade on subscription delete.
+CREATE TABLE IF NOT EXISTS v2_informer_destinations (
+    sub_ref            TEXT PRIMARY KEY
+                           REFERENCES v2_informer_subscriptions(sub_ref) ON DELETE CASCADE,
+    chat_id_ciphertext TEXT NOT NULL,
+    chat_id_nonce      TEXT NOT NULL,
+    key_version        TEXT NOT NULL,
+    created_at         INTEGER NOT NULL
+);
+
+-- Chat-to-subref lookup via HMAC of chat_id. Cascade on subscription delete.
+-- chat_hmac = HMAC-SHA256(hmacKey, "naroom:v2:informer-chat:" + decimal(chatID))
+CREATE TABLE IF NOT EXISTS v2_informer_chat_index (
+    chat_hmac TEXT PRIMARY KEY,
+    sub_ref   TEXT NOT NULL REFERENCES v2_informer_subscriptions(sub_ref) ON DELETE CASCADE
+);
+
+-- Outbox: one event per listing (event_key UNIQUE prevents duplicates).
+-- listing_id is informational only; no FK to v2_listings (dev fake events must work).
+-- event_key = "first_publish:" + listing_id
+CREATE TABLE IF NOT EXISTS v2_informer_outbox (
+    id           TEXT PRIMARY KEY,
+    listing_id   TEXT NOT NULL,
+    city         TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    help_type    TEXT NOT NULL,
+    dep_type     TEXT NOT NULL,
+    urgency      TEXT NOT NULL,
+    listing_url  TEXT NOT NULL,
+    event_key    TEXT NOT NULL UNIQUE,
+    state        TEXT NOT NULL DEFAULT 'pending'
+                     CHECK (state IN ('pending', 'done', 'failed')),
+    attempt      INTEGER NOT NULL DEFAULT 0,
+    last_error   TEXT,
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_v2_informer_outbox_state ON v2_informer_outbox(state);

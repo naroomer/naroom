@@ -158,6 +158,40 @@ func validListingInput() ListingInput {
 	}
 }
 
+// ── Informer enqueue fault-injection test ─────────────────────────────────────
+
+// failingInformerEnqueuer implements InformerTxEnqueuer and always returns an error.
+type failingInformerEnqueuer struct{}
+
+func (f *failingInformerEnqueuer) EnqueueFirstPublishTx(tx *sql.Tx, _, _, _, _, _, _ string, _ time.Time) error {
+	return errors.New("informer DB down — simulated fault injection")
+}
+
+// TestFirstPublishEnqueueFailureRollsBack verifies that if the informer outbox
+// enqueue fails inside the listing transaction, the entire transaction is rolled
+// back: no listing row must exist after the error.
+func TestFirstPublishEnqueueFailureRollsBack(t *testing.T) {
+	ls, svc, db := newTestListingService(t, nil)
+	ls.SetInformerNotifier(&failingInformerEnqueuer{})
+
+	rawCode, flowID := makeFormReadyFlow(t, svc, "bc1qtest", "BTC")
+	_ = attachTestBinding(t, ls, flowID)
+
+	_, err := ls.FirstPublish(rawCode, "bc1qtest", validListingInput())
+	if err == nil {
+		t.Fatal("expected error from failing informer enqueuer, got nil")
+	}
+
+	// Verify listing row was NOT created — the transaction must have been rolled back.
+	var count int
+	if sErr := db.QueryRow(`SELECT COUNT(*) FROM v2_listings WHERE flow_id = ?`, flowID).Scan(&count); sErr != nil {
+		t.Fatalf("query listing count: %v", sErr)
+	}
+	if count != 0 {
+		t.Errorf("listing row exists after enqueue failure (got %d) — transaction should have rolled back", count)
+	}
+}
+
 // ── Schema tests ──────────────────────────────────────────────────────────────
 
 func TestListingSchemaIdempotent(t *testing.T) {

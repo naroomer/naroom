@@ -53,6 +53,47 @@ const devBotUsername = "naroom_devtestbot" // must end in "bot", 5-32 chars
 // devFakeChatID is the fake Telegram chat ID used for all dev Telegram bindings.
 const devFakeChatID int64 = 123456789
 
+// ── Informer dev keys (separate from client bot) ─────────────────────────────
+
+var (
+	devInformerDestKey       = bytes.Repeat([]byte{0x44}, 32)
+	devInformerWebhookSecret = []byte("dev-informer-webhook-secret-v200")
+	devInformerTokenSecret   = []byte("dev-informer-token-secret-v20000")
+)
+
+const devInformerBotUsername = "naroom_informer_devbot"
+
+// devInformerFakeChatID is separate from devFakeChatID to prove different bots are independent.
+const devInformerFakeChatID int64 = 987654321
+
+// ── Stub: dev InformerBotSender ───────────────────────────────────────────────
+
+type devInformerMessage struct {
+	ChatID int64  `json:"chat_id"`
+	Text   string `json:"text"`
+}
+
+type devInformerSender struct {
+	mu   sync.Mutex
+	msgs []devInformerMessage
+}
+
+func (s *devInformerSender) SendInformerNotification(_ context.Context, chatID int64, text string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.msgs = append(s.msgs, devInformerMessage{ChatID: chatID, Text: text})
+	log.Printf("[dev-informer] notification to chat %d: %q", chatID, truncate(text, 80))
+	return nil
+}
+
+func (s *devInformerSender) drain() []devInformerMessage {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := s.msgs
+	s.msgs = nil
+	return out
+}
+
 // ── Stub: dev invoice issuer (client $5) ─────────────────────────────────────
 
 type devClientIssuer struct {
@@ -214,6 +255,13 @@ func openFileDB(path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 	db.SetMaxOpenConns(1)
+	// The _foreign_keys DSN parameter is not reliably honored by all versions
+	// of modernc.org/sqlite (same caveat as in internal/v2/db.go). Apply it
+	// explicitly so CASCADE deletes work correctly with the file-based DB.
+	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("enable foreign keys: %w", err)
+	}
 	if err := v2.ApplySchema(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
@@ -234,6 +282,13 @@ type devServer struct {
 	balance       *devBalanceReader
 	reviewSender  *devReviewSender
 	botSender     *devBotSender
+
+	// Informer subsystem
+	informerSvc       *v2.InformerService
+	informerTransport *v2.InformerTransport
+	informerWorker    *v2.InformerWorker
+	informerH         *v2.InformerHandler
+	informerSender    *devInformerSender
 
 	// Handlers
 	clientH  *v2.ClientHandler
@@ -314,6 +369,38 @@ func buildDevServer(db *sql.DB) (*devServer, error) {
 
 	// Wire review service into transport
 	transport.SetReviewService(reviewSvc, ds.reviewSender)
+
+	// ── Informer subsystem ────────────────────────────────────────────────────
+
+	ds.informerSender = &devInformerSender{}
+
+	informerDestCipher, err := v2.NewDestinationCipher(devInformerDestKey, "informer_dest_dev_v1")
+	if err != nil {
+		return nil, fmt.Errorf("NewDestinationCipher (informer): %w", err)
+	}
+
+	informerSvc, err := v2.NewInformerService(db, devHMACKey, devInformerTokenSecret, informerDestCipher, time.Now)
+	if err != nil {
+		return nil, fmt.Errorf("NewInformerService: %w", err)
+	}
+	ds.informerSvc = informerSvc
+
+	informerTransport, err := v2.NewInformerTransport(informerSvc, devInformerWebhookSecret, devInformerBotUsername, time.Now)
+	if err != nil {
+		return nil, fmt.Errorf("NewInformerTransport: %w", err)
+	}
+	ds.informerTransport = informerTransport
+
+	ds.informerWorker = v2.NewInformerWorker(informerSvc, ds.informerSender)
+
+	informerH, err := v2.NewInformerHandler(informerSvc, ds.balance, devInformerBotUsername, devRateLimitKey, time.Now)
+	if err != nil {
+		return nil, fmt.Errorf("NewInformerHandler: %w", err)
+	}
+	ds.informerH = informerH
+
+	// Wire informer into listing service (first-publish hook).
+	ls.SetInformerNotifier(informerSvc)
 
 	// HTTP handlers
 	clientH, err := v2.NewClientHandler(svc, &devClientIssuer{}, ds.balance, devRateLimitKey, time.Now)
@@ -778,6 +865,114 @@ func (ds *devServer) devHandleHelperReputation(w http.ResponseWriter, r *http.Re
 	})
 }
 
+// devHandleInformerSimulateStart handles POST /dev/informer/simulate-start
+// Body: {"raw_token":"..."} — simulates Telegram /start <rawToken> to the Informer webhook.
+// After subscription, runs the outbox worker to deliver any pending notifications.
+func (ds *devServer) devHandleInformerSimulateStart(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		RawToken string `json:"raw_token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		devErr(w, 400, "invalid JSON")
+		return
+	}
+	if req.RawToken == "" {
+		devErr(w, 400, "raw_token required")
+		return
+	}
+
+	update := map[string]any{
+		"update_id": 777777,
+		"message": map[string]any{
+			"message_id": int64(1),
+			"chat": map[string]any{
+				"id":   devInformerFakeChatID,
+				"type": "private",
+			},
+			"text": "/start " + req.RawToken,
+		},
+	}
+	body, err := json.Marshal(update)
+	if err != nil {
+		devErr(w, 500, "marshal update: "+err.Error())
+		return
+	}
+
+	webhookReq, err := http.NewRequest("POST", "/v2/telegram/informer/webhook", bytes.NewReader(body))
+	if err != nil {
+		devErr(w, 500, "build webhook request: "+err.Error())
+		return
+	}
+	webhookReq.Header.Set("Content-Type", "application/json")
+	webhookReq.Header.Set("X-Telegram-Bot-Api-Secret-Token", string(devInformerWebhookSecret))
+
+	rr := httptest.NewRecorder()
+	ds.informerTransport.HandleWebhook(rr, webhookReq)
+	if rr.Code != http.StatusOK {
+		devErr(w, 422, fmt.Sprintf("informer transport returned %d — token may be expired or unknown", rr.Code))
+		return
+	}
+
+	// Run worker to deliver any pending outbox events.
+	_ = ds.informerWorker.RunOnce(r.Context())
+
+	devJSON(w, map[string]any{"ok": true, "msg": "Informer /start simulated; worker ran"})
+}
+
+// devHandleInformerFakeFirstPublish handles POST /dev/informer/fake-first-publish
+// Body: {"listing_id":"...","city":"...","display_name":"..."}
+// Creates a fake informer outbox event and immediately runs the worker.
+// Useful for E2E tests that need to prove notification delivery without a full listing flow.
+func (ds *devServer) devHandleInformerFakeFirstPublish(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ListingID   string `json:"listing_id"`
+		City        string `json:"city"`
+		DisplayName string `json:"display_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		devErr(w, 400, "invalid JSON")
+		return
+	}
+	if req.ListingID == "" || req.City == "" {
+		devErr(w, 400, "listing_id and city required")
+		return
+	}
+	if req.DisplayName == "" {
+		req.DisplayName = "Dev Listing"
+	}
+
+	notifyErr := ds.informerSvc.NotifyFirstPublish(
+		req.ListingID, req.City, req.DisplayName,
+		"support", "alcohol", "urgent", time.Now(),
+	)
+	if notifyErr != nil && !errors.Is(notifyErr, v2.ErrInformerDuplicateEvent) {
+		devErr(w, 500, fmt.Sprintf("NotifyFirstPublish: %v", notifyErr))
+		return
+	}
+
+	_ = ds.informerWorker.RunOnce(r.Context())
+
+	devJSON(w, map[string]any{"ok": true, "msg": "Informer fake first-publish event created; worker ran"})
+}
+
+// devHandleInformerRunWorker handles POST /dev/informer/run-worker
+// Runs the informer outbox worker once and delivers any pending notifications.
+// Used by E2E tests after a real first-publish to trigger notification delivery.
+func (ds *devServer) devHandleInformerRunWorker(w http.ResponseWriter, r *http.Request) {
+	if err := ds.informerWorker.RunOnce(r.Context()); err != nil {
+		devErr(w, 500, fmt.Sprintf("RunOnce: %v", err))
+		return
+	}
+	devJSON(w, map[string]any{"ok": true, "msg": "informer worker ran"})
+}
+
+// devHandleInformerNotifications handles GET /dev/informer/notifications
+// Returns and clears all pending informer notification messages.
+func (ds *devServer) devHandleInformerNotifications(w http.ResponseWriter, r *http.Request) {
+	msgs := ds.informerSender.drain()
+	devJSON(w, map[string]any{"notifications": msgs, "count": len(msgs)})
+}
+
 // devHandleStatus handles GET /dev/status
 func (ds *devServer) devHandleStatus(w http.ResponseWriter, r *http.Request) {
 	devJSON(w, map[string]any{
@@ -840,6 +1035,8 @@ func main() {
 		ds.tgH.Routes(),
 		ds.helperH.Routes(),
 		ds.reviewH.Routes(),
+		ds.informerH.Routes(),
+		ds.informerTransport.Routes(),
 	)
 
 	mux := http.NewServeMux()
@@ -857,6 +1054,10 @@ func main() {
 	devMux.HandleFunc("POST /dev/telegram/review-callback", ds.devHandleSimulateReviewCallback)
 	devMux.HandleFunc("POST /dev/telegram/simulate-start", ds.devHandleSimulateStart)
 	devMux.HandleFunc("GET /dev/helper/reputation", ds.devHandleHelperReputation)
+	devMux.HandleFunc("POST /dev/informer/simulate-start", ds.devHandleInformerSimulateStart)
+	devMux.HandleFunc("POST /dev/informer/fake-first-publish", ds.devHandleInformerFakeFirstPublish)
+	devMux.HandleFunc("POST /dev/informer/run-worker", ds.devHandleInformerRunWorker)
+	devMux.HandleFunc("GET /dev/informer/notifications", ds.devHandleInformerNotifications)
 	mux.Handle("/dev/", devCORS(devMux))
 
 	// CORS middleware for all V2 routes (dev only)
