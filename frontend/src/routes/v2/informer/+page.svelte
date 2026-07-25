@@ -25,6 +25,7 @@
 	let step = $state('wallet');   // wallet | waiting | connected | error
 	let loading = $state(false);
 	let error = $state('');
+	let eligibilityVerified = $state(false);  // true after balance check passes
 
 	let walletAddress = $state('');
 	let city = $state('tbilisi');
@@ -80,6 +81,7 @@
 			botUrl    = data.bot_url;
 			rawToken  = data.raw_token;
 			expiresAt = data.expires_at;
+			eligibilityVerified = true;
 			step = 'waiting';
 			startPoll();
 		} catch (e) {
@@ -186,6 +188,12 @@
 	{:else if step === 'waiting'}
 		<!-- Step 2: Waiting for /start in bot -->
 		<div class="section">
+			{#if eligibilityVerified}
+				<div class="eligibility-badge" data-testid="eligibility-badge">
+					{t('v2.inf.eligibility_verified', { min: pubConfig.informer_min_usd })}
+				</div>
+			{/if}
+
 			<div class="status-badge waiting">{t('v2.inf.waiting')}</div>
 
 			<button class="tg-btn" onclick={openBot}>
@@ -196,7 +204,7 @@
 				<div class="err">{error}</div>
 			{/if}
 
-			<button class="btn-secondary" onclick={() => { stopPoll(); step = 'wallet'; error = ''; }}>
+			<button class="btn-secondary" onclick={() => { stopPoll(); step = 'wallet'; error = ''; eligibilityVerified = false; }}>
 				← {t('back_to_board')}
 			</button>
 		</div>
@@ -205,7 +213,12 @@
 		<!-- Step 3: Connected -->
 		<div class="section done">
 			<div class="done-icon">✓</div>
-			<h2>{t('v2.inf.connected', { city: cityLabel })}</h2>
+			{#if eligibilityVerified}
+				<p class="eligibility-confirm" data-testid="eligibility-confirm">
+					{t('v2.inf.eligibility_verified', { min: pubConfig.informer_min_usd })}
+				</p>
+			{/if}
+			<h2 data-testid="connected-msg">{t('v2.inf.connected', { city: cityLabel })}</h2>
 			<a href="/v2/board/{city}" class="btn-secondary">{t('back_to_board')}</a>
 		</div>
 	{/if}
@@ -322,6 +335,23 @@
 
 	.err { color: var(--danger); font-size: 13px; }
 	.fine-print { font-size: 12px; color: var(--text-faint); line-height: 1.4; }
+
+	.eligibility-badge {
+		background: rgba(123, 166, 142, 0.1);
+		border: 1px solid var(--accent);
+		border-radius: 8px;
+		padding: 10px 14px;
+		font-size: 13px;
+		color: var(--accent);
+		line-height: 1.4;
+	}
+
+	.eligibility-confirm {
+		font-size: 13px;
+		color: var(--accent);
+		margin: 0;
+		line-height: 1.4;
+	}
 
 	.done {
 		align-items: center;

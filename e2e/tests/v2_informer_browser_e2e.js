@@ -382,6 +382,15 @@ async function runOnce(runNumber) {
       // UI must show waiting state.
       await page.waitForSelector('.status-badge.waiting', { timeout: 12000 });
 
+      // Eligibility badge must appear on the waiting step.
+      const eligBadge = page.locator('[data-testid="eligibility-badge"]');
+      await eligBadge.waitFor({ state: 'visible', timeout: 5000 });
+      const eligText = await eligBadge.innerText();
+      assert(eligText.includes('eligib') || eligText.includes('Eligib') || eligText.includes('верифицир') || eligText.includes('verificad') || eligText.includes('დადასტ'),
+        `eligibility badge must contain eligibility text, got: "${eligText}"`);
+      assert(!eligText.includes('{min}'),
+        `eligibility badge must not contain raw {min} placeholder, got: "${eligText}"`);
+
       await page.screenshot({ path: join(SCREENSHOTS_DIR, `inf_r${runNumber}_s2_waiting.png`) });
     });
 
@@ -401,6 +410,25 @@ async function runOnce(runNumber) {
 
       // DOM should update to show connected.
       await page.waitForSelector('.done-icon', { timeout: 8000 });
+
+      // Eligibility confirm must appear on the connected screen.
+      const eligConfirm = page.locator('[data-testid="eligibility-confirm"]');
+      await eligConfirm.waitFor({ state: 'visible', timeout: 5000 });
+
+      // Connected message must appear simultaneously.
+      const connectedMsg = page.locator('[data-testid="connected-msg"]');
+      await connectedMsg.waitFor({ state: 'visible', timeout: 5000 });
+
+      // Connected message must NOT contain raw {city} placeholder.
+      const connectedText = await connectedMsg.innerText();
+      assert(!connectedText.includes('{city}'),
+        `connected-msg must not contain raw {city} placeholder, got: "${connectedText}"`);
+
+      // Connected message must contain the actual city name (not the raw id).
+      assert(
+        connectedText.toLowerCase().includes('tbilisi') || connectedText.includes('Tbilisi'),
+        `connected-msg must contain "Tbilisi", got: "${connectedText}"`
+      );
 
       await page.screenshot({ path: join(SCREENSHOTS_DIR, `inf_r${runNumber}_s3_connected.png`) });
     });

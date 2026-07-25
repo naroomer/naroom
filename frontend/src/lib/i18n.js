@@ -496,6 +496,7 @@ en: {
 	'v2.inf.invalid_address': 'Invalid wallet address. Enter a valid BTC or LTC mainnet address.',
 	'v2.inf.invalid_city':    'City not supported. Choose from the list.',
 	'v2.inf.token_expired':   'Link expired (15 min). Please start again.',
+	'v2.inf.eligibility_verified': 'Wallet eligibility verified. This address meets the ${min} balance requirement.',
 	'v2.inf.privacy_note':    'Your wallet address is used only for balance verification and is not stored. One subscription per Telegram account.',
 },
 
@@ -943,6 +944,7 @@ ru: {
 	'v2.inf.invalid_address': 'Неверный адрес кошелька. Введите действительный адрес BTC или LTC mainnet.',
 	'v2.inf.invalid_city':    'Город не поддерживается. Выберите из списка.',
 	'v2.inf.token_expired':   'Ссылка истекла (15 мин). Начните заново.',
+	'v2.inf.eligibility_verified': 'Eligibility подтверждена. Адрес соответствует требованию минимального баланса ${min}.',
 	'v2.inf.privacy_note':    'Адрес кошелька используется только для проверки баланса и не сохраняется. Одна подписка на аккаунт Telegram.',
 },
 
@@ -1384,6 +1386,7 @@ es: {
 	'v2.inf.invalid_address': 'Dirección de billetera inválida. Ingresa una dirección válida de BTC o LTC mainnet.',
 	'v2.inf.invalid_city':    'Ciudad no admitida. Elige de la lista.',
 	'v2.inf.token_expired':   'Enlace expirado (15 min). Empieza de nuevo.',
+	'v2.inf.eligibility_verified': 'Elegibilidad verificada. Esta dirección cumple el requisito de saldo mínimo de ${min}.',
 	'v2.inf.privacy_note':    'Tu dirección solo se usa para verificar el saldo y no se almacena. Una suscripción por cuenta de Telegram.',
 },
 
@@ -1826,6 +1829,7 @@ ka: {
 	'v2.inf.invalid_address':     'საფულის მისამართი არასწორია.',
 	'v2.inf.invalid_city':        'ქალაქი მხარდაჭერილი არ არის.',
 	'v2.inf.token_expired':       'ბმული ამოიწურა. გადაიტვირთეთ გვერდი და სცადეთ ხელახლა.',
+	'v2.inf.eligibility_verified':    'Eligibility დადასტურებულია. ეს მისამართი აკმაყოფილებს ${min} მინიმალური ბალანსის მოთხოვნას.',
 	'v2.inf.privacy_note':        'მისამართი გამოიყენება მხოლოდ ბალანსის შესამოწმებლად. ჩვენ მას არ ვინახავთ.',
 },
 

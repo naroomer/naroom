@@ -122,6 +122,36 @@ func TestInformerCreateAccess_ExactFloor(t *testing.T) {
 	}
 }
 
+// ── 4b. Custom $50 floor (matches test env) ───────────────────────────────────
+
+func TestInformerCreateAccess_CustomFloor50(t *testing.T) {
+	svc := newInformerTestSvc(t, nil)
+	svc.SetPolicy(v2.V2BalancePolicy{
+		InformerMinUSD:          50.0,
+		ClientPublicMinUSD:      60.0,
+		ClientHardFloorUSD:      50.0,
+		HelperPostPaymentMinUSD: 50.0,
+	})
+
+	// Exactly $50 must be allowed.
+	_, _, err := svc.CreateAccess("tbilisi", 50.0)
+	if err != nil {
+		t.Errorf("expected success at exactly $50, got: %v", err)
+	}
+
+	// $49.99 must be rejected.
+	_, _, err = svc.CreateAccess("tbilisi", 49.99)
+	if !errors.Is(err, v2.ErrInformerLowBalance) {
+		t.Errorf("expected ErrInformerLowBalance at $49.99, got: %v", err)
+	}
+
+	// $0 must be rejected.
+	_, _, err = svc.CreateAccess("batumi", 0.0)
+	if !errors.Is(err, v2.ErrInformerLowBalance) {
+		t.Errorf("expected ErrInformerLowBalance at $0, got: %v", err)
+	}
+}
+
 // ── 5. Raw wallet NOT passed to service ───────────────────────────────────────
 // The InformerService.CreateAccess signature does not accept wallet_address.
 // This is a contract test: we verify the function signature is correct.
