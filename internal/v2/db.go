@@ -639,7 +639,7 @@ SELECT
     id, listing_id, helper_profile_id, browser_token_hash, state,
     country_code_snapshot, contact_ready_at, first_revealed_at, receipt_expires_at,
     balance_retry_deadline_at, last_balance_usd, last_balance_checked_at,
-    COALESCE(required_post_payment_floor_usd, 1000.0),
+    1000.0,
     created_at, updated_at
 FROM v2_helper_purchases`); err != nil {
 		return fmt.Errorf("rebuildHelperPurchasesInTx: copy data: %w", err)
