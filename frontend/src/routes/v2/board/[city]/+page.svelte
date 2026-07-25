@@ -61,6 +61,7 @@
 		<div class="logo">NA Room <span class="v2-badge">V2</span></div>
 		<nav>
 			<a href="/v2/restore">{t('v2.nav.restore')}</a>
+			<a href="/v2/informer">{t('v2.nav.informer')}</a>
 			<a href="/v2/how-it-works">{t('v2.nav.how_it_works')}</a>
 		</nav>
 	</header>
@@ -167,9 +168,13 @@
 		vertical-align: middle;
 	}
 
-	nav { display: flex; gap: 16px; align-items: center; }
-	nav a { color: var(--text-dim); font-size: 13px; }
+	nav { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+	nav a { color: var(--text-dim); font-size: 13px; white-space: nowrap; }
 	nav a:hover { color: var(--text); }
+	@media (max-width: 480px) {
+		nav { gap: 10px; }
+		nav a { font-size: 12px; }
+	}
 
 	.tabs {
 		display: flex;

@@ -323,6 +323,7 @@ en: {
 	'v2.copied':  'Copied!',
 	'v2.error':   'Error: {msg}',
 	'v2.nav.restore':       'Restore listing',
+	'v2.nav.informer':      'Informer',
 	'v2.nav.how_it_works': 'How it works',
 
 	// ── V2 board ───────────────────────────────────────────────────────────────
@@ -783,6 +784,7 @@ ru: {
 	'v2.copied':  'Скопировано!',
 	'v2.error':   'Ошибка: {msg}',
 	'v2.nav.restore':       'Восстановить объявление',
+	'v2.nav.informer':      'Информер',
 	'v2.nav.how_it_works': 'Как это работает',
 
 	'v2.board.i_need_help': 'Мне нужна помощь',
@@ -1223,6 +1225,7 @@ es: {
 	'v2.copied':  '¡Copiado!',
 	'v2.error':   'Error: {msg}',
 	'v2.nav.restore':       'Restaurar anuncio',
+	'v2.nav.informer':      'Informador',
 	'v2.nav.how_it_works': 'Cómo funciona',
 
 	'v2.board.i_need_help': 'Necesito ayuda',
@@ -1664,6 +1667,7 @@ ka: {
 	'v2.copied':  'დაკოპირდა!',
 	'v2.error':   'შეცდომა: {msg}',
 	'v2.nav.restore':       'განცხადების აღდგენა',
+	'v2.nav.informer':      'ინფორმატორი',
 	'v2.nav.how_it_works': 'როგორ მუშაობს',
 
 	'v2.board.i_need_help': 'მჭირდება დახმარება',
