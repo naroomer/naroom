@@ -633,7 +633,8 @@ CREATE TABLE IF NOT EXISTS v2_review_delivery_snapshots (
 );
 
 CREATE INDEX IF NOT EXISTS idx_v2_client_profiles_fp    ON v2_client_profiles(wallet_fingerprint);
-CREATE UNIQUE INDEX IF NOT EXISTS uniq_v2_client_profiles_public_name ON v2_client_profiles(public_name) WHERE public_name != '';
+-- NOTE: uniq_v2_client_profiles_public_name is created by MigrateSchema (not here)
+-- because ApplySchema runs before MigrateSchema adds public_name to existing DBs.
 CREATE INDEX IF NOT EXISTS idx_v2_review_entitlements_purchase ON v2_review_entitlements(purchase_id);
 CREATE INDEX IF NOT EXISTS idx_v2_review_entitlements_ref      ON v2_review_entitlements(review_ref);
 CREATE INDEX IF NOT EXISTS idx_v2_review_snapshots_purchase    ON v2_review_delivery_snapshots(purchase_id);
