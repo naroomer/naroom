@@ -6,15 +6,37 @@
 package v2
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
 )
+
+// cityDisplayNames maps city IDs to human-readable names shown in bot messages.
+var cityDisplayNames = map[string]string{
+	"buenos_aires": "Buenos Aires",
+	"sao_paulo":    "São Paulo",
+	"nha_trang":    "Nha Trang",
+	"da_nang":      "Da Nang",
+	"tbilisi":      "Tbilisi",
+	"batumi":       "Batumi",
+	"almaty":       "Almaty",
+	"yerevan":      "Yerevan",
+	"moscow":       "Moscow",
+}
+
+func cityName(id string) string {
+	if n, ok := cityDisplayNames[id]; ok {
+		return n
+	}
+	return id
+}
 
 // InformerTransport handles Telegram webhook updates for the Informer bot.
 type InformerTransport struct {
@@ -22,6 +44,7 @@ type InformerTransport struct {
 	webhookSecret []byte
 	botUsername   string
 	now           func() time.Time
+	sender        InformerBotSender // optional; set via SetSender
 }
 
 // NewInformerTransport creates an InformerTransport.
@@ -47,6 +70,17 @@ func NewInformerTransport(
 		svc: svc, webhookSecret: webhookSecret,
 		botUsername: botUsername, now: now,
 	}, nil
+}
+
+// SetSender wires in the InformerBotSender used to reply to users.
+// Must be called before the first webhook is processed.
+func (t *InformerTransport) SetSender(s InformerBotSender) { t.sender = s }
+
+// send is a nil-safe helper: sends text if sender is configured.
+func (t *InformerTransport) send(ctx context.Context, chatID int64, text string) {
+	if t.sender != nil {
+		_ = t.sender.SendInformerNotification(ctx, chatID, text)
+	}
 }
 
 // HandleWebhook handles POST /v2/telegram/informer/webhook.
@@ -93,19 +127,62 @@ func (t *InformerTransport) HandleWebhook(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	ctx := r.Context()
 	text := strings.TrimSpace(msg.Text)
+	chatID := msg.Chat.ID
+
 	switch {
 	case strings.HasPrefix(text, "/start "):
 		rawToken := strings.TrimSpace(strings.TrimPrefix(text, "/start "))
-		if rawToken != "" {
-			if err := t.svc.Subscribe(msg.Chat.ID, rawToken); err != nil {
-				// Token errors are not retried by Telegram; always 200.
-			}
+		if rawToken == "" {
+			// Treat malformed "/start " (token empty after trim) as plain /start.
+			t.send(ctx, chatID, informerStartInstruction())
+			break
 		}
+		err := t.svc.Subscribe(chatID, rawToken)
+		switch {
+		case err == nil:
+			// Successful subscription: look up city for the confirmation message.
+			city := t.subscribedCity(ctx, chatID)
+			t.send(ctx, chatID, fmt.Sprintf(
+				"NA Room: Informer connected for %s. You will receive new listing notifications. Send /stop to unsubscribe.",
+				cityName(city),
+			))
+		case errors.Is(err, ErrInformerTokenClaimed):
+			// Token already used — subscription exists. No duplicate; no message needed.
+		case errors.Is(err, ErrInformerTokenExpired):
+			t.send(ctx, chatID, "NA Room: This link has expired (15 min). Please visit naroom.net/v2/informer to get a new link.")
+		case errors.Is(err, ErrInformerTokenNotFound):
+			t.send(ctx, chatID, "NA Room: This link is invalid. Please visit naroom.net/v2/informer to get a new link.")
+		default:
+			// Unexpected error — do not reveal internals; Telegram will not retry 200 responses.
+		}
+
+	case text == "/start":
+		// Plain /start with no token — guide the user.
+		t.send(ctx, chatID, informerStartInstruction())
+
 	case text == "/stop":
-		_ = t.svc.Unsubscribe(msg.Chat.ID)
+		_ = t.svc.Unsubscribe(chatID)
+		t.send(ctx, chatID, "NA Room: You have been unsubscribed from listing notifications. Visit naroom.net/v2/informer to subscribe again.")
 	}
+
 	w.WriteHeader(http.StatusOK)
+}
+
+// subscribedCity looks up the city for chatID's active subscription.
+// Returns the raw city ID as fallback (never empty — Subscribe just succeeded).
+func (t *InformerTransport) subscribedCity(ctx context.Context, chatID int64) string {
+	_, city, err := t.svc.HasActiveSubscription(chatID)
+	if err != nil || city == "" {
+		return ""
+	}
+	return city
+}
+
+// informerStartInstruction returns the plain-/start help message.
+func informerStartInstruction() string {
+	return "NA Room: To subscribe as an Informer and receive new listing notifications, visit naroom.net/v2/informer"
 }
 
 // Routes returns an http.Handler for the Informer webhook.

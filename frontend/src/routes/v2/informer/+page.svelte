@@ -3,6 +3,9 @@
 	import { lang, t as tFn } from '$lib/i18n.js';
 	import { CITIES } from '$lib/cities.js';
 
+	// Resolve city ID → display label for the success screen.
+	let cityLabel = $derived(CITIES.find(c => c.id === city)?.label ?? city);
+
 	let t = $derived((key, params) => tFn($lang, key, params));
 
 	// ── Public config ──────────────────────────────────────────────────────────────
@@ -202,7 +205,7 @@
 		<!-- Step 3: Connected -->
 		<div class="section done">
 			<div class="done-icon">✓</div>
-			<h2>{t('v2.inf.connected')}</h2>
+			<h2>{t('v2.inf.connected', { city: cityLabel })}</h2>
 			<a href="/v2/board/{city}" class="btn-secondary">{t('back_to_board')}</a>
 		</div>
 	{/if}

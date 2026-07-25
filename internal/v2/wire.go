@@ -164,6 +164,7 @@ func WireV2System(db *sql.DB, keys V2Keys, bots V2BotConfig, adapters V2Adapters
 	if err != nil {
 		return nil, fmt.Errorf("v2: WireV2System: informer transport: %w", err)
 	}
+	informerTransport.SetSender(adapters.InformerSender)
 
 	// ── HTTP handlers ──────────────────────────────────────────────────────────
 	clientHandler, err := NewClientHandler(svc, clientIssuer, balReader, keys.HMACKey, now)

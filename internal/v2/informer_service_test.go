@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1537,5 +1539,178 @@ func TestInformer_CrashWindow_DocumentedOnly(t *testing.T) {
 		// This would indicate the settled outbox was re-processed — a bug.
 		t.Errorf("settled outbox was re-processed: send count changed from %d to %d",
 			sendCountBefore, sendCount)
+	}
+}
+
+// ── Transport bot-reply regression tests ────────────────────────────────────
+// capturingSender captures every (chatID, text) pair sent via SendInformerNotification.
+type capturingSender struct {
+	msgs []struct {
+		ChatID int64
+		Text   string
+	}
+}
+
+func (c *capturingSender) SendInformerNotification(_ context.Context, chatID int64, text string) error {
+	c.msgs = append(c.msgs, struct {
+		ChatID int64
+		Text   string
+	}{chatID, text})
+	return nil
+}
+
+func (c *capturingSender) lastText() string {
+	if len(c.msgs) == 0 {
+		return ""
+	}
+	return c.msgs[len(c.msgs)-1].Text
+}
+
+func (c *capturingSender) count() int { return len(c.msgs) }
+
+func newCapturingTransport(t *testing.T, svc *v2.InformerService) (*v2.InformerTransport, *capturingSender) {
+	t.Helper()
+	tr := newInformerTransport(t, svc)
+	cs := &capturingSender{}
+	tr.SetSender(cs)
+	return tr, cs
+}
+
+func postInformerWebhookChat(t *testing.T, tr *v2.InformerTransport, chatID int64, text string) *httptest.ResponseRecorder {
+	t.Helper()
+	body := fmt.Sprintf(`{"message":{"message_id":1,"chat":{"id":%d,"type":"private"},"text":%q}}`, chatID, text)
+	return postInformerWebhook(t, tr, body, informerTestSecret)
+}
+
+// Test 1: Successful deep-link /start sends confirmation with city name.
+func TestInformerTransport_StartWithToken_SendsConfirmation(t *testing.T) {
+	svc := newInformerTestSvc(t, nil)
+	tr, cs := newCapturingTransport(t, svc)
+
+	rawToken, _, err := svc.CreateAccess("tbilisi", 2000.0)
+	if err != nil {
+		t.Fatalf("CreateAccess: %v", err)
+	}
+
+	rr := postInformerWebhookChat(t, tr, 9001, "/start "+rawToken)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	if cs.count() != 1 {
+		t.Fatalf("expected 1 message sent, got %d", cs.count())
+	}
+	got := cs.lastText()
+	if !strings.Contains(got, "connected") {
+		t.Errorf("confirmation must contain 'connected', got: %q", got)
+	}
+	if !strings.Contains(got, "Tbilisi") {
+		t.Errorf("confirmation must contain city name 'Tbilisi', got: %q", got)
+	}
+	if !strings.Contains(got, "/stop") {
+		t.Errorf("confirmation must mention /stop, got: %q", got)
+	}
+}
+
+// Test 2: Plain /start (no token) sends instruction to visit /v2/informer.
+func TestInformerTransport_PlainStart_SendsInstruction(t *testing.T) {
+	svc := newInformerTestSvc(t, nil)
+	tr, cs := newCapturingTransport(t, svc)
+
+	rr := postInformerWebhookChat(t, tr, 9002, "/start")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	if cs.count() != 1 {
+		t.Fatalf("expected 1 message sent, got %d", cs.count())
+	}
+	got := cs.lastText()
+	if !strings.Contains(got, "naroom.net/v2/informer") {
+		t.Errorf("instruction must contain naroom.net/v2/informer, got: %q", got)
+	}
+}
+
+// Test 3: Duplicate token (/start used twice) does not create a second subscription.
+func TestInformerTransport_DuplicateToken_NoDuplicateSubscription(t *testing.T) {
+	svc := newInformerTestSvc(t, nil)
+	tr, cs := newCapturingTransport(t, svc)
+
+	rawToken, _, err := svc.CreateAccess("tbilisi", 2000.0)
+	if err != nil {
+		t.Fatalf("CreateAccess: %v", err)
+	}
+
+	// First /start — creates subscription, sends confirmation.
+	rr1 := postInformerWebhookChat(t, tr, 9003, "/start "+rawToken)
+	if rr1.Code != http.StatusOK {
+		t.Fatalf("first /start: expected 200, got %d", rr1.Code)
+	}
+	firstMsgCount := cs.count()
+	if firstMsgCount != 1 {
+		t.Fatalf("first /start: expected 1 message, got %d", firstMsgCount)
+	}
+
+	// Second /start with same token — must be silent (no duplicate message, no new sub).
+	rr2 := postInformerWebhookChat(t, tr, 9003, "/start "+rawToken)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("second /start: expected 200, got %d", rr2.Code)
+	}
+	if cs.count() != firstMsgCount {
+		t.Errorf("duplicate token must not send another message; count was %d, now %d",
+			firstMsgCount, cs.count())
+	}
+
+	// Verify exactly one active subscription exists.
+	refs, err := svc.LoadActiveSubscribersForCity("tbilisi")
+	if err != nil {
+		t.Fatalf("LoadActiveSubscribersForCity: %v", err)
+	}
+	if len(refs) != 1 {
+		t.Errorf("expected 1 active subscriber, got %d", len(refs))
+	}
+}
+
+// Test 4: /stop sends confirmation.
+func TestInformerTransport_Stop_SendsConfirmation(t *testing.T) {
+	svc := newInformerTestSvc(t, nil)
+	tr, cs := newCapturingTransport(t, svc)
+
+	// Subscribe first.
+	rawToken, _, _ := svc.CreateAccess("batumi", 2000.0)
+	_ = svc.Subscribe(9004, rawToken)
+
+	rr := postInformerWebhookChat(t, tr, 9004, "/stop")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	if cs.count() != 1 {
+		t.Fatalf("expected 1 message sent, got %d", cs.count())
+	}
+	got := cs.lastText()
+	if !strings.Contains(got, "unsubscribed") {
+		t.Errorf("stop confirmation must contain 'unsubscribed', got: %q", got)
+	}
+
+	// Subscription must be gone.
+	refs, err := svc.LoadActiveSubscribersForCity("batumi")
+	if err != nil {
+		t.Fatalf("LoadActiveSubscribersForCity: %v", err)
+	}
+	if len(refs) != 0 {
+		t.Errorf("expected 0 active subscribers after /stop, got %d", len(refs))
+	}
+}
+
+// Test 5: /stop on non-existent subscription is silent (no panic, 200, no message sent).
+func TestInformerTransport_Stop_NoSubscription_Silent(t *testing.T) {
+	svc := newInformerTestSvc(t, nil)
+	tr, cs := newCapturingTransport(t, svc)
+
+	rr := postInformerWebhookChat(t, tr, 9005, "/stop")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	// No subscription existed — /stop should still send a confirmation (idempotent UX).
+	if cs.count() != 1 {
+		t.Fatalf("expected 1 confirmation message even when no subscription, got %d", cs.count())
 	}
 }
