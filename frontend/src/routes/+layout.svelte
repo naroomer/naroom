@@ -39,22 +39,22 @@
 	const META = {
 		en: {
 			title:       'NA Room — Anonymous Peer Support for Addiction',
-			description: 'Anonymous peer support for people dealing with addiction. No accounts, no identity. End-to-end encrypted chat. Works on Tor.',
+			description: 'Anonymous peer support for people dealing with addiction. No accounts, no identity. Contact helpers directly via Telegram.',
 			locale:      'en_US',
 		},
 		ru: {
 			title:       'NA Room — Анонимная поддержка при зависимости',
-			description: 'Анонимная поддержка для людей с зависимостью. Без аккаунтов, без личных данных. Зашифрованный чат. Работает через Tor.',
+			description: 'Анонимная поддержка для людей с зависимостью. Без аккаунтов, без личных данных. Связь через Telegram.',
 			locale:      'ru_RU',
 		},
 		es: {
 			title:       'NA Room — Peer Support Anónimo para Adicciones',
-			description: 'Peer support anónimo para personas con adicciones. Sin cuentas, sin identidad. Chat cifrado de extremo a extremo. Funciona en Tor.',
+			description: 'Peer support anónimo para personas con adicciones. Sin cuentas, sin identidad. Contacto directo por Telegram.',
 			locale:      'es_ES',
 		},
 		ka: {
 			title:       'NA Room — ანონიმური Peer Support დამოკიდებულებისთვის',
-			description: 'ანონიმური Peer support დამოკიდებულებასთან მებრძოლი ადამიანებისთვის. ანგარიშების გარეშე. დაშიფრული ჩატი. მუშაობს Tor-ზე.',
+			description: 'ანონიმური Peer support დამოკიდებულებასთან მებრძოლი ადამიანებისთვის. ანგარიშების გარეშე. კავშირი Telegram-ის გზით.',
 			locale:      'ka_GE',
 		},
 	};
