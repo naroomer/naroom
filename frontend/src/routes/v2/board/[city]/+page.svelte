@@ -61,7 +61,7 @@
 		<div class="logo">NA Room <span class="v2-badge">V2</span></div>
 		<nav>
 			<a href="/v2/restore">{t('v2.nav.restore')}</a>
-			<a href="/v2/new" class="cta-link">{t('v2.board.i_need_help')}</a>
+			<a href="/v2/how-it-works">{t('v2.nav.how_it_works')}</a>
 		</nav>
 	</header>
 
@@ -170,14 +170,6 @@
 	nav { display: flex; gap: 16px; align-items: center; }
 	nav a { color: var(--text-dim); font-size: 13px; }
 	nav a:hover { color: var(--text); }
-	.cta-link {
-		background: var(--accent);
-		color: var(--bg) !important;
-		padding: 6px 14px;
-		border-radius: 6px;
-		font-weight: 600;
-	}
-	.cta-link:hover { opacity: 0.85; }
 
 	.tabs {
 		display: flex;
