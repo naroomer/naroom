@@ -14,12 +14,12 @@ import (
 )
 
 type createListingReq struct {
-	City               string   `json:"city"`
-	DependencyType     string   `json:"dependency_type"`
-	HelpType           string   `json:"help_type"`
-	Urgency            string   `json:"urgency"`
-	Languages          []string `json:"languages"`
-	Currency           string   `json:"currency"` // BTC or LTC
+	City           string   `json:"city"`
+	DependencyType string   `json:"dependency_type"`
+	HelpType       string   `json:"help_type"`
+	Urgency        string   `json:"urgency"`
+	Languages      []string `json:"languages"`
+	Currency       string   `json:"currency"` // BTC or LTC
 }
 
 var validCity = map[string]bool{
@@ -92,21 +92,21 @@ func (h *Handler) GetListing(w http.ResponseWriter, r *http.Request) {
 	canRenew := openedChatsCount < 2 && !isSample
 
 	writeJSON(w, 200, map[string]any{
-		"id":                   id,
-		"city":                 city,
-		"dependency_type":      depType,
-		"help_type":            helpType,
-		"urgency":              urgency,
-		"languages":            langs,
-		"visible_until":        visibleUntil,
-		"created_at":           createdAt,
-		"status":               status,
-		"time_left":            timeLeft,
-		"responses_count":      respCount,
-		"renewal_count":        renewalCount,
-		"can_renew":            canRenew,
-		"is_sample":            isSample,
-		"opened_chats_count":   openedChatsCount,
+		"id":                 id,
+		"city":               city,
+		"dependency_type":    depType,
+		"help_type":          helpType,
+		"urgency":            urgency,
+		"languages":          langs,
+		"visible_until":      visibleUntil,
+		"created_at":         createdAt,
+		"status":             status,
+		"time_left":          timeLeft,
+		"responses_count":    respCount,
+		"renewal_count":      renewalCount,
+		"can_renew":          canRenew,
+		"is_sample":          isSample,
+		"opened_chats_count": openedChatsCount,
 	})
 }
 
@@ -146,15 +146,15 @@ func (h *Handler) GetListingResponses(w http.ResponseWriter, r *http.Request) {
 		ThumbsUp          int   `json:"thumbs_up"`
 		ThumbsDown        int   `json:"thumbs_down"`
 		BalanceTier       int   `json:"balance_tier"` // floor(balance_usd / 1000)
-		MemberSince       int64 `json:"member_since"`  // unix timestamp of first_seen
-		IsNew             bool  `json:"is_new"`        // true if < 5 completed sessions
+		MemberSince       int64 `json:"member_since"` // unix timestamp of first_seen
+		IsNew             bool  `json:"is_new"`       // true if < 5 completed sessions
 	}
 	type rawResponse struct {
-		id             string
-		counselorHash  string
-		pubkey         string
-		status         string
-		createdAt      int64
+		id            string
+		counselorHash string
+		pubkey        string
+		status        string
+		createdAt     int64
 	}
 	type response struct {
 		ID         string         `json:"id"`

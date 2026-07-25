@@ -11,21 +11,21 @@ import (
 
 // Handler holds shared dependencies for all HTTP handlers.
 type Handler struct {
-	DB           *sql.DB
-	HashKey      []byte // HMAC key for WalletHash — never log or expose
-	WalletEncKey []byte // AES-256-GCM key for wallet_address_enc — never log or expose
-	Mempool     *crypto.MempoolClient
-	Blockcypher *crypto.BlockcypherClient
-	Blockchair  *crypto.BlockchairClient
-	Prices      *crypto.PriceCache
-	Wallet      *crypto.HDWallet
-	DevMode    bool
-	ListingTTL int
-	ChatTTL          int
-	ChatMinTTL       int
-	ClientMinBalanceUSD float64 // default 150; override via CLIENT_MIN_BALANCE_USD
-	PeerMinBalanceUSD   float64 // default 1000; override via PEER_MIN_BALANCE_USD
-	Hub              *ChatHub // for broadcasting room_closed to WS clients
+	DB                  *sql.DB
+	HashKey             []byte // HMAC key for WalletHash — never log or expose
+	WalletEncKey        []byte // AES-256-GCM key for wallet_address_enc — never log or expose
+	Mempool             *crypto.MempoolClient
+	Blockcypher         *crypto.BlockcypherClient
+	Blockchair          *crypto.BlockchairClient
+	Prices              *crypto.PriceCache
+	Wallet              *crypto.HDWallet
+	DevMode             bool
+	ListingTTL          int
+	ChatTTL             int
+	ChatMinTTL          int
+	ClientMinBalanceUSD float64  // default 150; override via CLIENT_MIN_BALANCE_USD
+	PeerMinBalanceUSD   float64  // default 1000; override via PEER_MIN_BALANCE_USD
+	Hub                 *ChatHub // for broadcasting room_closed to WS clients
 
 	// Telegram notification bots. Nil when tokens are not configured.
 	Telegram              telegram.Sender

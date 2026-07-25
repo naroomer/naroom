@@ -54,7 +54,7 @@ func TestNormalizeListingStatus_MatchedToActive(t *testing.T) {
 	db := openNormTestDB(t)
 	now := time.Now().Unix()
 
-	insertNormListing(t, db, "norm-1", "matched", 0, now+3600) // still visible
+	insertNormListing(t, db, "norm-1", "matched", 0, now+3600)  // still visible
 	insertNormListing(t, db, "norm-1b", "matched", 1, now+3600) // count=1, still visible
 
 	NormalizeListingStatus(db)
@@ -110,9 +110,9 @@ func TestNormalizeListingStatus_Idempotent(t *testing.T) {
 	db := openNormTestDB(t)
 	now := time.Now().Unix()
 
-	insertNormListing(t, db, "idem-1", "matched", 0, now+3600)  // → active
-	insertNormListing(t, db, "idem-2", "matched", 0, now-100)   // → expired
-	insertNormListing(t, db, "idem-3", "active", 2, now+3600)   // → closed
+	insertNormListing(t, db, "idem-1", "matched", 0, now+3600) // → active
+	insertNormListing(t, db, "idem-2", "matched", 0, now-100)  // → expired
+	insertNormListing(t, db, "idem-3", "active", 2, now+3600)  // → closed
 
 	NormalizeListingStatus(db)
 	// Run a second time — must not change anything

@@ -13,12 +13,12 @@ import (
 )
 
 const (
-	ClientReplyMessage           = "NA Room: someone replied to your request. Open NA Room to continue."
-	HelperConfirmText            = "NA Room: board notifications enabled for 24 hours."
-	ClientConfirmText            = "NA Room: notifications connected. You will receive a notification if someone replies."
+	ClientReplyMessage            = "NA Room: someone replied to your request. Open NA Room to continue."
+	HelperConfirmText             = "NA Room: board notifications enabled for 24 hours."
+	ClientConfirmText             = "NA Room: notifications connected. You will receive a notification if someone replies."
 	ClientListingActivatedMessage = "NA Room: your request is now live for 24 hours. Helpers can respond now."
-	ChatOpenedClientMessage      = "NA Room: your chat is open. Return to NA Room to continue."
-	ChatOpenedHelperMessage      = "NA Room: your chat is open. Return to NA Room to continue."
+	ChatOpenedClientMessage       = "NA Room: your chat is open. Return to NA Room to continue."
+	ChatOpenedHelperMessage       = "NA Room: your chat is open. Return to NA Room to continue."
 )
 
 // Sender is implemented by the real Telegram client and by tests.

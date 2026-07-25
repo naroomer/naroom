@@ -272,16 +272,16 @@ func openFileDB(path string) (*sql.DB, error) {
 // ── Dev services ──────────────────────────────────────────────────────────────
 
 type devServer struct {
-	db            *sql.DB
-	svc           *v2.Service
-	ls            *v2.ListingService
-	helperSvc     *v2.HelperPurchaseService
-	reviewSvc     *v2.ReviewService
-	transport     *v2.TelegramTransport
-	destCipher    *v2.DestinationCipher
-	balance       *devBalanceReader
-	reviewSender  *devReviewSender
-	botSender     *devBotSender
+	db           *sql.DB
+	svc          *v2.Service
+	ls           *v2.ListingService
+	helperSvc    *v2.HelperPurchaseService
+	reviewSvc    *v2.ReviewService
+	transport    *v2.TelegramTransport
+	destCipher   *v2.DestinationCipher
+	balance      *devBalanceReader
+	reviewSender *devReviewSender
+	botSender    *devBotSender
 
 	// Informer subsystem
 	informerSvc       *v2.InformerService
@@ -990,9 +990,9 @@ func (ds *devServer) devHandleStatus(w http.ResponseWriter, r *http.Request) {
 			"GET  /dev/notifications",
 			"GET  /dev/status",
 		},
-		"bot_url":  "https://t.me/" + devBotUsername + "?start=dev",
-		"chat_id":  devFakeChatID,
-		"note":     "Use /dev/telegram/simulate-start (routes through real webhook) instead of /dev/telegram/connect for new E2E tests.",
+		"bot_url": "https://t.me/" + devBotUsername + "?start=dev",
+		"chat_id": devFakeChatID,
+		"note":    "Use /dev/telegram/simulate-start (routes through real webhook) instead of /dev/telegram/connect for new E2E tests.",
 	})
 }
 

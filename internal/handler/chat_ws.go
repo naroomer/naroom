@@ -595,7 +595,7 @@ func (h *Handler) CloseChat(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().Unix()
 
-	isPeer   := isPeerClose
+	isPeer := isPeerClose
 	isClient := isClientClose
 
 	// ── One side leaves first → mark their departure, other side keeps messages ──
@@ -607,12 +607,12 @@ func (h *Handler) CloseChat(w http.ResponseWriter, r *http.Request) {
 		var newStatus, col, wsEvent string
 		if isPeer {
 			newStatus = "peer_left"
-			col       = "peer_left_at"
-			wsEvent   = "peer_left"
+			col = "peer_left_at"
+			wsEvent = "peer_left"
 		} else {
 			newStatus = "client_left"
-			col       = "client_left_at"
-			wsEvent   = "client_left"
+			col = "client_left_at"
+			wsEvent = "client_left"
 		}
 		res, err := h.DB.Exec(`
 			UPDATE chat_rooms SET status = ?, `+col+` = ? WHERE id = ? AND status = 'active'

@@ -20,19 +20,19 @@ var litecoinMainNetParams = &chaincfg.Params{
 
 // HDWallet деривирует BTC/LTC адреса из xpub/zpub для приёма платежей.
 type HDWallet struct {
-	db         *sql.DB
-	btcKey     *hdkeychain.ExtendedKey
-	btcSegwit  bool // true → генерировать bech32 (bc1...) вместо legacy (1...)
-	ltcKey     *hdkeychain.ExtendedKey
-	ltcSegwit  bool // true → генерировать bech32 LTC (ltc1...) вместо legacy (L...)
+	db        *sql.DB
+	btcKey    *hdkeychain.ExtendedKey
+	btcSegwit bool // true → генерировать bech32 (bc1...) вместо legacy (1...)
+	ltcKey    *hdkeychain.ExtendedKey
+	ltcSegwit bool // true → генерировать bech32 LTC (ltc1...) вместо legacy (L...)
 }
 
 // zpubVersions: известные SegWit-версии extended public key → заменяем на xpub-версию
 // чтобы hdkeychain мог распарсить, а адрес генерируем сами через P2WPKH.
 var segwitPubVersions = map[[4]byte]bool{
-	{0x04, 0xB2, 0x47, 0x46}: true, // BTC zpub (BIP84)
+	{0x04, 0xB2, 0x47, 0x46}: true,  // BTC zpub (BIP84)
 	{0x04, 0x88, 0xB2, 0x1E}: false, // BTC xpub (BIP44) — legacy
-	{0x01, 0xB2, 0x6E, 0xF6}: true, // LTC zpub (BIP84)
+	{0x01, 0xB2, 0x6E, 0xF6}: true,  // LTC zpub (BIP84)
 	{0x01, 0x9D, 0xA4, 0x62}: false, // LTC xpub — legacy
 }
 

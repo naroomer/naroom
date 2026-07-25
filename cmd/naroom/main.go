@@ -101,21 +101,21 @@ func main() {
 
 	// Init handler
 	h := &handler.Handler{
-		DB:               database,
-		HashKey:          cfg.HashKey,
-		WalletEncKey:     walletEncKey,
-		Mempool:          mempool,
-		Blockcypher:      blockcypher,
-		Blockchair:       blockchair,
-		Prices:           prices,
-		Wallet:           wallet,
-		DevMode:    cfg.DevMode,
-		ListingTTL: cfg.ListingTTL,
-		ChatTTL:          cfg.ChatTTL,
-		ChatMinTTL:       cfg.ChatMinTTL,
+		DB:                  database,
+		HashKey:             cfg.HashKey,
+		WalletEncKey:        walletEncKey,
+		Mempool:             mempool,
+		Blockcypher:         blockcypher,
+		Blockchair:          blockchair,
+		Prices:              prices,
+		Wallet:              wallet,
+		DevMode:             cfg.DevMode,
+		ListingTTL:          cfg.ListingTTL,
+		ChatTTL:             cfg.ChatTTL,
+		ChatMinTTL:          cfg.ChatMinTTL,
 		ClientMinBalanceUSD: cfg.ClientMinBalanceUSD,
 		PeerMinBalanceUSD:   cfg.PeerMinBalanceUSD,
-		Hub:              hub,
+		Hub:                 hub,
 
 		Telegram:              tgClient,
 		TelegramClientBotName: cfg.TelegramClientBotName,
@@ -131,11 +131,11 @@ func main() {
 	// Notation: NewRateLimiter(events/sec, burst)
 	//   5/min  = rate.Limit(5.0/60)  burst 5
 	//   60/min = rate.Limit(1.0)     burst 60
-	rlWalletVerify  := middleware.NewRateLimiter(10.0/60, 10)  // 10/min/IP
-	rlRespond       := middleware.NewRateLimiter(3.0/60, 3)    // 3/min/IP
-	rlBoard         := middleware.NewRateLimiter(1.0, 60)      // 60/min/IP
-	rlInvoice       := middleware.NewRateLimiter(30.0/60, 30)  // 30/min/IP
-	rlGeneral       := middleware.NewRateLimiter(30.0/60, 30)  // 30/min/IP — всё остальное
+	rlWalletVerify := middleware.NewRateLimiter(10.0/60, 10) // 10/min/IP
+	rlRespond := middleware.NewRateLimiter(3.0/60, 3)        // 3/min/IP
+	rlBoard := middleware.NewRateLimiter(1.0, 60)            // 60/min/IP
+	rlInvoice := middleware.NewRateLimiter(30.0/60, 30)      // 30/min/IP
+	rlGeneral := middleware.NewRateLimiter(30.0/60, 30)      // 30/min/IP — всё остальное
 
 	// In dev mode: bypass all rate limits so E2E tests aren't throttled.
 	// Rate limiting is tested separately in test 007.
@@ -214,6 +214,14 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// ── V2 production wiring (V2_ENABLED=false: no-op) ──────────────────────
+	// All V2 routes, workers, and schema migrations are applied here.
+	// Fail-fast: if V2_ENABLED=true and any required secret is missing, exit now
+	// before the server accepts connections — never serve a partially-wired V2.
+	if wireErr := wireV2(ctx, r, cfg, database, wallet, prices, mempool, blockcypher); wireErr != nil {
+		log.Fatalf("V2 wiring failed: %v", wireErr)
+	}
+
 	// Start workers
 	balanceChecker := &worker.BalanceChecker{
 		DB:           database,
@@ -231,16 +239,16 @@ func main() {
 	}
 
 	invoiceWatcher := &worker.InvoiceWatcher{
-		DB:      database,
-		HashKey: cfg.HashKey,
-		Mempool: mempool,
-		Blockcypher: blockcypher,
-		Prices:      prices,
-		Interval:    time.Duration(cfg.InvoiceWatchInterval) * time.Second,
+		DB:           database,
+		HashKey:      cfg.HashKey,
+		Mempool:      mempool,
+		Blockcypher:  blockcypher,
+		Prices:       prices,
+		Interval:     time.Duration(cfg.InvoiceWatchInterval) * time.Second,
 		DevMode:      cfg.DevMode,
 		SkipPayments: cfg.DevMode || os.Getenv("DEV_SKIP_PAYMENTS") == "true",
-		ListingTTL:  cfg.ListingTTL,
-		ChatTTL:     cfg.ChatTTL,
+		ListingTTL:   cfg.ListingTTL,
+		ChatTTL:      cfg.ChatTTL,
 
 		RequireTelegram: requireTelegram,
 		TelegramSender:  tgClient,

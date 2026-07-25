@@ -41,6 +41,14 @@ e2e/diagnose_*.js
 
 # E2E test artifacts
 e2e/screenshots/
+test-results/
+playwright-report/
+*.webm
+*.zip
+
+# V2 testserver binaries (built by e2e global-setup; never committed)
+/v2testserver
+/frontend/v2testserver
 
 # Root-level node_modules (should not exist — E2E uses e2e/node_modules/)
 /node_modules/

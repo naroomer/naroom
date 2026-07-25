@@ -11,11 +11,11 @@ import (
 // They never expire (visible_until = far future) and can't be responded to.
 func SeedSamples(db *sql.DB) {
 	type sample struct {
-		city       string
-		dep        string
-		help       string
-		urgency    string
-		langs      string
+		city    string
+		dep     string
+		help    string
+		urgency string
+		langs   string
 	}
 
 	samples := []sample{

@@ -130,7 +130,7 @@ func (h *Handler) ChatPollReceive(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, 200, map[string]any{
-		"messages":   messages,
+		"messages":    messages,
 		"room_status": status,
 	})
 }

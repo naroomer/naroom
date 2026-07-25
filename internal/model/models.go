@@ -65,15 +65,15 @@ type WalletSession struct {
 
 // Reputation — рейтинг психолога (агрегат)
 type Reputation struct {
-	CounselorHash    string `json:"-"`
-	Region           string `json:"region"`
-	SessionsTotal    int    `json:"sessions_total"`
-	SessionsCompleted int   `json:"sessions_completed"`
-	SessionsEarlyExit int  `json:"sessions_early_exit"`
-	ThumbsUp         int    `json:"thumbs_up"`
-	ThumbsDown       int    `json:"thumbs_down"`
-	ReturningClients int    `json:"returning_clients"`
-	FirstSeen        int64  `json:"first_seen"`
+	CounselorHash     string `json:"-"`
+	Region            string `json:"region"`
+	SessionsTotal     int    `json:"sessions_total"`
+	SessionsCompleted int    `json:"sessions_completed"`
+	SessionsEarlyExit int    `json:"sessions_early_exit"`
+	ThumbsUp          int    `json:"thumbs_up"`
+	ThumbsDown        int    `json:"thumbs_down"`
+	ReturningClients  int    `json:"returning_clients"`
+	FirstSeen         int64  `json:"first_seen"`
 }
 
 // ChatRoom — чат-комната
@@ -104,10 +104,10 @@ type EncryptedMessage struct {
 
 // ReviewToken — анонимный одноразовый токен для оценки
 type ReviewToken struct {
-	Token        string `json:"token"`
+	Token         string `json:"token"`
 	CounselorHash string `json:"-"`
-	IsPaid       bool   `json:"-"`
-	Used         bool   `json:"-"`
-	CreatedAt    int64  `json:"-"`
-	ExpiresAt    int64  `json:"-"`
+	IsPaid        bool   `json:"-"`
+	Used          bool   `json:"-"`
+	CreatedAt     int64  `json:"-"`
+	ExpiresAt     int64  `json:"-"`
 }

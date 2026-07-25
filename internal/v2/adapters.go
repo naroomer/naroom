@@ -419,3 +419,44 @@ var _ V2PriceSource = (*PriceCacheV2Adapter)(nil)
 var _ V2AtomicBalanceReader = (*MempoolBalanceAdapter)(nil)
 var _ V2AtomicBalanceReader = (*BlockcypherBalanceAdapter)(nil)
 var _ V2AddressAllocator = (*HDAllocatorAdapter)(nil)
+
+// ── V2HelperInvoiceIssuer ────────────────────────────────────────────────────
+
+// V2HelperInvoiceIssuer issues $10 helper invoices using the shared HD wallet.
+// Address allocation uses the same NextBTCAddress/NextLTCAddress counter as
+// the client invoice issuer, so index collision is impossible.
+type V2HelperInvoiceIssuer struct {
+	alloc V2AddressAllocator
+	price V2PriceSource
+}
+
+// NewV2HelperInvoiceIssuer creates a production helper invoice issuer.
+func NewV2HelperInvoiceIssuer(alloc V2AddressAllocator, price V2PriceSource) *V2HelperInvoiceIssuer {
+	return &V2HelperInvoiceIssuer{alloc: alloc, price: price}
+}
+
+// CreateHelperInvoice allocates a fresh HD-wallet address and calculates the
+// atomic amount for a $10 helper fee (ceiling division for safety).
+func (iss *V2HelperInvoiceIssuer) CreateHelperInvoice(ctx context.Context, currency string) (HelperInvoiceDraft, error) {
+	addr, err := iss.alloc.AllocateAddress(ctx, currency)
+	if err != nil {
+		return HelperInvoiceDraft{}, fmt.Errorf("v2: V2HelperInvoiceIssuer: allocate address: %w", err)
+	}
+	priceUSD, err := iss.price.PricePerCoin(ctx, currency)
+	if err != nil {
+		return HelperInvoiceDraft{}, fmt.Errorf("v2: V2HelperInvoiceIssuer: get price: %w", err)
+	}
+	if priceUSD <= 0 {
+		return HelperInvoiceDraft{}, fmt.Errorf("v2: V2HelperInvoiceIssuer: invalid price %v", priceUSD)
+	}
+	const usdAmount = 10.0 // $10 helper fee
+	atomic := int64(math.Ceil(usdAmount / priceUSD * 1e8))
+	return HelperInvoiceDraft{
+		PaymentAddress: addr,
+		AmountAtomic:   atomic,
+		AmountUSDCents: helperInvoiceUSDCents,
+	}, nil
+}
+
+// ensure V2HelperInvoiceIssuer implements HelperInvoiceIssuerHTTP at compile time.
+var _ HelperInvoiceIssuerHTTP = (*V2HelperInvoiceIssuer)(nil)

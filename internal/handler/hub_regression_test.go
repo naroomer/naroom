@@ -92,8 +92,8 @@ const (
 	testHelperHash        = "helperhash_regression"
 	testClientPub         = "clientpubkey_regression"
 	testHelperPub         = "helperpubkey_regression"
-	testClientToken       = "clienttoken_regression_aaa"   // session A (first browser)
-	testClientToken2      = "clienttoken_regression_bbb"   // session B (second browser, same wallet)
+	testClientToken       = "clienttoken_regression_aaa" // session A (first browser)
+	testClientToken2      = "clienttoken_regression_bbb" // session B (second browser, same wallet)
 	testHelperToken       = "helpertoken_regression_ccc"
 	testClientPrincipalID = "prn_client_regression_0000000000000000000000000000"
 	testHelperPrincipalID = "prn_helper_regression_0000000000000000000000000000"
@@ -730,16 +730,17 @@ func hubServerFull(t *testing.T, db *sql.DB, hub *ChatHub) (*httptest.Server, st
 // TestChatHub_ThreeBrowser_ABH_FullSequence is the three-browser regression test.
 //
 // Sequence:
-//   A (session A) + H (helper) are in an active chat.
-//   B (session B, same wallet as A) attempts to enter the same room.
+//
+//	A (session A) + H (helper) are in an active chat.
+//	B (session B, same wallet as A) attempts to enter the same room.
 //
 // Expected invariants:
-//   1. A↔H message delivery works before B arrives.
-//   2. B's pubkey POST is rejected (409) — DB client_pubkey is unchanged.
-//   3. B's WS connection is rejected with {type:system, event:chat_already_open}.
-//   4. Hub still holds exactly 2 entries (A + H) after B's attempt.
-//   5. A↔H message delivery continues uninterrupted after B is rejected.
-//   6. A's hub slot still holds session A's token hash (not replaced by B).
+//  1. A↔H message delivery works before B arrives.
+//  2. B's pubkey POST is rejected (409) — DB client_pubkey is unchanged.
+//  3. B's WS connection is rejected with {type:system, event:chat_already_open}.
+//  4. Hub still holds exactly 2 entries (A + H) after B's attempt.
+//  5. A↔H message delivery continues uninterrupted after B is rejected.
+//  6. A's hub slot still holds session A's token hash (not replaced by B).
 func TestChatHub_ThreeBrowser_ABH_FullSequence(t *testing.T) {
 	db := openHubTestDB(t)
 	defer db.Close()

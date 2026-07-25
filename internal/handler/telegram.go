@@ -432,13 +432,13 @@ func (h *Handler) createTelegramToken(tokenType, listingID, filtersJSON, counsel
 // Returns the listing_id so the caller can attempt ActivateListingIfReady.
 //
 // All six steps run inside a single database transaction:
-//   1. Claim the token (UPDATE used=TRUE) — RowsAffected=0 means invalid/expired/consumed.
-//   2. Read token's principal_id — fail closed if NULL or empty.
-//   3. Read listing: fail closed if owner_principal_id does not exactly match token's principal.
-//   4. Reject if active listing's visible_until has already passed.
-//   5. Deactivate existing active binding — SQL error rolls back steps 1-4.
-//   6. Insert new binding — SQL error rolls back everything including the token claim.
-//   7. Commit.
+//  1. Claim the token (UPDATE used=TRUE) — RowsAffected=0 means invalid/expired/consumed.
+//  2. Read token's principal_id — fail closed if NULL or empty.
+//  3. Read listing: fail closed if owner_principal_id does not exactly match token's principal.
+//  4. Reject if active listing's visible_until has already passed.
+//  5. Deactivate existing active binding — SQL error rolls back steps 1-4.
+//  6. Insert new binding — SQL error rolls back everything including the token claim.
+//  7. Commit.
 func (h *Handler) consumeClientToken(token, chatID string) (string, error) {
 	now := time.Now().Unix()
 	tx, err := h.DB.Begin()

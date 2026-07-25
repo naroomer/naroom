@@ -46,6 +46,37 @@ type Config struct {
 	TelegramClientBotName  string // e.g. "NARoomClientBot"
 	TelegramHelperBotName  string // e.g. "NARoomHelperBot"
 	PublicBaseURL          string // e.g. "https://naroom.net"
+
+	// ── V2 feature flag and secrets ────────────────────────────────────────────
+	// All fields below are only required (and validated fail-fast) when V2Enabled=true.
+
+	// V2Enabled activates V2 routes, workers and schema migrations.
+	// OFF (default): V2 code is compiled but no routes/workers are registered.
+	// ON: all approved /v2/... API routes and V2 workers are mounted.
+	V2Enabled bool
+
+	// V2HMACKey is the HMAC-SHA256 secret for V2 wallet fingerprinting, rate-limit
+	// key derivation, token authentication, and Informer subscription lookup.
+	// Required: 64 hex chars (32 bytes). Domain-separated from V1 keys.
+	V2HMACKey string
+
+	// V2 contact encryption (AES-256-GCM for listing contact handles).
+	V2ContactEncKey     string // 64 hex chars (32 bytes)
+	V2ContactKeyVersion string // non-empty version label, e.g. "v1"
+
+	// V2 destination encryption (AES-256-GCM for Telegram chat_id at rest).
+	V2DestEncKey     string // 64 hex chars (32 bytes)
+	V2DestKeyVersion string // non-empty version label, e.g. "v1"
+
+	// V2 Client notification bot (separate from V1 Telegram bots).
+	V2ClientBotToken      string // Telegram bot token for V2 client binding/review delivery
+	V2ClientBotName       string // bot username, must end in "bot"
+	V2ClientWebhookSecret string // Telegram webhook secret for V2 client bot
+
+	// V2 Informer bot.
+	V2InformerBotToken      string // Telegram bot token for Informer outbox delivery
+	V2InformerBotName       string // bot username, must end in "bot"
+	V2InformerWebhookSecret string // Telegram webhook secret for Informer bot
 }
 
 func Load() *Config {
@@ -85,6 +116,25 @@ func Load() *Config {
 		TelegramClientBotName:  envOr("TELEGRAM_CLIENT_BOT_NAME", "NARoomClientBot"),
 		TelegramHelperBotName:  envOr("TELEGRAM_HELPER_BOT_NAME", "NARoomHelperBot"),
 		PublicBaseURL:          envOr("PUBLIC_BASE_URL", "https://naroom.net"),
+
+		// V2 feature flag and secrets.
+		V2Enabled: envOr("V2_ENABLED", "") == "true",
+
+		V2HMACKey: envOr("V2_HMAC_KEY", ""),
+
+		V2ContactEncKey:     envOr("V2_CONTACT_ENC_KEY", ""),
+		V2ContactKeyVersion: envOr("V2_CONTACT_KEY_VERSION", ""),
+
+		V2DestEncKey:     envOr("V2_DEST_ENC_KEY", ""),
+		V2DestKeyVersion: envOr("V2_DEST_KEY_VERSION", ""),
+
+		V2ClientBotToken:      envOr("V2_CLIENT_BOT_TOKEN", ""),
+		V2ClientBotName:       envOr("V2_CLIENT_BOT_NAME", ""),
+		V2ClientWebhookSecret: envOr("V2_CLIENT_WEBHOOK_SECRET", ""),
+
+		V2InformerBotToken:      envOr("V2_INFORMER_BOT_TOKEN", ""),
+		V2InformerBotName:       envOr("V2_INFORMER_BOT_NAME", ""),
+		V2InformerWebhookSecret: envOr("V2_INFORMER_WEBHOOK_SECRET", ""),
 	}
 }
 

@@ -1,9 +1,12 @@
 package v2
 
 import (
+	"context"
 	"database/sql"
 	_ "embed"
+	"errors"
 	"fmt"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -19,26 +22,598 @@ func ApplySchema(db *sql.DB) error {
 	return nil
 }
 
+// columnExists reports whether a column named col exists in table tbl.
+// Uses PRAGMA table_info, which is always reliable in SQLite.
+func columnExists(db *sql.DB, tbl, col string) (bool, error) {
+	rows, err := db.Query(`PRAGMA table_info(` + tbl + `)`)
+	if err != nil {
+		return false, fmt.Errorf("v2: columnExists: PRAGMA table_info(%s): %w", tbl, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull int
+		var dflt sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			return false, fmt.Errorf("v2: columnExists: scan: %w", err)
+		}
+		if name == col {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+// connColumnExists is like columnExists but operates on a specific connection
+// (required inside pinned-connection blocks where PRAGMA and TX share one conn).
+func connColumnExists(ctx context.Context, conn *sql.Conn, tbl, col string) (bool, error) {
+	rows, err := conn.QueryContext(ctx, `PRAGMA table_info(`+tbl+`)`)
+	if err != nil {
+		return false, fmt.Errorf("v2: connColumnExists: PRAGMA table_info(%s): %w", tbl, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull int
+		var dflt sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			return false, fmt.Errorf("v2: connColumnExists: scan: %w", err)
+		}
+		if name == col {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+// tableExists reports whether a table named tbl exists in the database.
+func tableExists(db *sql.DB, tbl string) (bool, error) {
+	var count int
+	err := db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, tbl,
+	).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("v2: tableExists: %w", err)
+	}
+	return count > 0, nil
+}
+
+// connTableExists is like tableExists but operates on a specific connection.
+func connTableExists(ctx context.Context, conn *sql.Conn, tbl string) (bool, error) {
+	var count int
+	err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, tbl,
+	).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("v2: connTableExists(%s): %w", tbl, err)
+	}
+	return count > 0, nil
+}
+
+// addColumnIfMissing adds a column to a table using PRAGMA introspection.
+// Returns nil if the column already exists.
+func addColumnIfMissing(db *sql.DB, tbl, col, definition string) error {
+	exists, err := columnExists(db, tbl, col)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	_, execErr := db.Exec(`ALTER TABLE ` + tbl + ` ADD COLUMN ` + col + ` ` + definition)
+	if execErr != nil {
+		return fmt.Errorf("v2: addColumnIfMissing: ALTER %s.%s: %w", tbl, col, execErr)
+	}
+	return nil
+}
+
+// connOutboxInspect checks v2_informer_outbox for dead columns (notified_refs, claimed_at)
+// and reports which optional columns exist (claimed_by, claim_token, lease_until).
+//
+//   - needsRebuild is true if notified_refs or claimed_at are present, OR if the table
+//     exists but any of claimed_by/claim_token/lease_until are missing.
+//   - hasClaimedBy, hasClaimToken, hasLeaseUntil report column presence for the copy SQL.
+func connOutboxInspect(ctx context.Context, conn *sql.Conn) (needsRebuild, hasClaimedBy, hasClaimToken, hasLeaseUntil bool, err error) {
+	exists, err := connTableExists(ctx, conn, "v2_informer_outbox")
+	if err != nil {
+		return false, false, false, false, fmt.Errorf("connOutboxInspect: table check: %w", err)
+	}
+	if !exists {
+		// ApplySchema will create it fresh; no rebuild needed.
+		return false, false, false, false, nil
+	}
+
+	hasNotifiedRefs, err := connColumnExists(ctx, conn, "v2_informer_outbox", "notified_refs")
+	if err != nil {
+		return false, false, false, false, fmt.Errorf("connOutboxInspect: notified_refs: %w", err)
+	}
+	if hasNotifiedRefs {
+		// Dead column present — we still need to know which optional cols exist for copy SQL.
+		hasClaimedBy, err = connColumnExists(ctx, conn, "v2_informer_outbox", "claimed_by")
+		if err != nil {
+			return false, false, false, false, fmt.Errorf("connOutboxInspect: claimed_by: %w", err)
+		}
+		hasClaimToken, err = connColumnExists(ctx, conn, "v2_informer_outbox", "claim_token")
+		if err != nil {
+			return false, false, false, false, fmt.Errorf("connOutboxInspect: claim_token: %w", err)
+		}
+		hasLeaseUntil, err = connColumnExists(ctx, conn, "v2_informer_outbox", "lease_until")
+		if err != nil {
+			return false, false, false, false, fmt.Errorf("connOutboxInspect: lease_until: %w", err)
+		}
+		return true, hasClaimedBy, hasClaimToken, hasLeaseUntil, nil
+	}
+
+	hasClaimedAt, err := connColumnExists(ctx, conn, "v2_informer_outbox", "claimed_at")
+	if err != nil {
+		return false, false, false, false, fmt.Errorf("connOutboxInspect: claimed_at: %w", err)
+	}
+	if hasClaimedAt {
+		hasClaimedBy, err = connColumnExists(ctx, conn, "v2_informer_outbox", "claimed_by")
+		if err != nil {
+			return false, false, false, false, fmt.Errorf("connOutboxInspect: claimed_by: %w", err)
+		}
+		hasClaimToken, err = connColumnExists(ctx, conn, "v2_informer_outbox", "claim_token")
+		if err != nil {
+			return false, false, false, false, fmt.Errorf("connOutboxInspect: claim_token: %w", err)
+		}
+		hasLeaseUntil, err = connColumnExists(ctx, conn, "v2_informer_outbox", "lease_until")
+		if err != nil {
+			return false, false, false, false, fmt.Errorf("connOutboxInspect: lease_until: %w", err)
+		}
+		return true, hasClaimedBy, hasClaimToken, hasLeaseUntil, nil
+	}
+
+	// No dead columns. Check for missing optional columns.
+	hasClaimedBy, err = connColumnExists(ctx, conn, "v2_informer_outbox", "claimed_by")
+	if err != nil {
+		return false, false, false, false, fmt.Errorf("connOutboxInspect: claimed_by: %w", err)
+	}
+	hasClaimToken, err = connColumnExists(ctx, conn, "v2_informer_outbox", "claim_token")
+	if err != nil {
+		return false, false, false, false, fmt.Errorf("connOutboxInspect: claim_token: %w", err)
+	}
+	hasLeaseUntil, err = connColumnExists(ctx, conn, "v2_informer_outbox", "lease_until")
+	if err != nil {
+		return false, false, false, false, fmt.Errorf("connOutboxInspect: lease_until: %w", err)
+	}
+
+	// If any required optional column is missing, we need a rebuild.
+	if !hasClaimedBy || !hasClaimToken || !hasLeaseUntil {
+		return true, hasClaimedBy, hasClaimToken, hasLeaseUntil, nil
+	}
+
+	return false, hasClaimedBy, hasClaimToken, hasLeaseUntil, nil
+}
+
+// connRecipientsMigrateNeeded reads sqlite_master to check if the recipients table
+// has the old CHECK constraint (missing retry_exhausted). Returns (needsRebuild, err).
+func connRecipientsMigrateNeeded(ctx context.Context, conn *sql.Conn) (bool, error) {
+	var createSQL string
+	err := conn.QueryRowContext(ctx,
+		`SELECT sql FROM sqlite_master WHERE type='table' AND name='v2_informer_outbox_recipients'`,
+	).Scan(&createSQL)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil // table doesn't exist; handled elsewhere
+	}
+	if err != nil {
+		return false, fmt.Errorf("connRecipientsMigrateNeeded: %w", err)
+	}
+	// If the CREATE TABLE sql mentions 'retry_exhausted', the CHECK is current.
+	return !strings.Contains(createSQL, "retry_exhausted"), nil
+}
+
+// MigrateSchema applies incremental V2 schema migrations on top of ApplySchema.
+// Each step is idempotent: column existence is checked via PRAGMA table_info
+// before issuing ALTER TABLE. No error-string matching.
+//
+// Upgrade path:
+//   - DBs from checkpoint a0d6d99 have the original v2_informer_outbox without
+//     claim_token/lease_until and no recipients table at all.
+//   - DBs already at 09A-REPAIR have claimed_by/claimed_at but not claim_token/lease_until.
+//   - All paths end with the same schema as a fresh DB from schema.sql.
+//
+// Uses a single pinned *sql.Conn for ALL operations so that PRAGMA foreign_keys
+// and the transaction share exactly the same SQLite connection — required because
+// SQLite's PRAGMA foreign_keys cannot be changed inside a transaction.
+func MigrateSchema(db *sql.DB) error {
+	ctx := context.Background()
+
+	// Pin a single connection for all operations.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("v2: MigrateSchema: get conn: %w", err)
+	}
+	defer conn.Close() //nolint:errcheck
+
+	// ── Introspect (outside any TX) ──────────────────────────────────────────
+
+	outboxExists, err := connTableExists(ctx, conn, "v2_informer_outbox")
+	if err != nil {
+		return fmt.Errorf("v2: MigrateSchema: outbox table check: %w", err)
+	}
+
+	var outboxNeedsRebuild, hasClaimedBy, hasClaimToken, hasLeaseUntil bool
+	if outboxExists {
+		outboxNeedsRebuild, hasClaimedBy, hasClaimToken, hasLeaseUntil, err = connOutboxInspect(ctx, conn)
+		if err != nil {
+			return fmt.Errorf("v2: MigrateSchema: outbox inspect: %w", err)
+		}
+	}
+
+	recipientsExists, err := connTableExists(ctx, conn, "v2_informer_outbox_recipients")
+	if err != nil {
+		return fmt.Errorf("v2: MigrateSchema: recipients table check: %w", err)
+	}
+
+	var recipientsNeedsRebuild bool
+	var attemptsExists bool
+	if recipientsExists {
+		recipientsNeedsRebuild, err = connRecipientsMigrateNeeded(ctx, conn)
+		if err != nil {
+			return fmt.Errorf("v2: MigrateSchema: recipients migrate check: %w", err)
+		}
+		attemptsExists, err = connColumnExists(ctx, conn, "v2_informer_outbox_recipients", "attempts")
+		if err != nil {
+			return fmt.Errorf("v2: MigrateSchema: attempts column check: %w", err)
+		}
+	}
+
+	// ── Early return: nothing to do ──────────────────────────────────────────
+	//
+	// Condition: outbox exists and is clean, all optional cols present,
+	// recipients exists and is current, attempts column present.
+	if outboxExists && !outboxNeedsRebuild && hasClaimedBy && hasClaimToken && hasLeaseUntil &&
+		recipientsExists && !recipientsNeedsRebuild && attemptsExists {
+		return nil
+	}
+
+	// ── Set PRAGMA foreign_keys = OFF (outside TX — SQLite requirement) ──────
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return fmt.Errorf("v2: MigrateSchema: disable FK: %w", err)
+	}
+	defer conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`) //nolint:errcheck
+
+	// ── Begin TX on the same conn ────────────────────────────────────────────
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("v2: MigrateSchema: begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// ── v2_informer_outbox ───────────────────────────────────────────────────
+
+	if outboxExists && outboxNeedsRebuild {
+		if err := rebuildOutboxInTx(ctx, tx, hasClaimedBy, hasClaimToken, hasLeaseUntil); err != nil {
+			return fmt.Errorf("v2: MigrateSchema: rebuild outbox: %w", err)
+		}
+	} else if outboxExists {
+		// Table has the right structure; add any missing columns incrementally inside TX.
+		if !hasClaimedBy {
+			if _, err := tx.ExecContext(ctx,
+				`ALTER TABLE v2_informer_outbox ADD COLUMN claimed_by TEXT NOT NULL DEFAULT ''`,
+			); err != nil {
+				return fmt.Errorf("v2: MigrateSchema: add claimed_by: %w", err)
+			}
+		}
+		if !hasClaimToken {
+			if _, err := tx.ExecContext(ctx,
+				`ALTER TABLE v2_informer_outbox ADD COLUMN claim_token TEXT NOT NULL DEFAULT ''`,
+			); err != nil {
+				return fmt.Errorf("v2: MigrateSchema: add claim_token: %w", err)
+			}
+		}
+		if !hasLeaseUntil {
+			if _, err := tx.ExecContext(ctx,
+				`ALTER TABLE v2_informer_outbox ADD COLUMN lease_until INTEGER NOT NULL DEFAULT 0`,
+			); err != nil {
+				return fmt.Errorf("v2: MigrateSchema: add lease_until: %w", err)
+			}
+		}
+	}
+
+	// ── v2_informer_outbox_recipients ────────────────────────────────────────
+
+	if !recipientsExists {
+		if _, err := tx.ExecContext(ctx, `
+CREATE TABLE v2_informer_outbox_recipients (
+    outbox_id  TEXT NOT NULL REFERENCES v2_informer_outbox(id) ON DELETE CASCADE,
+    sub_ref    TEXT NOT NULL,
+    state      TEXT NOT NULL DEFAULT 'pending'
+                   CHECK (state IN ('pending', 'delivered', 'permanent_failed',
+                                    'retry_exhausted', 'decrypt_failed')),
+    attempts   INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (outbox_id, sub_ref)
+)`); err != nil {
+			return fmt.Errorf("v2: MigrateSchema: create outbox_recipients: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+CREATE INDEX IF NOT EXISTS idx_v2_outbox_recipients_pending
+    ON v2_informer_outbox_recipients(outbox_id) WHERE state = 'pending'`); err != nil {
+			return fmt.Errorf("v2: MigrateSchema: create recipients index: %w", err)
+		}
+	} else {
+		if !attemptsExists {
+			if _, err := tx.ExecContext(ctx,
+				`ALTER TABLE v2_informer_outbox_recipients ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`,
+			); err != nil {
+				return fmt.Errorf("v2: MigrateSchema: add attempts: %w", err)
+			}
+		}
+		if recipientsNeedsRebuild {
+			if err := rebuildRecipientsInTx(ctx, tx); err != nil {
+				return fmt.Errorf("v2: MigrateSchema: rebuild recipients: %w", err)
+			}
+		}
+	}
+
+	// ── Commit ───────────────────────────────────────────────────────────────
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("v2: MigrateSchema: commit: %w", err)
+	}
+
+	// ── Post-commit foreign key check (on same conn, outside TX) ─────────────
+	rows, err := conn.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return fmt.Errorf("v2: MigrateSchema: foreign_key_check: %w", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		return fmt.Errorf("v2: MigrateSchema: foreign_key_check: integrity violation detected after migration")
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("v2: MigrateSchema: foreign_key_check scan: %w", err)
+	}
+
+	return nil
+}
+
+// rebuildOutboxInTx rebuilds v2_informer_outbox within an already-open transaction,
+// preserving data from all columns that exist in both old and new schemas.
+//
+// hasClaimedBy/hasClaimToken/hasLeaseUntil must be determined before opening the TX
+// (via connOutboxInspect) because SQLite rejects references to absent columns even
+// inside COALESCE. Literal defaults (”/0) are substituted for absent columns.
+func rebuildOutboxInTx(ctx context.Context, tx *sql.Tx, hasClaimedBy, hasClaimToken, hasLeaseUntil bool) error {
+	claimedByExpr := "''"
+	if hasClaimedBy {
+		claimedByExpr = "claimed_by"
+	}
+	claimTokenExpr := "''"
+	if hasClaimToken {
+		claimTokenExpr = "claim_token"
+	}
+	leaseUntilExpr := "0"
+	if hasLeaseUntil {
+		leaseUntilExpr = "lease_until"
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+CREATE TABLE v2_informer_outbox_new (
+    id           TEXT PRIMARY KEY,
+    listing_id   TEXT NOT NULL,
+    city         TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    help_type    TEXT NOT NULL,
+    dep_type     TEXT NOT NULL,
+    urgency      TEXT NOT NULL,
+    listing_url  TEXT NOT NULL,
+    event_key    TEXT NOT NULL UNIQUE,
+    state        TEXT NOT NULL DEFAULT 'pending'
+                     CHECK (state IN ('pending', 'done', 'failed')),
+    attempt      INTEGER NOT NULL DEFAULT 0,
+    claimed_by   TEXT NOT NULL DEFAULT '',
+    claim_token  TEXT NOT NULL DEFAULT '',
+    lease_until  INTEGER NOT NULL DEFAULT 0,
+    last_error   TEXT,
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL
+)`); err != nil {
+		return fmt.Errorf("rebuildOutboxInTx: create new: %w", err)
+	}
+
+	copySQL := fmt.Sprintf(`
+INSERT INTO v2_informer_outbox_new
+    (id, listing_id, city, display_name, help_type, dep_type, urgency,
+     listing_url, event_key, state, attempt, claimed_by, claim_token,
+     lease_until, last_error, created_at, updated_at)
+SELECT
+    id, listing_id, city, display_name, help_type, dep_type, urgency,
+    listing_url, event_key, state, attempt,
+    %s,
+    %s,
+    %s,
+    last_error, created_at, updated_at
+FROM v2_informer_outbox`, claimedByExpr, claimTokenExpr, leaseUntilExpr)
+
+	if _, err := tx.ExecContext(ctx, copySQL); err != nil {
+		return fmt.Errorf("rebuildOutboxInTx: copy data: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `DROP TABLE v2_informer_outbox`); err != nil {
+		return fmt.Errorf("rebuildOutboxInTx: drop old: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE v2_informer_outbox_new RENAME TO v2_informer_outbox`); err != nil {
+		return fmt.Errorf("rebuildOutboxInTx: rename: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+CREATE INDEX IF NOT EXISTS idx_v2_informer_outbox_state ON v2_informer_outbox(state);
+CREATE INDEX IF NOT EXISTS idx_v2_informer_outbox_claim ON v2_informer_outbox(state, lease_until);
+`); err != nil {
+		return fmt.Errorf("rebuildOutboxInTx: indexes: %w", err)
+	}
+
+	return nil
+}
+
+// rebuildRecipientsInTx rebuilds v2_informer_outbox_recipients with the correct
+// CHECK constraint (including retry_exhausted and decrypt_failed) within an
+// already-open transaction. The caller is responsible for committing.
+func rebuildRecipientsInTx(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `
+CREATE TABLE v2_informer_outbox_recipients_new (
+    outbox_id  TEXT NOT NULL REFERENCES v2_informer_outbox(id) ON DELETE CASCADE,
+    sub_ref    TEXT NOT NULL,
+    state      TEXT NOT NULL DEFAULT 'pending'
+                   CHECK (state IN ('pending', 'delivered', 'permanent_failed',
+                                    'retry_exhausted', 'decrypt_failed')),
+    attempts   INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (outbox_id, sub_ref)
+)`); err != nil {
+		return fmt.Errorf("rebuildRecipientsInTx: create new: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO v2_informer_outbox_recipients_new
+    (outbox_id, sub_ref, state, attempts, updated_at)
+SELECT outbox_id, sub_ref, state, COALESCE(attempts, 0), updated_at
+FROM v2_informer_outbox_recipients`); err != nil {
+		return fmt.Errorf("rebuildRecipientsInTx: copy data: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `DROP TABLE v2_informer_outbox_recipients`); err != nil {
+		return fmt.Errorf("rebuildRecipientsInTx: drop old: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE v2_informer_outbox_recipients_new RENAME TO v2_informer_outbox_recipients`); err != nil {
+		return fmt.Errorf("rebuildRecipientsInTx: rename: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+CREATE INDEX IF NOT EXISTS idx_v2_outbox_recipients_pending
+    ON v2_informer_outbox_recipients(outbox_id) WHERE state='pending'`); err != nil {
+		return fmt.Errorf("rebuildRecipientsInTx: index: %w", err)
+	}
+
+	return nil
+}
+
 // OpenMemory opens an in-memory SQLite database with V2 schema applied.
 // Intended for tests only.
 func OpenMemory() (*sql.DB, error) {
 	db, err := sql.Open("sqlite", "file::memory:?mode=memory&_busy_timeout=5000")
 	if err != nil {
-		return nil, fmt.Errorf("v2: open memory db: %w", err)
+		return nil, fmt.Errorf("v2: OpenMemory: open: %w", err)
 	}
-	// MaxOpenConns=1 serializes writers; required by SQLite.
+	// SQLite in-memory databases are connection-scoped. With MaxOpenConns=1,
+	// all queries share the same connection and the same in-memory DB.
+	// This also serialises writes, making CAS updates safe in concurrent tests.
 	db.SetMaxOpenConns(1)
-	// Enable foreign key enforcement. The _foreign_keys DSN parameter is not
-	// reliably honored by all versions of modernc.org/sqlite, so we apply it
-	// explicitly. With MaxOpenConns=1 this PRAGMA persists for the lifetime of
-	// the single connection.
+
+	// Enable foreign keys on this connection (must be done per connection in SQLite).
 	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("v2: enable foreign keys: %w", err)
+		return nil, fmt.Errorf("v2: OpenMemory: enable foreign keys: %w", err)
 	}
+
 	if err := ApplySchema(db); err != nil {
 		db.Close()
-		return nil, err
+		return nil, fmt.Errorf("v2: OpenMemory: apply schema: %w", err)
+	}
+	if err := MigrateSchema(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("v2: OpenMemory: migrate schema: %w", err)
 	}
 	return db, nil
+}
+
+// OpenFile opens a file-backed SQLite database with V2 schema applied.
+// WAL journal mode and a busy timeout are configured for concurrent access.
+// MaxOpenConns is set to 1 to serialise writes (SQLite best practice for WAL).
+func OpenFile(path string) (*sql.DB, error) {
+	dsn := "file:" + path + "?_busy_timeout=5000&_journal_mode=WAL"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("v2: OpenFile: open: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+
+	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("v2: OpenFile: enable foreign keys: %w", err)
+	}
+
+	if err := ApplySchema(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("v2: OpenFile: apply schema: %w", err)
+	}
+	if err := MigrateSchema(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("v2: OpenFile: migrate schema: %w", err)
+	}
+	return db, nil
+}
+
+// tableCreateSQL returns the CREATE TABLE SQL from sqlite_master for the given table.
+func tableCreateSQL(db *sql.DB, tbl string) (string, error) {
+	var sql string
+	err := db.QueryRow(
+		`SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, tbl,
+	).Scan(&sql)
+	if errors.Is(err, sqlErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("v2: tableCreateSQL(%s): %w", tbl, err)
+	}
+	return sql, nil
+}
+
+// sqlErrNoRows is a package-level alias to avoid importing database/sql in callers.
+var sqlErrNoRows = sql.ErrNoRows
+
+// schemaColumns returns the column names for a table, in definition order.
+func schemaColumns(db *sql.DB, tbl string) ([]string, error) {
+	rows, err := db.Query(`PRAGMA table_info(` + tbl + `)`)
+	if err != nil {
+		return nil, fmt.Errorf("v2: schemaColumns: PRAGMA table_info(%s): %w", tbl, err)
+	}
+	defer rows.Close()
+	var cols []string
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull int
+		var dflt sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			return nil, err
+		}
+		cols = append(cols, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(cols) == 0 {
+		return nil, fmt.Errorf("v2: schemaColumns: table %q not found", tbl)
+	}
+	return cols, nil
+}
+
+// ErrSchemaColumnMissing is returned when a required column is absent after migration.
+var ErrSchemaColumnMissing = errors.New("v2: schema column missing after migration")
+
+// VerifyRequiredColumns checks that all required columns are present in a table.
+// Used by release tests to validate fresh and upgraded DBs produce equivalent schemas.
+func VerifyRequiredColumns(db *sql.DB, tbl string, required []string) error {
+	cols, err := schemaColumns(db, tbl)
+	if err != nil {
+		return err
+	}
+	colSet := make(map[string]bool, len(cols))
+	for _, c := range cols {
+		colSet[c] = true
+	}
+	for _, req := range required {
+		if !colSet[req] {
+			return fmt.Errorf("%w: %s.%s", ErrSchemaColumnMissing, tbl, req)
+		}
+	}
+	return nil
 }

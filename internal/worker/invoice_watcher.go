@@ -14,12 +14,12 @@ import (
 
 // InvoiceWatcher checks pending invoices for incoming payments.
 type InvoiceWatcher struct {
-	DB      *sql.DB
-	HashKey []byte // HMAC key for WalletHash — matches handler.HashKey
-	Mempool     *ncrypto.MempoolClient
-	Blockcypher *ncrypto.BlockcypherClient
-	Prices      PriceFetcher // implemented by *ncrypto.PriceCache; interface for testability
-	Interval    time.Duration
+	DB           *sql.DB
+	HashKey      []byte // HMAC key for WalletHash — matches handler.HashKey
+	Mempool      *ncrypto.MempoolClient
+	Blockcypher  *ncrypto.BlockcypherClient
+	Prices       PriceFetcher // implemented by *ncrypto.PriceCache; interface for testability
+	Interval     time.Duration
 	DevMode      bool
 	SkipPayments bool // auto-confirm all invoices without blockchain checks
 	ListingTTL   int
@@ -83,19 +83,19 @@ func (iw *InvoiceWatcher) watch(ctx context.Context) {
 	defer rows.Close()
 
 	type invoice struct {
-		id                 string
-		typ                string
-		address            string
-		amountCrypto       string
-		currency           string
-		listingID          sql.NullString
-		responseID         sql.NullString
-		clientPubkey       sql.NullString
-		payerAddress       sql.NullString
-		payerPrincipalID   sql.NullString
-		createdAt          int64
-		paymentDetectedAt  sql.NullInt64
-		priceAtCreation    sql.NullFloat64
+		id                string
+		typ               string
+		address           string
+		amountCrypto      string
+		currency          string
+		listingID         sql.NullString
+		responseID        sql.NullString
+		clientPubkey      sql.NullString
+		payerAddress      sql.NullString
+		payerPrincipalID  sql.NullString
+		createdAt         int64
+		paymentDetectedAt sql.NullInt64
+		priceAtCreation   sql.NullFloat64
 	}
 
 	var invoices []invoice
@@ -254,8 +254,8 @@ func (iw *InvoiceWatcher) confirmInvoice(invoiceID, typ, txid string, amount int
 
 	now := time.Now().Unix()
 
-	var notifyListingID string      // set when a listing is activated/renewed; notified after commit
-	var notifyChatListingID string  // set when a chat room is created; triggers chat opened notification
+	var notifyListingID string     // set when a listing is activated/renewed; notified after commit
+	var notifyChatListingID string // set when a chat room is created; triggers chat opened notification
 	var notifyChatCounselorHash string
 
 	switch typ {

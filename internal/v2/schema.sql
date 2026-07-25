@@ -696,6 +696,15 @@ CREATE TABLE IF NOT EXISTS v2_informer_chat_index (
 -- Outbox: one event per listing (event_key UNIQUE prevents duplicates).
 -- listing_id is informational only; no FK to v2_listings (dev fake events must work).
 -- event_key = "first_publish:" + listing_id
+--
+-- Claim ownership (§1):
+--   claim_token  — cryptographically random per-claim token (hex-encoded 16 bytes).
+--                  Generated fresh on each successful claim; never reused.
+--   lease_until  — unix epoch when this claim expires; 0 = unclaimed.
+--   claimed_by   — diagnostic worker ID (not used for ownership verification).
+--
+-- Claim CAS predicate (any mutation): WHERE id=? AND claim_token=? AND lease_until > now
+-- Crash recovery: lease_until <= now means the entry is available for re-claim.
 CREATE TABLE IF NOT EXISTS v2_informer_outbox (
     id           TEXT PRIMARY KEY,
     listing_id   TEXT NOT NULL,
@@ -709,8 +718,42 @@ CREATE TABLE IF NOT EXISTS v2_informer_outbox (
     state        TEXT NOT NULL DEFAULT 'pending'
                      CHECK (state IN ('pending', 'done', 'failed')),
     attempt      INTEGER NOT NULL DEFAULT 0,
+    claimed_by   TEXT NOT NULL DEFAULT '',
+    claim_token  TEXT NOT NULL DEFAULT '',
+    lease_until  INTEGER NOT NULL DEFAULT 0,
     last_error   TEXT,
     created_at   INTEGER NOT NULL,
     updated_at   INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_v2_informer_outbox_state ON v2_informer_outbox(state);
+CREATE INDEX IF NOT EXISTS idx_v2_informer_outbox_claim ON v2_informer_outbox(state, lease_until);
+
+-- Per-recipient delivery state for each outbox event (§2).
+-- Prevents duplicate delivery to already-notified subscribers on retry.
+-- Each recipient has its own attempt counter and terminal state.
+--
+-- States:
+--   pending          — awaiting delivery or retry.
+--   delivered        — successfully sent; no further action.
+--   permanent_failed — terminal 4xx; subscription deleted.
+--   retry_exhausted  — attempts >= MaxRecipientAttempts on retryable error;
+--                      subscription NOT deleted (outage ≠ invalid destination).
+--   decrypt_failed   — chat_id could not be decrypted; subscription kept.
+--
+-- Outbox terminal rules:
+--   done   — no retry_exhausted rows; all settled (delivered + permanent_failed).
+--   failed — at least one retry_exhausted or decrypt_failed row.
+--
+-- (outbox_id, sub_ref) PRIMARY KEY guarantees exactly-one row per event×recipient.
+CREATE TABLE IF NOT EXISTS v2_informer_outbox_recipients (
+    outbox_id  TEXT NOT NULL REFERENCES v2_informer_outbox(id) ON DELETE CASCADE,
+    sub_ref    TEXT NOT NULL,
+    state      TEXT NOT NULL DEFAULT 'pending'
+                   CHECK (state IN ('pending', 'delivered', 'permanent_failed',
+                                    'retry_exhausted', 'decrypt_failed')),
+    attempts   INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (outbox_id, sub_ref)
+);
+CREATE INDEX IF NOT EXISTS idx_v2_outbox_recipients_pending
+    ON v2_informer_outbox_recipients(outbox_id) WHERE state = 'pending';

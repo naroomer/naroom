@@ -8,9 +8,11 @@
 		"build": "vite build",
 		"preview": "vite preview",
 		"prepare": "svelte-kit sync || echo ''",
-		"check": "svelte-kit sync && svelte-check"
+		"check": "svelte-kit sync && svelte-check",
+		"test": "node e2e/pw.js"
 	},
 	"devDependencies": {
+		"@playwright/test": "^1.61.1",
 		"@sveltejs/adapter-auto": "^7.0.1",
 		"@sveltejs/adapter-node": "^5.5.4",
 		"@sveltejs/kit": "^2.63.0",
