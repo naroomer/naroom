@@ -62,7 +62,7 @@ func TestLifecycleWorker_ExpiredListingHiddenWithoutHTTPRequest(t *testing.T) {
 			InformerSender: &e2eInformerSender{},
 			Now:            nowFn,
 		},
-	DefaultV2BalancePolicy(),
+		DefaultV2BalancePolicy(),
 	)
 	if err != nil {
 		t.Fatalf("WireV2System: %v", err)
@@ -132,7 +132,7 @@ func TestLifecycleWorker_TransientErrorDoesNotStopLoop(t *testing.T) {
 			InformerSender: &e2eInformerSender{},
 			Now:            time.Now,
 		},
-	DefaultV2BalancePolicy(),
+		DefaultV2BalancePolicy(),
 	)
 	if err != nil {
 		t.Fatalf("WireV2System: %v", err)
@@ -181,7 +181,7 @@ func TestLifecycleWorker_RunExitsOnCancel(t *testing.T) {
 			InformerSender: &e2eInformerSender{},
 			Now:            time.Now,
 		},
-	DefaultV2BalancePolicy(),
+		DefaultV2BalancePolicy(),
 	)
 	if err != nil {
 		t.Fatalf("WireV2System: %v", err)
@@ -240,7 +240,7 @@ func newBareWorker(t *testing.T) *LifecycleWorker {
 			InformerSender: &e2eInformerSender{},
 			Now:            time.Now,
 		},
-	DefaultV2BalancePolicy(),
+		DefaultV2BalancePolicy(),
 	)
 	if err != nil {
 		t.Fatalf("WireV2System: %v", err)
@@ -506,7 +506,7 @@ func newE2ESysWithClock(t *testing.T, nowT *time.Time) (*V2System, *e2eComp) {
 			InformerSender: &e2eInformerSender{},
 			Now:            nowFn,
 		},
-	DefaultV2BalancePolicy(),
+		DefaultV2BalancePolicy(),
 	)
 	if err != nil {
 		t.Fatalf("WireV2System: %v", err)
@@ -682,7 +682,7 @@ func TestLifecycleWorker_PendingReviewNotificationDelivery(t *testing.T) {
 			InformerSender: &e2eInformerSender{},
 			Now:            nowFn,
 		},
-	DefaultV2BalancePolicy(),
+		DefaultV2BalancePolicy(),
 	)
 	if err != nil {
 		t.Fatalf("WireV2System: %v", err)

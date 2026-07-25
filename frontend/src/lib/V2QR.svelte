@@ -1,15 +1,17 @@
 <script>
-	import QRCode from 'qrcode';
+	import { browser } from '$app/environment';
 
 	let { data = '' } = $props();
 
 	let svgMarkup = $state('');
 
 	$effect(() => {
-		if (!data) { svgMarkup = ''; return; }
-		QRCode.toString(data, { type: 'svg', margin: 1, width: 160 })
-			.then(svg => { svgMarkup = svg; })
-			.catch(() => { svgMarkup = ''; });
+		if (!data || !browser) { svgMarkup = ''; return; }
+		import('qrcode').then(mod => {
+			mod.default.toString(data, { type: 'svg', margin: 1, width: 160 })
+				.then(svg => { svgMarkup = svg; })
+				.catch(() => { svgMarkup = ''; });
+		}).catch(() => { svgMarkup = ''; });
 	});
 </script>
 

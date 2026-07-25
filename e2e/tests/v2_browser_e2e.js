@@ -351,6 +351,8 @@ async function runOnce(runNumber) {
       // Publish
       await clientPage.click('button.btn-primary:not(:disabled)');
       await clientPage.waitForSelector('.done-icon, .done', { timeout: 15000 });
+      // Wait for the listing link to appear (rendered conditionally after listingId is set)
+      await clientPage.waitForSelector('a[href*="/v2/listing/"]', { timeout: 5000 }).catch(() => {});
 
       // Get listing ID from the done screen link
       listingId = await clientPage.evaluate(() => {
@@ -568,15 +570,26 @@ async function runOnce(runNumber) {
       // External event: force listing to 'hidden' AND delete binding (binding TTL simulated)
       await devAPI(backendBase, 'POST', '/dev/listing/expire', { listing_id: listingId });
 
+      // Intercept reactivation responses to verify the call is made
+      const reactivationResponses = [];
+      clientPage.on('response', async (resp) => {
+        if (resp.url().includes('/listings/reactivate')) {
+          try { reactivationResponses.push({ status: resp.status(), body: (await resp.text()).slice(0, 200) }); } catch {}
+        }
+      });
+
       // Navigate clientPage to /v2/new — same tab, sessionStorage has managementCode/flowId/walletAddress
       // onMount will restore from v2_client_state and detect phase=hidden → isReactivating=true.
       await clientPage.setViewportSize({ width: 1440, height: 900 });
       await clientPage.goto(`${frontendBase}/v2/new`);
 
-      // Wait up to 15s for the UI to restore and show: tg-btn (Telegram step), ok-badge, or done-icon
+      // Wait up to 15s for the UI to restore and show: tg-btn (Telegram step), ok-badge, or done-icon.
+      // NOTE: must NOT use '.done' here — the progress bar renders <div class="prog-step done"> for
+      // completed steps even when step='telegram', so '.done' count > 0 is NOT the done screen.
       await clientPage.waitForSelector('button.tg-btn, .ok-badge, .done-icon', { timeout: 15000 });
 
-      const isDone = await clientPage.locator('.done-icon, .done').count();
+      // Use only '.done-icon' (not '.done') — the progress bar adds class 'done' to completed step dots.
+      const isDone = await clientPage.locator('.done-icon').count();
       if (isDone === 0) {
         // Telegram step is shown (binding was deleted by expire, need fresh connect)
         await clientPage.waitForSelector('button.tg-btn', { timeout: 5000 });
@@ -593,15 +606,20 @@ async function runOnce(runNumber) {
         // External event: simulate Telegram /start via real webhook
         await devAPI(backendBase, 'POST', '/dev/telegram/simulate-start', { raw_token: rawToken });
 
-        // Poll detects binding=ready → isReactivating=true → reactivateListing() auto-called → done
-        await clientPage.waitForSelector('.done-icon, .done', { timeout: 20000 });
+        // Poll detects binding=ready → isReactivating=true → reactivateListing() auto-called → done.
+        // Use only '.done-icon' (not '.done') — progress bar adds class 'done' to completed steps.
+        await clientPage.waitForSelector('.done-icon', { timeout: 20000 });
       }
+
+      await clientPage.waitForTimeout(300); // allow response events to flush
 
       // Listing must be back on board (no new $5 invoice required)
       const boardR = await fetch(`${frontendBase}/api/v2/board/tbilisi`);
-      const board = await boardR.json();
-      const reactivated = board.find(l => l.id === listingId);
-      assert(reactivated, 'listing NOT back on board after reactivation — five-day window consumed incorrectly');
+      const boardText = await boardR.text();
+      let board;
+      try { board = JSON.parse(boardText); } catch { board = []; }
+      const reactivated = Array.isArray(board) && board.find(l => l.id === listingId);
+      assert(reactivated, `listing NOT back on board after reactivation — five-day window consumed incorrectly\n  listingId=${listingId}\n  boardStatus=${boardR.status}\n  board=${boardText.slice(0, 500)}`);
 
       await clientPage.screenshot({ path: join(SCREENSHOTS_DIR, `run${runNumber}_10_reactivated.png`) });
     });

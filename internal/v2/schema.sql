@@ -207,7 +207,7 @@ CREATE TABLE IF NOT EXISTS v2_listings (
     help_type              TEXT NOT NULL,
     urgency                TEXT NOT NULL,
     languages              TEXT NOT NULL,  -- canonical JSON
-    display_name           TEXT NOT NULL UNIQUE,
+    display_name           TEXT NOT NULL,
     contact_type           TEXT NOT NULL CHECK (contact_type IN ('telegram', 'signal')),
     contact_ciphertext     TEXT NOT NULL,
     contact_nonce          TEXT NOT NULL,
@@ -525,6 +525,7 @@ CREATE TABLE IF NOT EXISTS v2_client_profiles (
     currency           TEXT NOT NULL CHECK (currency IN ('BTC', 'LTC')),
     positive_count     INTEGER NOT NULL DEFAULT 0 CHECK (positive_count >= 0),
     negative_count     INTEGER NOT NULL DEFAULT 0 CHECK (negative_count >= 0),
+    public_name        TEXT NOT NULL DEFAULT '',
     created_at         INTEGER NOT NULL,
     updated_at         INTEGER NOT NULL,
     -- id: exactly 64 lowercase hex chars
@@ -632,6 +633,7 @@ CREATE TABLE IF NOT EXISTS v2_review_delivery_snapshots (
 );
 
 CREATE INDEX IF NOT EXISTS idx_v2_client_profiles_fp    ON v2_client_profiles(wallet_fingerprint);
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_v2_client_profiles_public_name ON v2_client_profiles(public_name) WHERE public_name != '';
 CREATE INDEX IF NOT EXISTS idx_v2_review_entitlements_purchase ON v2_review_entitlements(purchase_id);
 CREATE INDEX IF NOT EXISTS idx_v2_review_entitlements_ref      ON v2_review_entitlements(review_ref);
 CREATE INDEX IF NOT EXISTS idx_v2_review_snapshots_purchase    ON v2_review_delivery_snapshots(purchase_id);

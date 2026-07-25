@@ -1,5 +1,5 @@
 <script>
-	import { onMount } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import { lang, t as tFn } from '$lib/i18n.js';
 	import { CITIES } from '$lib/cities.js';
 	import V2QR from '$lib/V2QR.svelte';
@@ -45,10 +45,21 @@
 	let listingId = $state('');
 	let telegramBotUrl = $state('');
 	let telegramStatus = $state('needs_link');
+	let displayName = $state('');
+	let visibleUntil = $state(null);
 
 	// Code acknowledgement gate
 	let codeSaved = $state(false);
 	let isReactivating = $state(false);
+
+	// Restore tracking
+	let wasRestored = $state(false);
+
+	// Auto-transition timer
+	let autoTransTimer = null;
+
+	// Double-submit guard
+	let submitting = $state(false);
 
 	// ── Currency detection ─────────────────────────────────────────────────────
 	function detectCurrency(addr) {
@@ -60,6 +71,14 @@
 	}
 
 	let detectedCurrency = $derived(detectCurrency(walletAddress) || 'BTC');
+
+	// ── Computed progress step ─────────────────────────────────────────────────
+	let progressStep = $derived(
+		step === 'done' ? 5 :
+		step === 'telegram' ? 4 :
+		step === 'form' ? 3 :
+		step === 'balance' ? 2 : 1
+	);
 
 	// ── Restore on mount (idempotency) ─────────────────────────────────────────
 	onMount(() => {
@@ -79,6 +98,12 @@
 				}
 			} catch {}
 		}
+	});
+
+	onDestroy(() => {
+		stopPoll();
+		stopTgPoll();
+		if (autoTransTimer) clearTimeout(autoTransTimer);
 	});
 
 	function saveState() {
@@ -116,6 +141,7 @@
 
 	// ── Step: restore flow ─────────────────────────────────────────────────────
 	async function restoreFlow() {
+		wasRestored = true;
 		loading = true;
 		error = '';
 		try {
@@ -157,6 +183,8 @@
 				}
 			} else if (phase === 'visible') {
 				listingId = data.listing?.id || '';
+				displayName = data.listing?.display_name || '';
+				visibleUntil = data.listing?.visible_until || null;
 				step = 'done';
 			} else if (phase === 'hidden') {
 				// Daily window expired; need fresh Telegram binding + reactivate (no new invoice)
@@ -238,6 +266,7 @@
 			balanceUSD = data.last_balance_usd;
 			if (data.state === 'form_ready') {
 				step = 'balance';
+				autoTransTimer = setTimeout(() => { if (step === 'balance') step = 'telegram'; }, 2000);
 			} else if (data.state === 'paid_low_balance') {
 				step = 'balance';
 			}
@@ -348,6 +377,8 @@
 
 	async function publishListing() {
 		if (!canPublish()) return;
+		if (submitting) return;
+		submitting = true;
 		loading = true;
 		error = '';
 		try {
@@ -371,6 +402,7 @@
 				if (res.status === 409) {
 					// Already published — just navigate
 					listingId = data.listing?.id || '';
+					displayName = data.listing?.display_name || '';
 					step = 'done';
 					return;
 				}
@@ -378,11 +410,14 @@
 				return;
 			}
 			listingId = data.id;
+			displayName = data.display_name || '';
+			visibleUntil = data.visible_until || null;
 			step = 'done';
 		} catch (e) {
 			error = e.message;
 		} finally {
 			loading = false;
+			submitting = false;
 		}
 	}
 
@@ -413,14 +448,29 @@
 		if (curr === 'LTC') return `litecoin:${addr}?amount=${(a/1e8).toFixed(8)}`;
 		return addr;
 	}
-
-	$effect(() => {
-		return () => { stopPoll(); stopTgPoll(); };
-	});
 </script>
 
 <div class="page">
 	<a href="/v2/board/{city || 'tbilisi'}" class="back">← {t('back_to_board')}</a>
+
+	<!-- Progress indicator (hidden on wallet/code steps since user hasn't committed yet) -->
+	{#if step !== 'wallet' && step !== 'code'}
+	<div class="progress-bar" aria-label="Progress">
+		{#each [1,2,3,4,5] as n}
+			<div class="prog-step" class:active={progressStep === n} class:done={progressStep > n}>
+				<div class="prog-dot"></div>
+				<span class="prog-label">{t('v2.progress.step' + n)}</span>
+			</div>
+			{#if n < 5}<div class="prog-line" class:done={progressStep > n}></div>{/if}
+		{/each}
+	</div>
+	{/if}
+
+	{#if wasRestored && step !== 'wallet' && step !== 'done'}
+	<div class="restore-banner" data-testid="restore-banner">
+		<strong>{t('v2.restore.found')}</strong> {t('v2.restore.nopay')}
+	</div>
+	{/if}
 
 	{#if step === 'wallet'}
 		<!-- Step 1: Enter wallet -->
@@ -464,29 +514,42 @@
 					<div class="inv-status" class:confirmed={invoice.status === 'confirmed'} class:detected={invoice.status === 'payment_detected'}>
 						{t('v2.invoice.' + invoice.status)}
 					</div>
-					<div class="inv-row">
-						<span class="inv-label">{t('v2.invoice.amount')}</span>
-						<span class="inv-val">{(invoice.amount_atomic / 1e8).toFixed(8)} {currency}</span>
-						<button class="copy-btn" onclick={() => copyText((invoice.amount_atomic / 1e8).toFixed(8), t('v2.copied'))}>
-							{copyMsg || t('v2.copy')}
-						</button>
-					</div>
-					<div class="inv-row">
-						<span class="inv-label">{t('v2.invoice.address')}</span>
-						<span class="inv-val addr">{invoice.payment_address}</span>
-						<button class="copy-btn" onclick={() => copyText(invoice.payment_address, t('v2.copied'))}>
-							{copyMsg || t('v2.copy')}
-						</button>
-					</div>
-					<div class="inv-row">
-						<span class="inv-label">{t('v2.invoice.usd')}</span>
-						<span class="inv-val">${(invoice.amount_usd_cents / 100).toFixed(2)}</span>
-					</div>
-					{#if invoice.status === 'pending' || invoice.status === 'payment_detected'}
+
+					{#if invoice.status === 'pending'}
+						<p class="inv-note">{t('v2.invoice.await_send')}</p>
+						<div class="inv-row">
+							<span class="inv-label">{t('v2.invoice.amount')}</span>
+							<span class="inv-val">{(invoice.amount_atomic / 1e8).toFixed(8)} {currency}</span>
+							<button class="copy-btn" onclick={() => copyText((invoice.amount_atomic / 1e8).toFixed(8), t('v2.copied'))}>
+								{copyMsg || t('v2.copy')}
+							</button>
+						</div>
+						<div class="inv-row">
+							<span class="inv-label">{t('v2.invoice.address')}</span>
+							<span class="inv-val addr">{invoice.payment_address}</span>
+							<button class="copy-btn" onclick={() => copyText(invoice.payment_address, t('v2.copied'))}>
+								{copyMsg || t('v2.copy')}
+							</button>
+						</div>
+						<div class="inv-row">
+							<span class="inv-label">{t('v2.invoice.usd')}</span>
+							<span class="inv-val">${(invoice.amount_usd_cents / 100).toFixed(2)}</span>
+						</div>
 						<div class="qr-wrap">
 							<V2QR data={paymentURI(invoice, currency)} />
 						</div>
-						<p class="poll-note">{t('v2.invoice.polling')}</p>
+						<ul class="inv-notes">
+							<li>{t('v2.invoice.await_auto')}</li>
+							<li>{t('v2.invoice.await_close')}</li>
+							<li>{t('v2.invoice.await_expiry')}</li>
+						</ul>
+					{:else if invoice.status === 'payment_detected'}
+						<p class="inv-note accent">{t('v2.invoice.detect_note')}</p>
+						<p class="inv-note warn">{t('v2.invoice.detect_nopay')}</p>
+						<div class="spinner"></div>
+					{:else if invoice.status === 'confirmed'}
+						<p class="inv-note accent">{t('v2.invoice.confirm_note')}</p>
+						<div class="spinner"></div>
 					{/if}
 				</div>
 			{/if}
@@ -521,15 +584,20 @@
 		<div class="section">
 			<h2>{t('v2.balance.title')}</h2>
 			{#if balanceUSD !== null && balanceUSD < pubConfig.client_hard_floor_usd}
-				<div class="err">
-					{t('v2.balance.low', { balance: balanceUSD.toFixed(0), min: '$' + pubConfig.client_hard_floor_usd })}
+				<div class="balance-box low">
+					<p>{t('v2.balance.low', { balance: balanceUSD.toFixed(0), min: '$' + pubConfig.client_hard_floor_usd })}</p>
+					<p class="inv-note">{t('v2.balance.low_note')}</p>
+					<p class="inv-note">{t('v2.balance.floor_applied', { floor: '$' + pubConfig.client_hard_floor_usd })}</p>
 				</div>
 				<button class="btn-secondary" onclick={recheckBalance} disabled={loading}>
 					{loading ? t('v2.loading') : t('v2.balance.recheck')}
 				</button>
 			{:else}
-				<p>{t('v2.balance.ok', { balance: (balanceUSD || 0).toFixed(0) })}</p>
-				<button class="btn-primary" onclick={() => step = 'telegram'}>
+				<div class="balance-box ok">
+					<p>{t('v2.balance.ok', { balance: (balanceUSD || 0).toFixed(0) })}</p>
+					<p class="inv-note">{t('v2.balance.auto_note')}</p>
+				</div>
+				<button class="btn-primary" onclick={() => { if (autoTransTimer) clearTimeout(autoTransTimer); step = 'telegram'; }}>
 					{t('v2.balance.continue')}
 				</button>
 			{/if}
@@ -641,7 +709,7 @@
 
 			{#if error}<div class="err">{error}</div>{/if}
 
-			<button class="btn-primary" onclick={publishListing} disabled={loading || !canPublish()}>
+			<button class="btn-primary" onclick={publishListing} disabled={loading || submitting || !canPublish()}>
 				{loading ? t('v2.loading') : t('v2.form.publish')}
 			</button>
 		</div>
@@ -652,9 +720,34 @@
 			<div class="done-icon">✓</div>
 			<h2>{t('v2.done.title')}</h2>
 			<p>{t('v2.done.sub')}</p>
+			{#if displayName}
+				<div class="done-meta">
+					<div class="done-meta-row">
+						<span class="done-meta-label">{t('v2.done.display_name')}</span>
+						<span class="done-meta-val" data-testid="done-display-name">{displayName}</span>
+					</div>
+					<p class="done-meta-note">{t('v2.done.name_note')}</p>
+				</div>
+			{/if}
+			{#if city}
+				<div class="done-meta">
+					<div class="done-meta-row">
+						<span class="done-meta-label">{t('v2.done.city')}</span>
+						<span class="done-meta-val">{city}</span>
+					</div>
+				</div>
+			{/if}
+			{#if visibleUntil}
+				<div class="done-meta">
+					<div class="done-meta-row">
+						<span class="done-meta-label">{t('v2.done.visible_until')}</span>
+						<span class="done-meta-val">{new Date(visibleUntil * 1000).toLocaleDateString()}</span>
+					</div>
+				</div>
+			{/if}
 			<div class="done-actions">
 				{#if listingId}
-					<a href="/v2/listing/{listingId}" class="btn-primary">{t('v2.done.view_listing')}</a>
+					<a href="/v2/listing/{listingId}" class="btn-primary" data-testid="view-listing-btn">{t('v2.done.view_listing')}</a>
 				{/if}
 				<a href="/v2/board/{city}" class="btn-secondary">{t('v2.done.board')}</a>
 			</div>
@@ -878,7 +971,90 @@
 		font-weight: 600;
 	}
 
-	/* Balance */
+	/* Progress indicator */
+	.progress-bar {
+		display: flex;
+		align-items: center;
+		margin: 0 0 24px;
+		overflow-x: auto;
+		padding-bottom: 4px;
+	}
+	.prog-step {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 4px;
+		flex-shrink: 0;
+	}
+	.prog-dot {
+		width: 10px; height: 10px;
+		border-radius: 50%;
+		background: var(--border);
+		transition: background 0.2s;
+	}
+	.prog-step.active .prog-dot { background: var(--accent); }
+	.prog-step.done .prog-dot { background: var(--accent); opacity: 0.5; }
+	.prog-label {
+		font-size: 10px;
+		color: var(--text-faint);
+		white-space: nowrap;
+		max-width: 64px;
+		text-align: center;
+		line-height: 1.2;
+	}
+	.prog-step.active .prog-label { color: var(--accent); font-weight: 600; }
+	.prog-step.done .prog-label { color: var(--text-dim); }
+	.prog-line {
+		flex: 1;
+		height: 1px;
+		background: var(--border);
+		min-width: 16px;
+	}
+	.prog-line.done { background: var(--accent); opacity: 0.4; }
+
+	/* Restore banner */
+	.restore-banner {
+		background: rgba(196, 163, 90, 0.08);
+		border: 1px solid var(--warn);
+		border-radius: 8px;
+		padding: 10px 14px;
+		font-size: 13px;
+		color: var(--warn);
+		line-height: 1.4;
+		margin-bottom: 4px;
+	}
+
+	/* Invoice notes */
+	.inv-note { font-size: 13px; color: var(--text-dim); line-height: 1.4; margin: 0; }
+	.inv-note.accent { color: var(--accent); }
+	.inv-note.warn { color: var(--warn); font-weight: 600; }
+	.inv-notes { font-size: 12px; color: var(--text-faint); line-height: 1.6; padding-left: 16px; margin: 0; }
+
+	/* Spinner */
+	.spinner {
+		width: 24px; height: 24px;
+		border: 2px solid var(--border);
+		border-top-color: var(--accent);
+		border-radius: 50%;
+		animation: spin 0.8s linear infinite;
+		align-self: center;
+	}
+	@keyframes spin { to { transform: rotate(360deg); } }
+
+	/* Balance box */
+	.balance-box {
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		padding: 14px 16px;
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+	.balance-box.ok { border-color: var(--accent); }
+	.balance-box.low { border-color: var(--danger); }
+	.balance-box p { margin: 0; font-size: 14px; color: var(--text); }
+
 	/* Done */
 	.done { align-items: center; text-align: center; padding-top: 40px; }
 	.done-icon {
@@ -891,4 +1067,24 @@
 	}
 	.done-actions { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
 	.restore-hint { font-size: 12px; color: var(--text-faint); line-height: 1.4; }
+
+	/* Done meta */
+	.done-meta {
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 10px 14px;
+		width: 100%;
+		max-width: 320px;
+		text-align: left;
+	}
+	.done-meta-row {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 8px;
+	}
+	.done-meta-label { font-size: 12px; color: var(--text-faint); flex-shrink: 0; }
+	.done-meta-val { font-size: 14px; color: var(--accent); font-weight: 600; text-align: right; }
+	.done-meta-note { font-size: 11px; color: var(--text-faint); margin: 4px 0 0; }
 </style>

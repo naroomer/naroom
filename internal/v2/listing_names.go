@@ -111,3 +111,84 @@ func randN(max int) (int, error) {
 	}
 	return int(binary.BigEndian.Uint32(b[:]) % uint32(max)), nil
 }
+
+// AliasGenerator generates a permanent public platform alias for a Client or Helper profile.
+type AliasGenerator interface {
+	GenerateAlias() (string, error)
+}
+
+var aliasAdjectives = []string{
+	"Bright", "Calm", "Clear", "Deep", "Fair",
+	"Fresh", "Gentle", "Keen", "Kind", "Neat",
+	"Quick", "Safe", "Sharp", "Soft", "Still",
+	"Swift", "True", "Warm", "Wise", "Bold",
+}
+
+var aliasNouns = []string{
+	"Bridge", "Cloud", "Creek", "Dawn", "Field",
+	"Flame", "Forest", "Grove", "Harbor", "Hill",
+	"Lake", "Marsh", "Moon", "Peak", "Ridge",
+	"River", "Shore", "Star", "Stone", "Trail",
+}
+
+// aliasCodeChars contains uppercase letters and digits with no ambiguous characters.
+// Excluded: 0 (zero), 1 (one), I (eye), O (oh) — visually similar pairs.
+const aliasCodeChars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+// maxAliasLen is the maximum byte length for a profile alias.
+const maxAliasLen = 64
+
+// RandomAliasGenerator generates aliases of the form "Bright Cloud · 7K4M"
+// using crypto/rand for all random selections.
+type RandomAliasGenerator struct{}
+
+// NewRandomAliasGenerator creates a RandomAliasGenerator.
+func NewRandomAliasGenerator() *RandomAliasGenerator {
+	return &RandomAliasGenerator{}
+}
+
+// GenerateAlias returns a random profile alias, e.g. "Bright Cloud · 7K4M".
+// The 4-char code uses 32 unambiguous characters (128-bit-class namespace).
+// No timestamp, counter, wallet, contact, flow or listing fragment is used.
+func (g *RandomAliasGenerator) GenerateAlias() (string, error) {
+	adj, err := randListChoice(aliasAdjectives)
+	if err != nil {
+		return "", err
+	}
+	noun, err := randListChoice(aliasNouns)
+	if err != nil {
+		return "", err
+	}
+	var codeBuf [4]byte
+	if _, err := rand.Read(codeBuf[:]); err != nil {
+		return "", fmt.Errorf("v2: crypto/rand alias code: %w", err)
+	}
+	code := make([]byte, 4)
+	for i, b := range codeBuf {
+		code[i] = aliasCodeChars[int(b)%len(aliasCodeChars)]
+	}
+	return fmt.Sprintf("%s %s · %s", adj, noun, string(code)), nil
+}
+
+// validateAlias verifies that alias:
+//   - is non-empty, valid UTF-8, max maxAliasLen bytes;
+//   - contains only ASCII letters, ASCII digits, ASCII space, or U+00B7 (middle dot · = 0xC2 0xB7 in UTF-8).
+func validateAlias(alias string) error {
+	if alias == "" {
+		return errors.New("v2: alias is empty")
+	}
+	if !utf8.ValidString(alias) {
+		return errors.New("v2: alias is not valid UTF-8")
+	}
+	if len(alias) > maxAliasLen {
+		return fmt.Errorf("v2: alias exceeds %d bytes", maxAliasLen)
+	}
+	for _, c := range alias {
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+			(c >= '0' && c <= '9') || c == ' ' || c == '\u00B7' {
+			continue
+		}
+		return fmt.Errorf("v2: alias contains disallowed character U+%04X", c)
+	}
+	return nil
+}

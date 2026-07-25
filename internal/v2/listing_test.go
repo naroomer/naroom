@@ -1333,7 +1333,7 @@ func TestContactBoundaryFakeValidator(t *testing.T) {
 		now := time.Now()
 		svc.RecordPaymentDetected(fv.FlowID, fv.InvoiceID, "txid_"+newID()[:8], []string{"bc1qtest"}, fv.AmountAtomic, now) //nolint:errcheck
 		svc.ConfirmPayment(fv.FlowID, fv.InvoiceID, now)                                                                    //nolint:errcheck
-		svc.RecordPostPaymentBalance(fv.FlowID, 150.0, DefaultV2BalancePolicy().ClientHardFloorUSD)                                                        //nolint:errcheck
+		svc.RecordPostPaymentBalance(fv.FlowID, 150.0, DefaultV2BalancePolicy().ClientHardFloorUSD)                         //nolint:errcheck
 		ls.attachReadyBinding(fv.FlowID, newBindingRef(), time.Now(), time.Now().Add(10*time.Minute))                       //nolint:errcheck
 
 		input := validListingInput()
@@ -1447,11 +1447,12 @@ func TestDisplayNameValidationRejectsInvalid(t *testing.T) {
 }
 
 func TestDisplayNameCollisionRetry(t *testing.T) {
-	// First call returns a name that is already taken; second call returns a unique name.
-	// Publish must succeed and save the second name.
+	// Since Task 10D, display_name is derived from the client profile's public_name —
+	// not from ls.names.Generate(). Each unique wallet gets a unique profile alias,
+	// so two different wallets naturally produce two different display names.
 	ls, svc, db := newTestListingService(t, nil)
 
-	// Publish a first listing that occupies "calm_river_07".
+	// Publish a first listing.
 	rawCode1, flowID1 := makeFormReadyFlow(t, svc, "bc1qtest_first", "BTC")
 	ref1 := newBindingRef()
 	now1 := time.Now()
@@ -1462,17 +1463,15 @@ func TestDisplayNameCollisionRetry(t *testing.T) {
 		ref1, now1.Unix(), now1.Add(10*time.Minute).Unix()); err != nil {
 		t.Fatalf("insert stub destination flowID1: %v", err)
 	}
-	ls.names = &fakeDisplayNameGenerator{name: "calm_river_07"}
 	lv1, err := ls.FirstPublish(rawCode1, "bc1qtest_first", validListingInput())
 	if err != nil {
 		t.Fatalf("first publish: %v", err)
 	}
-	if lv1.DisplayName != "calm_river_07" {
-		t.Fatalf("first name: got %q", lv1.DisplayName)
+	if lv1.DisplayName == "" {
+		t.Fatalf("first name: got empty display name")
 	}
 
-	// Second flow: generator returns taken name first, then a unique one.
-	ls.names = &fakeDisplayNameGeneratorSeq{names: []string{"calm_river_07", "brave_shore_01"}}
+	// Publish a second listing from a different wallet — it gets its own profile alias.
 	rawCode2, flowID2 := makeFormReadyFlow(t, svc, "bc1qtest_second", "BTC")
 	ref2 := newBindingRef()
 	now2 := time.Now()
@@ -1485,10 +1484,10 @@ func TestDisplayNameCollisionRetry(t *testing.T) {
 	}
 	lv2, err := ls.FirstPublish(rawCode2, "bc1qtest_second", validListingInput())
 	if err != nil {
-		t.Fatalf("second publish with collision: %v", err)
+		t.Fatalf("second publish: %v", err)
 	}
-	if lv2.DisplayName != "brave_shore_01" {
-		t.Errorf("expected second name %q, got %q", "brave_shore_01", lv2.DisplayName)
+	if lv2.DisplayName == "" {
+		t.Errorf("second listing: got empty display name")
 	}
 
 	var count int
@@ -1499,11 +1498,14 @@ func TestDisplayNameCollisionRetry(t *testing.T) {
 }
 
 func TestDisplayNamePerpetualCollisionBounded(t *testing.T) {
-	// Generator always returns the same taken name; publish must fail without hanging
-	// and must not create any listing row.
+	// Since Task 10D, display_name = profile's public_name. Each profile gets its own
+	// unique alias, so there is no per-listing display_name collision to bound.
+	// This test verifies that FirstPublish fails gracefully when the profile has no alias
+	// (simulates migration-incomplete state by directly inserting a profile with empty public_name).
 	ls, svc, db := newTestListingService(t, nil)
 
-	// Occupy "calm_river_07".
+	// Create a flow and forcibly clear its profile's public_name to simulate
+	// migration-incomplete state.
 	rawCode1, flowID1 := makeFormReadyFlow(t, svc, "bc1qtest_occ", "BTC")
 	ref1 := newBindingRef()
 	now1 := time.Now()
@@ -1512,43 +1514,46 @@ func TestDisplayNamePerpetualCollisionBounded(t *testing.T) {
 		(binding_ref, chat_id_ciphertext, chat_id_nonce, key_version, created_at, expires_at)
 		VALUES (?, 'stub_ct', 'stub_nonce', 'test_v1', ?, ?)`,
 		ref1, now1.Unix(), now1.Add(10*time.Minute).Unix()); err != nil {
-		t.Fatalf("insert stub destination flowID1: %v", err)
+		t.Fatalf("insert stub destination: %v", err)
 	}
-	ls.names = &fakeDisplayNameGenerator{name: "calm_river_07"}
-	if _, err := ls.FirstPublish(rawCode1, "bc1qtest_occ", validListingInput()); err != nil {
-		t.Fatalf("occupy: %v", err)
+	// Clear public_name on the profile to simulate missing alias.
+	if _, err := db.Exec(`UPDATE v2_client_profiles SET public_name = '' WHERE id = (SELECT client_profile_id FROM v2_client_flows WHERE id = ?)`, flowID1); err != nil {
+		t.Fatalf("clear public_name: %v", err)
 	}
-
-	// New flow with always-colliding generator.
-	rawCode2, flowID2 := makeFormReadyFlow(t, svc, "bc1qtest_col", "BTC")
-	ls.attachReadyBinding(flowID2, newBindingRef(), time.Now(), time.Now().Add(10*time.Minute)) //nolint:errcheck
-	// Generator always returns the taken name. No destination needed since FirstPublish
-	// will fail at the INSERT listing (display_name collision) and rollback.
-	ls.names = &fakeDisplayNameGenerator{name: "calm_river_07"}
-	_, err := ls.FirstPublish(rawCode2, "bc1qtest_col", validListingInput())
+	_, err := ls.FirstPublish(rawCode1, "bc1qtest_occ", validListingInput())
 	if err == nil {
-		t.Error("expected error from perpetual collision, got nil")
+		t.Error("expected error when profile has no alias, got nil")
 	}
 
 	var count int
 	db.QueryRow(`SELECT COUNT(*) FROM v2_listings`).Scan(&count) //nolint:errcheck
-	if count != 1 {
-		t.Errorf("listing count: got %d, want 1 (only the pre-occupied one)", count)
+	if count != 0 {
+		t.Errorf("listing count: got %d, want 0 (no listing with missing alias)", count)
 	}
 }
 
 func TestDisplayNameUniqueAcrossListings(t *testing.T) {
-	// Two listings must not share a display name (enforced by UNIQUE constraint in DB).
+	// Since Task 10D, display_name is the profile's permanent alias.
+	// UNIQUE is removed from v2_listings.display_name: the same profile can have
+	// multiple listings (e.g. after entitlement expires and they republish) with the
+	// same display_name. Two different profiles still get different aliases.
+	// This test verifies that two listings with the same display_name can coexist.
 	_, _, db := newTestListingService(t, nil)
 
-	// Create prerequisite flows for FK-safe testing.
-	for _, id := range []string{"uniq_flow1", "uniq_flow2"} {
-		profileID := mustInsertClientProfileForFlow(t, db, 1)
-		if _, err := db.Exec(`INSERT INTO v2_client_flows
-			(id, wallet_fingerprint, currency, management_code_hash, state, client_profile_id, created_at, updated_at)
-			VALUES (?, 'fp', 'BTC', 'hash', 'form_ready', ?, 1, 1)`, id, profileID); err != nil {
-			t.Fatalf("prereq flow: %v", err)
-		}
+	// Create two flows backed by different profiles.
+	profileID1 := mustInsertClientProfileForFlow(t, db, 1)
+	profileID2 := mustInsertClientProfileForFlow(t, db, 1)
+	fp1 := newID()
+	fp2 := newID()
+	if _, err := db.Exec(`INSERT INTO v2_client_flows
+		(id, wallet_fingerprint, currency, management_code_hash, state, client_profile_id, created_at, updated_at)
+		VALUES (?, ?, 'BTC', 'hash', 'form_ready', ?, 1, 1)`, "uniq_flow1", fp1, profileID1); err != nil {
+		t.Fatalf("prereq flow1: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO v2_client_flows
+		(id, wallet_fingerprint, currency, management_code_hash, state, client_profile_id, created_at, updated_at)
+		VALUES (?, ?, 'BTC', 'hash', 'form_ready', ?, 1, 1)`, "uniq_flow2", fp2, profileID2); err != nil {
+		t.Fatalf("prereq flow2: %v", err)
 	}
 
 	insert := func(id, flowID, name string) error {
@@ -1563,11 +1568,12 @@ func TestDisplayNameUniqueAcrossListings(t *testing.T) {
 		return err
 	}
 
-	if err := insert("id1", "uniq_flow1", "unique_name_01"); err != nil {
+	// Two different flows with the same display_name must both succeed (UNIQUE removed).
+	if err := insert("id1", "uniq_flow1", "shared_alias_name"); err != nil {
 		t.Fatalf("first insert: %v", err)
 	}
-	if err := insert("id2", "uniq_flow2", "unique_name_01"); err == nil {
-		t.Error("expected UNIQUE violation on duplicate display_name, got nil")
+	if err := insert("id2", "uniq_flow2", "shared_alias_name"); err != nil {
+		t.Errorf("second insert with same display_name: expected success (UNIQUE removed), got %v", err)
 	}
 }
 

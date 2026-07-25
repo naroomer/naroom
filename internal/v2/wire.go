@@ -110,6 +110,8 @@ func WireV2System(db *sql.DB, keys V2Keys, bots V2BotConfig, adapters V2Adapters
 		return nil, fmt.Errorf("v2: WireV2System: payment service: %w", err)
 	}
 	svc.SetPolicy(policy)
+	aliases := NewRandomAliasGenerator()
+	svc.SetAliasGenerator(aliases)
 
 	// ── Display names + contact validator ─────────────────────────────────────
 	names := NewRandomDisplayNameGenerator()

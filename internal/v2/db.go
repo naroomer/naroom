@@ -190,6 +190,22 @@ func connOutboxInspect(ctx context.Context, conn *sql.Conn) (needsRebuild, hasCl
 	return false, hasClaimedBy, hasClaimToken, hasLeaseUntil, nil
 }
 
+// connListingsDisplayNameIsUnique checks whether the v2_listings table's CREATE SQL
+// contains an inline UNIQUE constraint on display_name (old schema).
+func connListingsDisplayNameIsUnique(ctx context.Context, conn *sql.Conn) (bool, error) {
+	var createSQL string
+	err := conn.QueryRowContext(ctx,
+		`SELECT COALESCE(sql, '') FROM sqlite_master WHERE type='table' AND name='v2_listings'`,
+	).Scan(&createSQL)
+	if err != nil {
+		return false, fmt.Errorf("connListingsDisplayNameIsUnique: %w", err)
+	}
+	// Old schema: "display_name           TEXT NOT NULL UNIQUE,"
+	// New schema: "display_name           TEXT NOT NULL," (no UNIQUE)
+	return strings.Contains(createSQL, "display_name") &&
+		strings.Contains(createSQL, "NOT NULL UNIQUE"), nil
+}
+
 // connHelperPurchasesNeedsRebuild checks if v2_helper_purchases needs to be
 // rebuilt to update the CHECK constraints to use required_post_payment_floor_usd.
 func connHelperPurchasesNeedsRebuild(ctx context.Context, conn *sql.Conn) (bool, error) {
@@ -290,14 +306,26 @@ func MigrateSchema(db *sql.DB) error {
 		return fmt.Errorf("v2: MigrateSchema: helper_purchases rebuild check: %w", err)
 	}
 
+	// Task 10D: check client profiles public_name and listings display_name UNIQUE.
+	clientProfilesPublicName, err := connColumnExists(ctx, conn, "v2_client_profiles", "public_name")
+	if err != nil {
+		return fmt.Errorf("v2: MigrateSchema: client_profiles public_name check: %w", err)
+	}
+
+	listingsDisplayNameHasUnique, err := connListingsDisplayNameIsUnique(ctx, conn)
+	if err != nil {
+		return fmt.Errorf("v2: MigrateSchema: listings display_name unique check: %w", err)
+	}
+
 	// ── Early return: nothing to do ──────────────────────────────────────────
 	//
 	// Condition: outbox exists and is clean, all optional cols present,
 	// recipients exists and is current, attempts column present,
-	// and Task 10C snapshot columns are present.
+	// Task 10C snapshot columns are present, and Task 10D columns are correct.
 	if outboxExists && !outboxNeedsRebuild && hasClaimedBy && hasClaimToken && hasLeaseUntil &&
 		recipientsExists && !recipientsNeedsRebuild && attemptsExists &&
-		clientFlowsHardFloor && !helperPurchasesNeedsRebuild {
+		clientFlowsHardFloor && !helperPurchasesNeedsRebuild &&
+		clientProfilesPublicName && !listingsDisplayNameHasUnique {
 		return nil
 	}
 
@@ -394,6 +422,87 @@ CREATE INDEX IF NOT EXISTS idx_v2_outbox_recipients_pending
 	if helperPurchasesNeedsRebuild {
 		if err := rebuildHelperPurchasesInTx(ctx, tx); err != nil {
 			return fmt.Errorf("v2: MigrateSchema: rebuild helper_purchases: %w", err)
+		}
+	}
+
+	// ── Task 10D: v2_client_profiles.public_name ─────────────────────────────
+	if !clientProfilesPublicName {
+		if _, err := tx.ExecContext(ctx,
+			`ALTER TABLE v2_client_profiles ADD COLUMN public_name TEXT NOT NULL DEFAULT ''`,
+		); err != nil {
+			return fmt.Errorf("v2: MigrateSchema: add client profiles public_name: %w", err)
+		}
+	}
+	// Create partial unique index (WHERE public_name != '') to allow empty during migration.
+	if _, err := tx.ExecContext(ctx, `
+		CREATE UNIQUE INDEX IF NOT EXISTS uniq_v2_client_profiles_public_name
+		ON v2_client_profiles(public_name) WHERE public_name != ''`); err != nil {
+		return fmt.Errorf("v2: MigrateSchema: create client profiles alias index: %w", err)
+	}
+	// Populate empty public_names for existing profiles.
+	rows10d, err := tx.QueryContext(ctx, `SELECT id FROM v2_client_profiles WHERE public_name = ''`)
+	if err != nil {
+		return fmt.Errorf("v2: MigrateSchema: list empty alias profiles: %w", err)
+	}
+	var emptyProfileIDs []string
+	for rows10d.Next() {
+		var id string
+		if err := rows10d.Scan(&id); err != nil {
+			rows10d.Close()
+			return fmt.Errorf("v2: MigrateSchema: scan profile id: %w", err)
+		}
+		emptyProfileIDs = append(emptyProfileIDs, id)
+	}
+	rows10d.Close()
+	if err := rows10d.Err(); err != nil {
+		return fmt.Errorf("v2: MigrateSchema: list alias profiles iter: %w", err)
+	}
+	gen10d := NewRandomAliasGenerator()
+	for _, profileID := range emptyProfileIDs {
+		alias, genErr := gen10d.GenerateAlias()
+		if genErr != nil {
+			return fmt.Errorf("v2: MigrateSchema: generate alias: %w", genErr)
+		}
+		for attempt := 0; attempt < 10; attempt++ {
+			_, upErr := tx.ExecContext(ctx,
+				`UPDATE v2_client_profiles SET public_name = ?, updated_at = strftime('%s', 'now') WHERE id = ?`,
+				alias, profileID,
+			)
+			if upErr == nil {
+				break
+			}
+			if isSQLiteUniqueOnColumn(upErr, "uniq_v2_client_profiles_public_name") {
+				// Collision: regenerate.
+				alias, genErr = gen10d.GenerateAlias()
+				if genErr != nil {
+					return fmt.Errorf("v2: MigrateSchema: regenerate alias: %w", genErr)
+				}
+				continue
+			}
+			return fmt.Errorf("v2: MigrateSchema: update profile alias: %w", upErr)
+		}
+	}
+
+	// ── Task 10D: v2_listings.display_name remove UNIQUE + update from profile ─
+	if listingsDisplayNameHasUnique {
+		if err := rebuildListingsInTx(ctx, tx); err != nil {
+			return fmt.Errorf("v2: MigrateSchema: rebuild listings: %w", err)
+		}
+		// Update listing display_names to use their profile's public_name.
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE v2_listings SET display_name = (
+				SELECT cp.public_name
+				FROM v2_client_flows f
+				JOIN v2_client_profiles cp ON cp.id = f.client_profile_id
+				WHERE f.id = v2_listings.flow_id
+			), updated_at = strftime('%s', 'now')
+			WHERE EXISTS (
+				SELECT 1
+				FROM v2_client_flows f
+				JOIN v2_client_profiles cp ON cp.id = f.client_profile_id
+				WHERE f.id = v2_listings.flow_id AND cp.public_name != ''
+			)`); err != nil {
+			return fmt.Errorf("v2: MigrateSchema: update listings display_name: %w", err)
 		}
 	}
 
@@ -661,6 +770,91 @@ CREATE UNIQUE INDEX IF NOT EXISTS uniq_v2_helper_purchases_active
     WHERE state NOT IN ('invoice_expired', 'failed', 'receipt_expired');
 `); err != nil {
 		return fmt.Errorf("rebuildHelperPurchasesInTx: indexes: %w", err)
+	}
+
+	return nil
+}
+
+// rebuildListingsInTx rebuilds v2_listings without the inline UNIQUE constraint on
+// display_name, preserving all data. Called within an already-open transaction.
+func rebuildListingsInTx(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `
+CREATE TABLE v2_listings_new (
+    id                     TEXT PRIMARY KEY,
+    flow_id                TEXT NOT NULL UNIQUE REFERENCES v2_client_flows(id),
+    city                   TEXT NOT NULL,
+    country_code           TEXT NOT NULL,
+    dependency_type        TEXT NOT NULL,
+    help_type              TEXT NOT NULL,
+    urgency                TEXT NOT NULL,
+    languages              TEXT NOT NULL,
+    display_name           TEXT NOT NULL,
+    contact_type           TEXT NOT NULL CHECK (contact_type IN ('telegram', 'signal')),
+    contact_ciphertext     TEXT NOT NULL,
+    contact_nonce          TEXT NOT NULL,
+    contact_key_version    TEXT NOT NULL,
+    state                  TEXT NOT NULL DEFAULT 'visible'
+                                CHECK (state IN ('visible', 'hidden', 'finished')),
+    visible_until          INTEGER,
+    first_published_at     INTEGER NOT NULL,
+    last_activated_at      INTEGER NOT NULL,
+    entitlement_expires_at INTEGER NOT NULL,
+    activation_count       INTEGER NOT NULL DEFAULT 1 CHECK (activation_count >= 1),
+    created_at             INTEGER NOT NULL,
+    updated_at             INTEGER NOT NULL,
+
+    CHECK (length(display_name) > 0),
+    CHECK (length(contact_ciphertext) > 0),
+    CHECK (length(contact_nonce) > 0),
+    CHECK (length(contact_key_version) > 0),
+
+    CHECK (
+        (state = 'visible'  AND visible_until IS NOT NULL)
+        OR
+        (state = 'hidden'   AND visible_until IS NULL)
+        OR
+        (state = 'finished' AND visible_until IS NULL)
+    ),
+
+    CHECK (created_at <= first_published_at),
+    CHECK (updated_at >= created_at),
+    CHECK (first_published_at <= last_activated_at),
+    CHECK (last_activated_at <= entitlement_expires_at),
+    CHECK (entitlement_expires_at > created_at),
+
+    CHECK (state != 'visible' OR (last_activated_at < visible_until AND visible_until <= entitlement_expires_at))
+)`); err != nil {
+		return fmt.Errorf("rebuildListingsInTx: create new: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO v2_listings_new
+    (id, flow_id, city, country_code, dependency_type, help_type, urgency,
+     languages, display_name, contact_type, contact_ciphertext, contact_nonce,
+     contact_key_version, state, visible_until, first_published_at, last_activated_at,
+     entitlement_expires_at, activation_count, created_at, updated_at)
+SELECT
+    id, flow_id, city, country_code, dependency_type, help_type, urgency,
+    languages, display_name, contact_type, contact_ciphertext, contact_nonce,
+    contact_key_version, state, visible_until, first_published_at, last_activated_at,
+    entitlement_expires_at, activation_count, created_at, updated_at
+FROM v2_listings`); err != nil {
+		return fmt.Errorf("rebuildListingsInTx: copy data: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `DROP TABLE v2_listings`); err != nil {
+		return fmt.Errorf("rebuildListingsInTx: drop old: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE v2_listings_new RENAME TO v2_listings`); err != nil {
+		return fmt.Errorf("rebuildListingsInTx: rename: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+CREATE INDEX IF NOT EXISTS idx_v2_listings_flow  ON v2_listings(flow_id);
+CREATE INDEX IF NOT EXISTS idx_v2_listings_state ON v2_listings(state);
+CREATE INDEX IF NOT EXISTS idx_v2_listings_city  ON v2_listings(city);
+`); err != nil {
+		return fmt.Errorf("rebuildListingsInTx: indexes: %w", err)
 	}
 
 	return nil

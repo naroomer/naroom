@@ -307,27 +307,34 @@ func (ls *ListingService) FirstPublish(rawCode, walletAddress string, input List
 		visibleUntil = candidate
 	}
 
-	// Step 7: bounded retry loop for display_name collision.
+	// Step 7a: Look up client profile's public_name (permanent alias for this wallet).
+	var profilePublicName string
+	profNameErr := ls.svc.db.QueryRow(`
+		SELECT cp.public_name
+		FROM v2_client_flows f
+		JOIN v2_client_profiles cp ON cp.id = f.client_profile_id
+		WHERE f.id = ?`, fv.FlowID,
+	).Scan(&profilePublicName)
+	if profNameErr != nil {
+		return ListingView{}, fmt.Errorf("v2: FirstPublish: read profile alias: %w", profNameErr)
+	}
+	if profilePublicName == "" {
+		return ListingView{}, fmt.Errorf("v2: FirstPublish: profile has no alias (migration incomplete)")
+	}
+
+	// Step 7: retry loop for flow_id race only.
+	// display_name is derived from profile alias (no per-listing UNIQUE collision possible).
 	// Each attempt:
-	//   a. Generates a fresh validated name.
-	//   b. Calls _testHook (for interleaving tests).
-	//   c. Begins a transaction.
-	//   d. CAS UPDATE binding: ready→active for window 1.
-	//   e. If 0 rows: ROLLBACK, classify, return error.
-	//   f. INSERT listing (binding already claimed).
-	//   g. On display_name collision: ROLLBACK, retry.
-	//   h. On flow_id collision: ROLLBACK, return ErrListingAlreadyExists.
-	//   i. On 0 rows from INSERT: ROLLBACK, classify.
-	//   j. COMMIT.
+	//   a. Calls _testHook (for interleaving tests).
+	//   b. Begins a transaction.
+	//   c. CAS UPDATE binding: ready→active for window 1.
+	//   d. If 0 rows: ROLLBACK, classify, return error.
+	//   e. INSERT listing.
+	//   f. On flow_id collision: ROLLBACK, return ErrListingAlreadyExists.
+	//   g. On 0 rows from INSERT: ROLLBACK, classify.
+	//   h. COMMIT.
 	for attempt := 0; attempt < maxDisplayNameRetries; attempt++ {
-		displayName, genErr := ls.names.Generate()
-		if genErr != nil {
-			return ListingView{}, fmt.Errorf("v2: FirstPublish: name: %w", genErr)
-		}
-		if valErr := validateDisplayName(displayName); valErr != nil {
-			// Generator produced invalid output; no listing row has been created.
-			return ListingView{}, fmt.Errorf("v2: FirstPublish: name validation: [internal]")
-		}
+		displayName := profilePublicName // derived from profile, not random per listing
 
 		// Call test hook so interleaving tests can delete the binding
 		// between this point and the atomic UPDATE below.
@@ -429,10 +436,6 @@ func (ls *ListingService) FirstPublish(rawCode, walletAddress string, input List
 		)
 		if insErr != nil {
 			tx.Rollback() //nolint:errcheck
-			if isSQLiteUniqueOnColumn(insErr, "v2_listings.display_name") {
-				// Name taken by another listing — try a new name.
-				continue
-			}
 			if isSQLiteUniqueOnColumn(insErr, "v2_listings.flow_id") {
 				// A concurrent first-publish won the race for this flow.
 				return ListingView{}, ErrListingAlreadyExists
@@ -471,8 +474,8 @@ func (ls *ListingService) FirstPublish(rawCode, walletAddress string, input List
 		return ls.scanListingView(fv.FlowID)
 	}
 
-	// All retries exhausted due to display_name collisions.
-	return ListingView{}, fmt.Errorf("v2: FirstPublish: display name exhausted: [internal]")
+	// Exhausted retries (should not happen without display_name UNIQUE collisions).
+	return ListingView{}, fmt.Errorf("v2: FirstPublish: publish loop exhausted: [internal]")
 }
 
 // classifyPublishFailure re-reads state after an atomic UPDATE/INSERT returned zero rows

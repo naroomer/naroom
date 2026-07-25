@@ -194,9 +194,11 @@ func TestReview_ClientProfileIdentity(t *testing.T) {
 	// Same wallet fingerprint always maps to same profile:
 	fp1_ltc := strings.Repeat("a", 62) + "01" // distinct fingerprint for same addr but LTC
 
+	gen := NewRandomAliasGenerator()
+
 	// Create profile for fp1/BTC.
 	tx1, _ := db.Begin()
-	id1, err := getOrCreateClientProfileTx(tx1, fp1, "BTC", now)
+	id1, err := getOrCreateClientProfileTx(tx1, fp1, "BTC", now, gen)
 	if err != nil {
 		t.Fatalf("create profile 1: %v", err)
 	}
@@ -204,7 +206,7 @@ func TestReview_ClientProfileIdentity(t *testing.T) {
 
 	// Same fingerprint → same profile.
 	tx2, _ := db.Begin()
-	id2, err := getOrCreateClientProfileTx(tx2, fp1, "BTC", now)
+	id2, err := getOrCreateClientProfileTx(tx2, fp1, "BTC", now, gen)
 	if err != nil {
 		t.Fatalf("get profile 1 again: %v", err)
 	}
@@ -215,7 +217,7 @@ func TestReview_ClientProfileIdentity(t *testing.T) {
 
 	// Different fingerprint → different profile.
 	tx3, _ := db.Begin()
-	id3, err := getOrCreateClientProfileTx(tx3, fp2, "BTC", now)
+	id3, err := getOrCreateClientProfileTx(tx3, fp2, "BTC", now, gen)
 	if err != nil {
 		t.Fatalf("create profile 2: %v", err)
 	}
@@ -226,7 +228,7 @@ func TestReview_ClientProfileIdentity(t *testing.T) {
 
 	// Different fingerprint (simulating different currency) → different profile.
 	tx4, _ := db.Begin()
-	id4, err := getOrCreateClientProfileTx(tx4, fp1_ltc, "LTC", now)
+	id4, err := getOrCreateClientProfileTx(tx4, fp1_ltc, "LTC", now, gen)
 	if err != nil {
 		t.Fatalf("create profile LTC: %v", err)
 	}
@@ -955,7 +957,7 @@ func TestReview_ConcurrentClientProfileCreation(t *testing.T) {
 			if err != nil {
 				return
 			}
-			id, err := getOrCreateClientProfileTx(tx, fp, "BTC", now)
+			id, err := getOrCreateClientProfileTx(tx, fp, "BTC", now, NewRandomAliasGenerator())
 			if err != nil {
 				tx.Rollback() //nolint:errcheck
 				return

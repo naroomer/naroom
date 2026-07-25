@@ -191,8 +191,8 @@ func parseTelegramCallbackData(data string) (reviewRef string, isPositive bool, 
 
 // getOrCreateClientProfileTx atomically gets or creates a Client profile for the
 // given wallet_fingerprint and currency, within an existing transaction.
-// Returns profileID.
-func getOrCreateClientProfileTx(tx *sql.Tx, walletFP, currency string, now int64) (string, error) {
+// Returns profileID. gen is used to generate a permanent public_name alias on INSERT.
+func getOrCreateClientProfileTx(tx *sql.Tx, walletFP, currency string, now int64, gen AliasGenerator) (string, error) {
 	// Fast path: lookup.
 	var profileID string
 	err := tx.QueryRow(`
@@ -205,30 +205,44 @@ func getOrCreateClientProfileTx(tx *sql.Tx, walletFP, currency string, now int64
 		return "", fmt.Errorf("v2: getOrCreateClientProfileTx: lookup: %w", err)
 	}
 
-	// Not found: insert.
-	newID := newID()
-	_, insErr := tx.Exec(`
-		INSERT INTO v2_client_profiles
-		  (id, wallet_fingerprint, currency, positive_count, negative_count, created_at, updated_at)
-		VALUES (?, ?, ?, 0, 0, ?, ?)`,
-		newID, walletFP, currency, now, now,
-	)
-	if insErr == nil {
-		return newID, nil
-	}
-
-	// Race: another goroutine inserted the same fingerprint.
-	if isSQLiteUniqueOnColumn(insErr, "v2_client_profiles.wallet_fingerprint") {
-		// Re-read the winner.
-		readErr := tx.QueryRow(`
-			SELECT id FROM v2_client_profiles WHERE wallet_fingerprint = ?`, walletFP,
-		).Scan(&profileID)
-		if readErr != nil {
-			return "", fmt.Errorf("v2: getOrCreateClientProfileTx: re-read: %w", readErr)
+	// Not found: insert with bounded retry for public_name collision.
+	const maxAliasRetries = 10
+	var insErr error
+	for attempt := 0; attempt < maxAliasRetries; attempt++ {
+		alias, aliasErr := gen.GenerateAlias()
+		if aliasErr != nil {
+			return "", fmt.Errorf("v2: getOrCreateClientProfileTx: generate alias: %w", aliasErr)
 		}
-		return profileID, nil
+		if valErr := validateAlias(alias); valErr != nil {
+			return "", fmt.Errorf("v2: getOrCreateClientProfileTx: alias validation: [internal]")
+		}
+		newProfileID := newID()
+		_, insErr = tx.Exec(`
+			INSERT INTO v2_client_profiles
+			  (id, wallet_fingerprint, currency, public_name, positive_count, negative_count, created_at, updated_at)
+			VALUES (?, ?, ?, ?, 0, 0, ?, ?)`,
+			newProfileID, walletFP, currency, alias, now, now,
+		)
+		if insErr == nil {
+			return newProfileID, nil
+		}
+		if isSQLiteUniqueOnColumn(insErr, "v2_client_profiles.wallet_fingerprint") {
+			// Race: another goroutine inserted the same fingerprint.
+			readErr := tx.QueryRow(`
+				SELECT id FROM v2_client_profiles WHERE wallet_fingerprint = ?`, walletFP,
+			).Scan(&profileID)
+			if readErr != nil {
+				return "", fmt.Errorf("v2: getOrCreateClientProfileTx: re-read: %w", readErr)
+			}
+			return profileID, nil
+		}
+		if isSQLiteUniqueOnColumn(insErr, "uniq_v2_client_profiles_public_name") {
+			// Alias collision — retry with a new alias.
+			continue
+		}
+		return "", fmt.Errorf("v2: getOrCreateClientProfileTx: insert: %w", insErr)
 	}
-	return "", fmt.Errorf("v2: getOrCreateClientProfileTx: insert: %w", insErr)
+	return "", errors.New("v2: getOrCreateClientProfileTx: alias collision exhausted after 10 retries")
 }
 
 // createReviewEntitlementsTx inserts both review entitlements (client + helper) within

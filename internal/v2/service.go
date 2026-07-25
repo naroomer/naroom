@@ -148,6 +148,7 @@ type Service struct {
 	hmacKey []byte
 	now     func() time.Time
 	policy  V2BalancePolicy
+	aliases AliasGenerator
 }
 
 // New creates a Service. hmacKey must be a server secret; it must not be empty.
@@ -163,12 +164,18 @@ func NewWithClock(db *sql.DB, hmacKey []byte, now func() time.Time) (*Service, e
 	if now == nil {
 		now = time.Now
 	}
-	return &Service{db: db, hmacKey: hmacKey, now: now, policy: DefaultV2BalancePolicy()}, nil
+	svc := &Service{db: db, hmacKey: hmacKey, now: now, policy: DefaultV2BalancePolicy()}
+	svc.aliases = NewRandomAliasGenerator()
+	return svc, nil
 }
 
 // SetPolicy replaces the balance policy on this Service.
 // Call this once after construction (via WireV2System) before serving requests.
 func (s *Service) SetPolicy(p V2BalancePolicy) { s.policy = p }
+
+// SetAliasGenerator replaces the alias generator on this Service.
+// Call this once after construction if a custom generator is needed.
+func (s *Service) SetAliasGenerator(gen AliasGenerator) { s.aliases = gen }
 
 // nowUnix returns the current unix timestamp from the injectable clock.
 func (s *Service) nowUnix() int64 { return s.now().Unix() }
@@ -738,7 +745,7 @@ func (s *Service) ConfirmPayment(flowID, invoiceID string, observedAt time.Time)
 	if fpErr != nil {
 		return FlowView{}, fmt.Errorf("v2: ConfirmPayment: read wallet fp: %w", fpErr)
 	}
-	clientProfileID, profErr := getOrCreateClientProfileTx(tx, walletFP, flowCurrency, now)
+	clientProfileID, profErr := getOrCreateClientProfileTx(tx, walletFP, flowCurrency, now, s.aliases)
 	if profErr != nil {
 		return FlowView{}, fmt.Errorf("v2: ConfirmPayment: get-or-create client profile: %w", profErr)
 	}

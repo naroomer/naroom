@@ -309,7 +309,7 @@ func newE2ECompWithClock(t *testing.T, nowFn func() time.Time) *e2eComp {
 			InformerSender: &e2eInformerSender{},
 			Now:            nowFn,
 		},
-	DefaultV2BalancePolicy(),
+		DefaultV2BalancePolicy(),
 	)
 	if err != nil {
 		t.Fatalf("WireV2System: %v", err)
