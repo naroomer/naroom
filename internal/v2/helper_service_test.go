@@ -433,12 +433,12 @@ func TestHelperCreate_InsufficientBalance(t *testing.T) {
 
 	// validateBalanceInputs rejects NaN/Inf/negative, but NOT values below floor.
 	// The floor comparison (< 1010) is the HTTP handler's responsibility.
-	if err := validateBalanceInputs(-1.0, helperPreInvoiceFloorUSD); err == nil {
+	if err := validateBalanceInputs(-1.0, DefaultV2BalancePolicy().HelperPreInvoiceMinUSD()); err == nil {
 		t.Error("negative balance should be rejected by validateBalanceInputs")
 	}
 	// 1009.99 is a valid finite number — validateBalanceInputs accepts it.
-	// The HTTP handler rejects it via explicit < helperPreInvoiceFloorUSD check.
-	if err := validateBalanceInputs(1009.99, helperPreInvoiceFloorUSD); err != nil {
+	// The HTTP handler rejects it via explicit < DefaultV2BalancePolicy().HelperPreInvoiceMinUSD() check.
+	if err := validateBalanceInputs(1009.99, DefaultV2BalancePolicy().HelperPreInvoiceMinUSD()); err != nil {
 		t.Errorf("validateBalanceInputs(1009.99) should pass (floor check is separate): %v", err)
 	}
 

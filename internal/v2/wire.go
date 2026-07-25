@@ -9,6 +9,7 @@ package v2
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -76,13 +77,15 @@ type V2System struct {
 	informerSvc *InformerService
 	destCipher  *DestinationCipher
 	now         func() time.Time
+	policy      V2BalancePolicy
 }
 
 // WireV2System assembles the complete V2 subsystem.
 // db must already have V2 schema applied (ApplySchema + MigrateSchema) and
 // PRAGMA foreign_keys=ON enforced before calling.
+// policy configures all USD balance thresholds; use DefaultV2BalancePolicy() for defaults.
 // Returns a non-nil error if any component fails to construct.
-func WireV2System(db *sql.DB, keys V2Keys, bots V2BotConfig, adapters V2Adapters) (*V2System, error) {
+func WireV2System(db *sql.DB, keys V2Keys, bots V2BotConfig, adapters V2Adapters, policy V2BalancePolicy) (*V2System, error) {
 	now := adapters.Now
 	if now == nil {
 		now = time.Now
@@ -106,6 +109,7 @@ func WireV2System(db *sql.DB, keys V2Keys, bots V2BotConfig, adapters V2Adapters
 	if err != nil {
 		return nil, fmt.Errorf("v2: WireV2System: payment service: %w", err)
 	}
+	svc.SetPolicy(policy)
 
 	// ── Display names + contact validator ─────────────────────────────────────
 	names := NewRandomDisplayNameGenerator()
@@ -116,12 +120,14 @@ func WireV2System(db *sql.DB, keys V2Keys, bots V2BotConfig, adapters V2Adapters
 	if err != nil {
 		return nil, fmt.Errorf("v2: WireV2System: listing service: %w", err)
 	}
+	listingSvc.SetPolicy(policy)
 
 	// ── Helper purchase service ────────────────────────────────────────────────
 	helperSvc, err := NewHelperPurchaseService(db, keys.HMACKey, keys.ContactCipher, names, now)
 	if err != nil {
 		return nil, fmt.Errorf("v2: WireV2System: helper service: %w", err)
 	}
+	helperSvc.SetPolicy(policy)
 
 	// ── Review service ────────────────────────────────────────────────────────
 	reviewSvc, err := NewReviewService(db, keys.HMACKey, now)
@@ -134,6 +140,7 @@ func WireV2System(db *sql.DB, keys V2Keys, bots V2BotConfig, adapters V2Adapters
 	if err != nil {
 		return nil, fmt.Errorf("v2: WireV2System: informer service: %w", err)
 	}
+	informerSvc.SetPolicy(policy)
 	listingSvc.SetInformerNotifier(informerSvc)
 
 	// ── Telegram client transport ──────────────────────────────────────────────
@@ -163,6 +170,7 @@ func WireV2System(db *sql.DB, keys V2Keys, bots V2BotConfig, adapters V2Adapters
 	if err != nil {
 		return nil, fmt.Errorf("v2: WireV2System: client handler: %w", err)
 	}
+	clientHandler.SetPolicy(policy)
 
 	journeyHandler, err := NewClientJourneyHandler(svc, listingSvc, telegramTransport, balReader, keys.HMACKey, now)
 	if err != nil {
@@ -194,6 +202,7 @@ func WireV2System(db *sql.DB, keys V2Keys, bots V2BotConfig, adapters V2Adapters
 	if err != nil {
 		return nil, fmt.Errorf("v2: WireV2System: v2 watcher: %w", err)
 	}
+	v2Watcher.SetPolicy(policy)
 
 	helperWatcher, err := NewHelperPurchaseWatcher(helperSvc, chainClients, balReader, now, nil, 5*time.Second)
 	if err != nil {
@@ -224,6 +233,7 @@ func WireV2System(db *sql.DB, keys V2Keys, bots V2BotConfig, adapters V2Adapters
 		informerSvc: informerSvc,
 		destCipher:  keys.DestCipher,
 		now:         now,
+		policy:      policy,
 	}, nil
 }
 
@@ -273,6 +283,31 @@ func (sys *V2System) MountRoutes(mux *http.ServeMux) {
 	// Helper reviews
 	mux.HandleFunc("POST /v2/helper/reviews/capability", rMux.ServeHTTP)
 	mux.HandleFunc("POST /v2/helper/reviews", rMux.ServeHTTP)
+
+	// V2 public configuration endpoint — returns all configurable balance thresholds.
+	mux.HandleFunc("GET /v2/public-config", func(w http.ResponseWriter, r *http.Request) {
+		type resp struct {
+			ClientFeeUSDCents       int     `json:"client_fee_usd_cents"`
+			ClientPublicMinUSD      float64 `json:"client_public_min_usd"`
+			ClientHardFloorUSD      float64 `json:"client_hard_floor_usd"`
+			HelperFeeUSDCents       int     `json:"helper_fee_usd_cents"`
+			HelperPreInvoiceMinUSD  float64 `json:"helper_pre_invoice_min_usd"`
+			HelperPostPaymentMinUSD float64 `json:"helper_post_payment_min_usd"`
+			InformerMinUSD          float64 `json:"informer_min_usd"`
+		}
+		p := sys.policy
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		json.NewEncoder(w).Encode(resp{ //nolint:errcheck
+			ClientFeeUSDCents:       500,
+			ClientPublicMinUSD:      p.ClientPublicMinUSD,
+			ClientHardFloorUSD:      p.ClientHardFloorUSD,
+			HelperFeeUSDCents:       1000,
+			HelperPreInvoiceMinUSD:  p.HelperPreInvoiceMinUSD(),
+			HelperPostPaymentMinUSD: p.HelperPostPaymentMinUSD,
+			InformerMinUSD:          p.InformerMinUSD,
+		})
+	})
 
 	// V2 readiness endpoint (separate from V1 /health)
 	mux.HandleFunc("GET /v2/health", func(w http.ResponseWriter, r *http.Request) {

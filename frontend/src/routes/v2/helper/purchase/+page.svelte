@@ -5,6 +5,17 @@
 
 	let t = $derived((key, params) => tFn($lang, key, params));
 
+	// ── Public config ──────────────────────────────────────────────────────────────
+	const DEFAULT_CONFIG = { helper_pre_invoice_min_usd: 1010, helper_post_payment_min_usd: 1000 };
+	let pubConfig = $state({ ...DEFAULT_CONFIG });
+
+	async function fetchPubConfig() {
+		try {
+			const r = await fetch('/api/v2/public-config');
+			if (r.ok) pubConfig = { ...DEFAULT_CONFIG, ...(await r.json()) };
+		} catch {}
+	}
+
 	// purchase_token from sessionStorage only — never exposed in URL/history
 	let purchaseToken = $state('');
 
@@ -43,6 +54,7 @@
 	}
 
 	onMount(async () => {
+		fetchPubConfig();
 		// Load token from sessionStorage only (never from URL)
 		try { purchaseToken = sessionStorage.getItem('v2_active_purchase_token') || ''; } catch {}
 		if (!purchaseToken) { error = t('v2.helper.no_token'); loading = false; return; }
@@ -304,7 +316,7 @@
 		<div class="section">
 			<h2>{t('v2.balance.title')}</h2>
 			{#if lastBalanceUSD !== null}
-				<div class="err">{t('v2.balance.low', { balance: lastBalanceUSD.toFixed(0) })}</div>
+				<div class="err">{t('v2.balance.low', { balance: lastBalanceUSD.toFixed(0), min: '$' + pubConfig.helper_post_payment_min_usd })}</div>
 			{/if}
 			<p class="sub">{t('v2.helper.balance_sub')}</p>
 			<button class="btn-secondary" onclick={restorePurchase} disabled={loading}>

@@ -586,7 +586,7 @@ func TestListingHTTPRestorePhaseMapping(t *testing.T) {
 			t.Fatalf("ConfirmPayment: %v", err)
 		}
 		// Low balance → paid_low_balance state
-		_, err = svc.RecordPostPaymentBalance(fv.FlowID, 50.0, hardFloorUSD)
+		_, err = svc.RecordPostPaymentBalance(fv.FlowID, 50.0, DefaultV2BalancePolicy().ClientHardFloorUSD)
 		if err != nil {
 			t.Fatalf("RecordPostPaymentBalance low: %v", err)
 		}
@@ -1794,7 +1794,7 @@ func TestListingHTTPRestorePaidLowBalanceExpired(t *testing.T) {
 		t.Fatalf("ConfirmPayment: %v", err)
 	}
 	// Low balance → paid_low_balance state.
-	_, err = svc.RecordPostPaymentBalance(fv.FlowID, 50.0, hardFloorUSD)
+	_, err = svc.RecordPostPaymentBalance(fv.FlowID, 50.0, DefaultV2BalancePolicy().ClientHardFloorUSD)
 	if err != nil {
 		t.Fatalf("RecordPostPaymentBalance low: %v", err)
 	}
@@ -1913,7 +1913,7 @@ func TestClientJourneyLifecycle(t *testing.T) {
 	}
 
 	// ── d. RecordPostPaymentBalance → form_ready ──────────────────────────────
-	_, err = svc.RecordPostPaymentBalance(flowID, 150.0, hardFloorUSD)
+	_, err = svc.RecordPostPaymentBalance(flowID, 150.0, DefaultV2BalancePolicy().ClientHardFloorUSD)
 	if err != nil {
 		t.Fatalf("d. RecordPostPaymentBalance: %v", err)
 	}

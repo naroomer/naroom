@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS v2_client_flows (
     -- v2_client_profiles is defined later in this file; SQLite does not validate
     -- the referenced table at DDL time (only at DML time with PRAGMA foreign_keys=ON).
     client_profile_id    TEXT REFERENCES v2_client_profiles(id),
+    required_hard_floor_usd REAL NOT NULL DEFAULT 120.0,
     created_at           INTEGER NOT NULL,
     updated_at           INTEGER NOT NULL,
     -- awaiting_payment may have NULL profile; all post-confirm states require one.
@@ -362,6 +363,7 @@ CREATE TABLE IF NOT EXISTS v2_helper_purchases (
     last_balance_usd          REAL CHECK (last_balance_usd IS NULL
                                           OR (last_balance_usd >= 0 AND last_balance_usd < 1e15)),
     last_balance_checked_at   INTEGER,
+    required_post_payment_floor_usd REAL NOT NULL DEFAULT 1000.0,
     created_at                INTEGER NOT NULL,
     updated_at                INTEGER NOT NULL,
 
@@ -402,18 +404,18 @@ CREATE TABLE IF NOT EXISTS v2_helper_purchases (
             AND contact_ready_at IS NULL
             AND first_revealed_at IS NULL AND receipt_expires_at IS NULL)
         OR
-        -- paid_low_balance: retry deadline + balance pair (< 1000); contact/reveal NULL
+        -- paid_low_balance: retry deadline + balance pair (< floor); contact/reveal NULL
         (state = 'paid_low_balance'
             AND balance_retry_deadline_at IS NOT NULL
-            AND last_balance_usd IS NOT NULL AND last_balance_usd < 1000
+            AND last_balance_usd IS NOT NULL AND last_balance_usd < required_post_payment_floor_usd
             AND last_balance_checked_at IS NOT NULL
             AND contact_ready_at IS NULL
             AND first_revealed_at IS NULL AND receipt_expires_at IS NULL)
         OR
-        -- contact_ready: retry deadline + balance (>= 1000) + contact_ready_at; reveal pair both or neither
+        -- contact_ready: retry deadline + balance (>= floor) + contact_ready_at; reveal pair both or neither
         (state = 'contact_ready'
             AND balance_retry_deadline_at IS NOT NULL
-            AND last_balance_usd IS NOT NULL AND last_balance_usd >= 1000
+            AND last_balance_usd IS NOT NULL AND last_balance_usd >= required_post_payment_floor_usd
             AND last_balance_checked_at IS NOT NULL
             AND contact_ready_at IS NOT NULL
             AND (first_revealed_at IS NULL) = (receipt_expires_at IS NULL))
@@ -434,7 +436,7 @@ CREATE TABLE IF NOT EXISTS v2_helper_purchases (
         (state = 'receipt_expired'
             AND contact_ready_at IS NOT NULL
             AND balance_retry_deadline_at IS NOT NULL
-            AND last_balance_usd IS NOT NULL AND last_balance_usd >= 1000
+            AND last_balance_usd IS NOT NULL AND last_balance_usd >= required_post_payment_floor_usd
             AND last_balance_checked_at IS NOT NULL
             AND (first_revealed_at IS NULL) = (receipt_expires_at IS NULL))
     ),

@@ -5,6 +5,19 @@
 
 	let t = $derived((key, params) => tFn($lang, key, params));
 
+	// ── Public config ──────────────────────────────────────────────────────────────
+	const DEFAULT_CONFIG = { informer_min_usd: 1000 };
+	let pubConfig = $state({ ...DEFAULT_CONFIG });
+	let configLoaded = $state(false);
+
+	async function fetchPubConfig() {
+		try {
+			const r = await fetch('/api/v2/public-config');
+			if (r.ok) pubConfig = { ...DEFAULT_CONFIG, ...(await r.json()) };
+		} catch {}
+		configLoaded = true;
+	}
+
 	// ── State ──────────────────────────────────────────────────────────────────
 	let step = $state('wallet');   // wallet | waiting | connected | error
 	let loading = $state(false);
@@ -58,7 +71,7 @@
 			const data = await res.json();
 			if (!res.ok) {
 				const key = ERROR_CODE_KEY[data.code] ?? '';
-				error = key ? t(key) : (data.error || `HTTP ${res.status}`);
+				error = key ? t(key, { min: '$' + pubConfig.informer_min_usd }) : (data.error || `HTTP ${res.status}`);
 				return;
 			}
 			botUrl    = data.bot_url;
@@ -112,7 +125,7 @@
 		if (botUrl) window.open(botUrl, '_blank', 'noopener');
 	}
 
-	onMount(() => {});
+	onMount(fetchPubConfig);
 
 	onDestroy(() => {
 		stopPoll();

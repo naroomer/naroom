@@ -111,7 +111,7 @@ func newTestTransport(t *testing.T, now func() time.Time) (*TelegramTransport, *
 	return transport, svc, ls, db
 }
 
-// makeFormReadyFlowForTransport creates a confirmed form_ready flow without hardFloorUSD dependency.
+// makeFormReadyFlowForTransport creates a confirmed form_ready flow without DefaultV2BalancePolicy().ClientHardFloorUSD dependency.
 func makeFormReadyFlowForTransport(t *testing.T, svc *Service, walletAddr string) (rawCode, flowID string) {
 	t.Helper()
 	rawCode, fv, err := svc.CreatePaymentIntent(walletAddr, "BTC", validDraft())
@@ -128,7 +128,7 @@ func makeFormReadyFlowForTransport(t *testing.T, svc *Service, walletAddr string
 	if err != nil {
 		t.Fatalf("ConfirmPayment: %v", err)
 	}
-	_, err = svc.RecordPostPaymentBalance(fv.FlowID, 150.0, hardFloorUSD)
+	_, err = svc.RecordPostPaymentBalance(fv.FlowID, 150.0, DefaultV2BalancePolicy().ClientHardFloorUSD)
 	if err != nil {
 		t.Fatalf("RecordPostPaymentBalance: %v", err)
 	}

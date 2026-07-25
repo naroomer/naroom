@@ -1,10 +1,22 @@
 <script>
+	import { onMount } from 'svelte';
 	import { lang, t as tFn } from '$lib/i18n.js';
 	import { CITIES } from '$lib/cities.js';
 
-	let t = $derived((key) => tFn($lang, key));
+	let t = $derived((key, params) => tFn($lang, key, params));
 
 	const boardUrl = '/v2/board/' + CITIES[0].id;
+
+	// ── Public config ──────────────────────────────────────────────────────────────
+	const DEFAULT_CONFIG = { client_public_min_usd: 150, helper_post_payment_min_usd: 1000, informer_min_usd: 1000 };
+	let pubConfig = $state({ ...DEFAULT_CONFIG });
+
+	onMount(async () => {
+		try {
+			const r = await fetch('/api/v2/public-config');
+			if (r.ok) pubConfig = { ...DEFAULT_CONFIG, ...(await r.json()) };
+		} catch {}
+	});
 </script>
 
 <div class="page">
@@ -28,7 +40,7 @@
 				<li>{t('v2.hiw.client.visibility')}</li>
 				<li>{t('v2.hiw.client.reactivate')}</li>
 				<li>{t('v2.hiw.client.reactivate_detail')}</li>
-				<li>{t('v2.hiw.client.balance')}</li>
+				<li>{t('v2.hiw.client.balance', { min: '$' + pubConfig.client_public_min_usd })}</li>
 				<li>{t('v2.hiw.client.contact')}</li>
 				<li>{t('v2.hiw.client.board')}</li>
 			</ul>
@@ -41,7 +53,7 @@
 				<li>{t('v2.hiw.helper.cost')}</li>
 				<li>{t('v2.hiw.helper.multi')}</li>
 				<li>{t('v2.hiw.helper.no_refund')}</li>
-				<li>{t('v2.hiw.helper.balance')}</li>
+				<li>{t('v2.hiw.helper.balance', { min: '$' + pubConfig.helper_post_payment_min_usd })}</li>
 				<li>{t('v2.hiw.helper.country')}</li>
 				<li>{t('v2.hiw.helper.contact_reveal')}</li>
 				<li>{t('v2.hiw.helper.reputation')}</li>
@@ -53,7 +65,7 @@
 			<h2>{t('v2.hiw.informer.title')}</h2>
 			<ul>
 				<li>{t('v2.hiw.informer.desc')}</li>
-				<li>{t('v2.hiw.informer.balance')}</li>
+				<li>{t('v2.hiw.informer.balance', { min: '$' + pubConfig.informer_min_usd })}</li>
 				<li>{t('v2.hiw.informer.not_helper')}</li>
 			</ul>
 		</section>

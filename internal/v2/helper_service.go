@@ -26,12 +26,8 @@ const (
 	helperTxidDomain   = "naroom:v2:helper-txid:"
 )
 
-// Helper purchase floor constants.
-const (
-	helperPreInvoiceFloorUSD  = 1010.0 // minimum pre-invoice balance
-	helperPostPaymentFloorUSD = 1000.0 // minimum post-payment balance for contact
-	helperInvoiceUSDCents     = 1000   // $10 invoice
-)
+// helperInvoiceUSDCents is the fixed $10 invoice fee — not a balance threshold.
+const helperInvoiceUSDCents = 1000
 
 // Helper purchase states.
 const (
@@ -153,6 +149,7 @@ type HelperPurchaseService struct {
 	cipher  ContactCipher
 	names   DisplayNameGenerator
 	now     func() time.Time
+	policy  V2BalancePolicy
 	// _testHook is called inside setHelperContactReady between the country read and
 	// the CAS UPDATE. Nil in production; used only for concurrency tests.
 	_testHook func()
@@ -193,8 +190,12 @@ func NewHelperPurchaseService(
 		cipher:  cipher,
 		names:   names,
 		now:     now,
+		policy:  DefaultV2BalancePolicy(),
 	}, nil
 }
+
+// SetPolicy replaces the balance policy on this HelperPurchaseService.
+func (hs *HelperPurchaseService) SetPolicy(p V2BalancePolicy) { hs.policy = p }
 
 // ── HMAC helpers ──────────────────────────────────────────────────────────────
 
@@ -565,10 +566,10 @@ func (hs *HelperPurchaseService) CreatePurchase(
 	_, err = tx.Exec(`
 		INSERT INTO v2_helper_purchases
 		  (id, listing_id, helper_profile_id, browser_token_hash, state,
-		   country_code_snapshot, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		   country_code_snapshot, required_post_payment_floor_usd, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		purchaseID, listingID, profileID, tokenHash, HPStateAwaitingPayment,
-		countryCode, now, now,
+		countryCode, hs.policy.HelperPostPaymentMinUSD, now, now,
 	)
 	if err != nil {
 		// Partial UNIQUE index: concurrent different-token insert for same profile+listing.
@@ -1003,17 +1004,30 @@ func (hs *HelperPurchaseService) ExpireHelperInvoice(purchaseID string, now time
 // ── RecordHelperPostPaymentBalance ────────────────────────────────────────────
 
 // RecordHelperPostPaymentBalance records a balance result and transitions state.
-// balance >= $1000 → setHelperContactReady
-// balance < $1000  → setHelperLowBalance (no downgrade from contact_ready)
+// The floor is read from required_post_payment_floor_usd stored on the purchase row.
+// balance >= floor → setHelperContactReady
+// balance < floor  → setHelperLowBalance (no downgrade from contact_ready)
 func (hs *HelperPurchaseService) RecordHelperPostPaymentBalance(
 	purchaseID string,
 	balanceUSD float64,
 ) (HelperPurchaseView, error) {
-	if err := validateBalanceInputs(balanceUSD, helperPostPaymentFloorUSD); err != nil {
+	// Read the per-purchase floor from DB (set at creation time from the policy).
+	var floorUSD float64
+	err := hs.db.QueryRow(
+		`SELECT required_post_payment_floor_usd FROM v2_helper_purchases WHERE id = ?`, purchaseID,
+	).Scan(&floorUSD)
+	if errors.Is(err, sql.ErrNoRows) {
+		return HelperPurchaseView{}, ErrHelperNotFound
+	}
+	if err != nil {
+		return HelperPurchaseView{}, fmt.Errorf("v2: RecordHelperPostPaymentBalance: read floor: %w", err)
+	}
+
+	if err := validateBalanceInputs(balanceUSD, floorUSD); err != nil {
 		return HelperPurchaseView{}, err
 	}
 
-	if balanceUSD >= helperPostPaymentFloorUSD {
+	if balanceUSD >= floorUSD {
 		return hs.setHelperContactReady(purchaseID, balanceUSD)
 	}
 	return hs.setHelperLowBalance(purchaseID, balanceUSD)

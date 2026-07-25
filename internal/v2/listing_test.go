@@ -102,7 +102,7 @@ func makeFormReadyFlow(t *testing.T, svc *Service, walletAddr, currency string) 
 	if err != nil {
 		t.Fatalf("ConfirmPayment: %v", err)
 	}
-	_, err = svc.RecordPostPaymentBalance(fv.FlowID, 150.0, hardFloorUSD)
+	_, err = svc.RecordPostPaymentBalance(fv.FlowID, 150.0, DefaultV2BalancePolicy().ClientHardFloorUSD)
 	if err != nil {
 		t.Fatalf("RecordPostPaymentBalance: %v", err)
 	}
@@ -1333,7 +1333,7 @@ func TestContactBoundaryFakeValidator(t *testing.T) {
 		now := time.Now()
 		svc.RecordPaymentDetected(fv.FlowID, fv.InvoiceID, "txid_"+newID()[:8], []string{"bc1qtest"}, fv.AmountAtomic, now) //nolint:errcheck
 		svc.ConfirmPayment(fv.FlowID, fv.InvoiceID, now)                                                                    //nolint:errcheck
-		svc.RecordPostPaymentBalance(fv.FlowID, 150.0, hardFloorUSD)                                                        //nolint:errcheck
+		svc.RecordPostPaymentBalance(fv.FlowID, 150.0, DefaultV2BalancePolicy().ClientHardFloorUSD)                                                        //nolint:errcheck
 		ls.attachReadyBinding(fv.FlowID, newBindingRef(), time.Now(), time.Now().Add(10*time.Minute))                       //nolint:errcheck
 
 		input := validListingInput()

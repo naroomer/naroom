@@ -87,6 +87,21 @@ func wireV2(
 		return fmt.Errorf("v2wire: migrate schema: %w", migErr)
 	}
 
+	// ── Build V2 balance policy from config ───────────────────────────────────
+	policy := v2.V2BalancePolicy{
+		ClientPublicMinUSD:      cfg.V2ClientPublicMinBalanceUSD,
+		ClientHardFloorUSD:      cfg.V2ClientHardFloorUSD,
+		HelperPostPaymentMinUSD: cfg.V2HelperPostPaymentMinBalanceUSD,
+		InformerMinUSD:          cfg.V2InformerMinBalanceUSD,
+	}
+	if policy.ClientPublicMinUSD <= 0 || policy.ClientHardFloorUSD <= 0 ||
+		policy.HelperPostPaymentMinUSD <= 0 || policy.InformerMinUSD <= 0 {
+		return fmt.Errorf("v2wire: V2 balance policy values must all be positive")
+	}
+	if policy.ClientPublicMinUSD < policy.ClientHardFloorUSD {
+		return fmt.Errorf("v2wire: V2_CLIENT_PUBLIC_MIN_BALANCE_USD must be >= V2_CLIENT_HARD_FLOOR_USD")
+	}
+
 	// ── Build crypto primitives ───────────────────────────────────────────────
 	contactCipher, err := v2.NewAESGCMContactCipher(contactKeyBytes, cfg.V2ContactKeyVersion)
 	if err != nil {
@@ -149,6 +164,7 @@ func wireV2(
 			InformerSender: informerBotSender,
 			Now:            time.Now,
 		},
+		policy,
 	)
 	if err != nil {
 		return fmt.Errorf("v2wire: wire system: %w", err)

@@ -157,8 +157,8 @@ func (h *InformerHandler) handleAccess(w http.ResponseWriter, r *http.Request) {
 		informerError(w, http.StatusServiceUnavailable, "provider_error", "balance check unavailable")
 		return
 	}
-	if balanceUSD < InformerMinBalanceUSD {
-		informerError(w, http.StatusPaymentRequired, "low_balance", "balance below $1000 floor")
+	if balanceUSD < h.svc.policy.InformerMinUSD {
+		informerError(w, http.StatusPaymentRequired, "low_balance", "balance below required floor")
 		return
 	}
 
@@ -166,7 +166,7 @@ func (h *InformerHandler) handleAccess(w http.ResponseWriter, r *http.Request) {
 	rawToken, expiresAt, tokErr := h.svc.CreateAccess(req.City, balanceUSD)
 	if tokErr != nil {
 		if errors.Is(tokErr, ErrInformerLowBalance) {
-			informerError(w, http.StatusPaymentRequired, "low_balance", "balance below $1000 floor")
+			informerError(w, http.StatusPaymentRequired, "low_balance", "balance below required floor")
 			return
 		}
 		if errors.Is(tokErr, ErrInformerInvalidCity) {

@@ -541,7 +541,7 @@ func TestWatcherLoadWatchableOnlyReturnsRelevant(t *testing.T) {
 	now := time.Now()
 	svc.RecordPaymentDetected(fv2.FlowID, fv2.InvoiceID, "txid2", []string{"bc1qtest"}, fv2.AmountAtomic, now) //nolint:errcheck
 	svc.ConfirmPayment(fv2.FlowID, fv2.InvoiceID, now)                                                         //nolint:errcheck
-	svc.RecordPostPaymentBalance(fv2.FlowID, 150.0, hardFloorUSD)                                              //nolint:errcheck
+	svc.RecordPostPaymentBalance(fv2.FlowID, 150.0, DefaultV2BalancePolicy().ClientHardFloorUSD)                                              //nolint:errcheck
 
 	watchable, err := svc.LoadWatchableInvoices()
 	if err != nil {

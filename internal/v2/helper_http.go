@@ -253,7 +253,7 @@ func (h *HelperPurchaseHandler) handleCreate(w http.ResponseWriter, r *http.Requ
 	}
 	if found {
 		// Idempotent retry: return existing purchase, 200, no token in response.
-		writeHelperCreateResponse(w, false, existingView, "")
+		writeHelperCreateResponse(w, false, existingView, "", h.svc.policy)
 		return
 	}
 
@@ -275,7 +275,7 @@ func (h *HelperPurchaseHandler) handleCreate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if found {
-		writeHelperCreateResponse(w, false, existingView, "")
+		writeHelperCreateResponse(w, false, existingView, "", h.svc.policy)
 		return
 	}
 
@@ -316,7 +316,7 @@ func (h *HelperPurchaseHandler) handleCreate(w http.ResponseWriter, r *http.Requ
 		helperError(w, http.StatusServiceUnavailable, "balance service returned invalid value", codeBalanceUnavailable)
 		return
 	}
-	if balanceUSD < helperPreInvoiceFloorUSD {
+	if balanceUSD < h.svc.policy.HelperPreInvoiceMinUSD() {
 		helperError(w, http.StatusPaymentRequired, "insufficient balance for purchase", codeInsufficientBalance)
 		return
 	}
@@ -360,12 +360,12 @@ func (h *HelperPurchaseHandler) handleCreate(w http.ResponseWriter, r *http.Requ
 	}
 
 	// New purchase: 201 with token in body.
-	writeHelperCreateResponse(w, true, view, req.PurchaseToken)
+	writeHelperCreateResponse(w, true, view, req.PurchaseToken, h.svc.policy)
 }
 
 // writeHelperCreateResponse sends the create/idempotent response.
 // isNew=true → 201 with purchase_token; isNew=false → 200 without token.
-func writeHelperCreateResponse(w http.ResponseWriter, isNew bool, view HelperPurchaseView, rawToken string) {
+func writeHelperCreateResponse(w http.ResponseWriter, isNew bool, view HelperPurchaseView, rawToken string, policy V2BalancePolicy) {
 	resp := helperCreateResponse{
 		PurchaseID:                    view.PurchaseID,
 		Currency:                      view.Currency,
@@ -373,7 +373,7 @@ func writeHelperCreateResponse(w http.ResponseWriter, isNew bool, view HelperPur
 		Invoice:                       toHelperInvoiceJSON(view),
 		CountryCode:                   view.CountryCode,
 		InvoiceUSDCents:               helperInvoiceUSDCents,
-		RequiredPostPaymentBalanceUSD: int(helperPostPaymentFloorUSD),
+		RequiredPostPaymentBalanceUSD: int(policy.HelperPostPaymentMinUSD),
 		NoRefund:                      true,
 		SameExpectedWalletRequired:    true,
 	}

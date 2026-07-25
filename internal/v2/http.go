@@ -261,6 +261,7 @@ type ClientHandler struct {
 	createLim    *fixedWindowLimiter
 	restoreLim   *fixedWindowLimiter
 	recheckLim   *fixedWindowLimiter
+	policy       V2BalancePolicy
 }
 
 // NewClientHandler constructs a ClientHandler and validates all required
@@ -303,8 +304,12 @@ func NewClientHandler(
 		createLim:    newFixedWindowLimiter(5, time.Minute, maxEntries, now),
 		restoreLim:   newFixedWindowLimiter(10, time.Minute, maxEntries, now),
 		recheckLim:   newFixedWindowLimiter(5, time.Minute, maxEntries, now),
+		policy:       DefaultV2BalancePolicy(),
 	}, nil
 }
+
+// SetPolicy replaces the balance policy on this ClientHandler.
+func (h *ClientHandler) SetPolicy(p V2BalancePolicy) { h.policy = p }
 
 // Routes returns an http.Handler with the three V2 client endpoints registered.
 // This handler is test-only and must NOT be mounted in cmd/naroom/main.go.
@@ -614,10 +619,6 @@ type recheckResponse struct {
 	LastBalanceCheckedAt *int64   `json:"last_balance_checked_at,omitempty"`
 }
 
-// hardFloorUSD is the API-level hard floor passed to the domain service.
-// The public requirement is $150; the API floor is $120 per task spec.
-const hardFloorUSD = 120.0
-
 func (h *ClientHandler) handleRecheckBalance(w http.ResponseWriter, r *http.Request) {
 	key := h.clientKey(r)
 	if !h.recheckLim.Allow(key) {
@@ -677,8 +678,8 @@ func (h *ClientHandler) handleRecheckBalance(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Step 4: Record balance with hard floor = $120.
-	fv, err = h.svc.RecordPostPaymentBalance(fv.FlowID, balanceUSD, hardFloorUSD)
+	// Step 4: Record balance with hard floor from policy.
+	fv, err = h.svc.RecordPostPaymentBalance(fv.FlowID, balanceUSD, h.policy.ClientHardFloorUSD)
 	if err != nil {
 		if errors.Is(err, ErrConflict) || errors.Is(err, ErrInvalidState) {
 			jsonError(w, http.StatusConflict, "operation not permitted in current state")

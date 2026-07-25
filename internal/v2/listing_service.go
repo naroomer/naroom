@@ -42,7 +42,6 @@ var (
 )
 
 const listingDailyWindow = 24 * time.Hour
-const listingReactivateFloorUSD = 120.0
 
 // maxDisplayNameRetries caps bounded retry when display_name collides.
 const maxDisplayNameRetries = 10
@@ -92,6 +91,7 @@ type ListingService struct {
 	cipher ContactCipher
 	names  DisplayNameGenerator
 	cv     ContactValidator
+	policy V2BalancePolicy
 	// _testHook is called in FirstPublish and Reactivate between pre-checks and
 	// the atomic DB operation. It is nil in production. It must not accept secret data.
 	_testHook func()
@@ -118,8 +118,11 @@ func NewListingService(svc *Service, cipher ContactCipher, names DisplayNameGene
 	if cv == nil {
 		return nil, errors.New("v2: NewListingService: cv must not be nil")
 	}
-	return &ListingService{svc: svc, cipher: cipher, names: names, cv: cv}, nil
+	return &ListingService{svc: svc, cipher: cipher, names: names, cv: cv, policy: DefaultV2BalancePolicy()}, nil
 }
+
+// SetPolicy replaces the balance policy on this ListingService.
+func (ls *ListingService) SetPolicy(p V2BalancePolicy) { ls.policy = p }
 
 func (ls *ListingService) now() time.Time { return ls.svc.now() }
 
@@ -595,7 +598,7 @@ func (ls *ListingService) Reactivate(rawCode, walletAddress string, balanceUSD f
 	}
 
 	// Check balance floor.
-	if balanceUSD < listingReactivateFloorUSD {
+	if balanceUSD < ls.policy.ClientHardFloorUSD {
 		return ListingView{}, ErrLowBalance
 	}
 

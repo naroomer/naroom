@@ -147,6 +147,7 @@ type Service struct {
 	db      *sql.DB
 	hmacKey []byte
 	now     func() time.Time
+	policy  V2BalancePolicy
 }
 
 // New creates a Service. hmacKey must be a server secret; it must not be empty.
@@ -162,8 +163,12 @@ func NewWithClock(db *sql.DB, hmacKey []byte, now func() time.Time) (*Service, e
 	if now == nil {
 		now = time.Now
 	}
-	return &Service{db: db, hmacKey: hmacKey, now: now}, nil
+	return &Service{db: db, hmacKey: hmacKey, now: now, policy: DefaultV2BalancePolicy()}, nil
 }
+
+// SetPolicy replaces the balance policy on this Service.
+// Call this once after construction (via WireV2System) before serving requests.
+func (s *Service) SetPolicy(p V2BalancePolicy) { s.policy = p }
 
 // nowUnix returns the current unix timestamp from the injectable clock.
 func (s *Service) nowUnix() int64 { return s.now().Unix() }
@@ -381,9 +386,11 @@ func (s *Service) CreatePaymentIntent(
 
 	_, err = tx.Exec(`
 		INSERT INTO v2_client_flows
-		  (id, wallet_fingerprint, currency, management_code_hash, state, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		flowID, fp, currency, ch, StateAwaitingPayment, now, now,
+		  (id, wallet_fingerprint, currency, management_code_hash, state,
+		   required_hard_floor_usd, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		flowID, fp, currency, ch, StateAwaitingPayment,
+		s.policy.ClientHardFloorUSD, now, now,
 	)
 	if err != nil {
 		return "", FlowView{}, fmt.Errorf("v2: CreatePaymentIntent: insert flow: %w", err)

@@ -397,6 +397,7 @@ func main() {
 			InformerSender: informerSender,
 			Now:            clock.now,
 		},
+		v2.DefaultV2BalancePolicy(),
 	)
 	if err != nil {
 		log.Fatalf("[v2testserver] WireV2System: %v", err)

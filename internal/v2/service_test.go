@@ -1734,7 +1734,7 @@ func TestBalanceThreshold(t *testing.T) {
 	fv = confirmPayment(t, svc, fv, "txid_thresh")
 
 	// Low balance.
-	after1, err := svc.RecordPostPaymentBalance(fv.FlowID, 119.99, hardFloorUSD)
+	after1, err := svc.RecordPostPaymentBalance(fv.FlowID, 119.99, DefaultV2BalancePolicy().ClientHardFloorUSD)
 	if err != nil {
 		t.Fatalf("low balance: %v", err)
 	}
@@ -1743,7 +1743,7 @@ func TestBalanceThreshold(t *testing.T) {
 	}
 
 	// Meeting floor.
-	after2, err := svc.RecordPostPaymentBalance(fv.FlowID, 120.0, hardFloorUSD)
+	after2, err := svc.RecordPostPaymentBalance(fv.FlowID, 120.0, DefaultV2BalancePolicy().ClientHardFloorUSD)
 	if err != nil {
 		t.Fatalf("floor balance: %v", err)
 	}
@@ -1770,7 +1770,7 @@ func TestBalanceOutageAfterConfirmation(t *testing.T) {
 	}
 
 	// Next cycle with working provider.
-	after, err := svc.RecordPostPaymentBalance(fv.FlowID, 150.0, hardFloorUSD)
+	after, err := svc.RecordPostPaymentBalance(fv.FlowID, 150.0, DefaultV2BalancePolicy().ClientHardFloorUSD)
 	if err != nil {
 		t.Fatalf("balance after outage recovery: %v", err)
 	}
@@ -1892,7 +1892,7 @@ func TestLoadWatchableInvoices(t *testing.T) {
 		t.Fatalf("confirm3: %v", err)
 	}
 	// Set balance so it's no longer watchable.
-	_, err = svc.RecordPostPaymentBalance(fv3.FlowID, 150.0, hardFloorUSD)
+	_, err = svc.RecordPostPaymentBalance(fv3.FlowID, 150.0, DefaultV2BalancePolicy().ClientHardFloorUSD)
 	if err != nil {
 		t.Fatalf("balance3: %v", err)
 	}

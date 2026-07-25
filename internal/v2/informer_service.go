@@ -46,7 +46,7 @@ var (
 	ErrInformerTokenClaimed   = errors.New("v2: informer token already claimed")
 	ErrInformerTokenNotFound  = errors.New("v2: informer token not found")
 	ErrInformerNotPrivateChat = errors.New("v2: informer requires private chat")
-	ErrInformerLowBalance     = errors.New("v2: informer balance below $1000 floor")
+	ErrInformerLowBalance     = errors.New("v2: informer balance below required floor")
 	ErrInformerInvalidCity    = errors.New("v2: informer city not supported")
 	ErrInformerDuplicateEvent = errors.New("v2: informer outbox duplicate (already exists)")
 	// ErrInformerNotificationPermanent signals that a send failure is permanent
@@ -88,6 +88,7 @@ type InformerService struct {
 	tokenSecret []byte
 	destCipher  *DestinationCipher
 	now         func() time.Time
+	policy      V2BalancePolicy
 }
 
 // NewInformerService creates an InformerService.
@@ -110,8 +111,12 @@ func NewInformerService(db *sql.DB, hmacKey, tokenSecret []byte, destCipher *Des
 	return &InformerService{
 		db: db, hmacKey: hmacKey, tokenSecret: tokenSecret,
 		destCipher: destCipher, now: now,
+		policy: DefaultV2BalancePolicy(),
 	}, nil
 }
+
+// SetPolicy replaces the balance policy on this InformerService.
+func (s *InformerService) SetPolicy(p V2BalancePolicy) { s.policy = p }
 
 // newInformerSubRef returns "isub_" + 32 lowercase hex chars (16 random bytes).
 func newInformerSubRef() (string, error) {
@@ -161,14 +166,14 @@ func isInformerCity(city string) bool {
 	return informerSupportedCities()[city]
 }
 
-// CreateAccess validates city, checks balanceUSD ≥ $1000, and returns a 15-min raw token.
+// CreateAccess validates city, checks balanceUSD ≥ policy.InformerMinUSD, and returns a 15-min raw token.
 func (s *InformerService) CreateAccess(city string, balanceUSD float64) (rawToken string, expiresAt time.Time, err error) {
 	city = strings.TrimSpace(strings.ToLower(city))
 	if !isInformerCity(city) {
 		return "", time.Time{}, fmt.Errorf("%w: %q", ErrInformerInvalidCity, city)
 	}
-	if balanceUSD < InformerMinBalanceUSD {
-		return "", time.Time{}, fmt.Errorf("%w: %.2f < %.2f", ErrInformerLowBalance, balanceUSD, InformerMinBalanceUSD)
+	if balanceUSD < s.policy.InformerMinUSD {
+		return "", time.Time{}, fmt.Errorf("%w: %.2f < %.2f", ErrInformerLowBalance, balanceUSD, s.policy.InformerMinUSD)
 	}
 
 	b := make([]byte, 32)

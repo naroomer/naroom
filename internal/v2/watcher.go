@@ -75,6 +75,7 @@ type V2Watcher struct {
 	sleep        func(context.Context, time.Duration) // injectable for tests; cancellation-aware
 	pollInterval time.Duration                        // normal sleep after success/empty cycle
 	backoff      *cappedBackoff
+	policy       V2BalancePolicy
 }
 
 // NewV2Watcher creates a V2Watcher.
@@ -122,8 +123,12 @@ func NewV2Watcher(
 		sleep:        sleep,
 		pollInterval: pollInterval,
 		backoff:      newCappedBackoff(),
+		policy:       DefaultV2BalancePolicy(),
 	}, nil
 }
+
+// SetPolicy replaces the balance policy on this V2Watcher.
+func (w *V2Watcher) SetPolicy(p V2BalancePolicy) { w.policy = p }
 
 // ProcessOnce runs one full cycle: loads all watchable invoices and processes each.
 // It is safe to call concurrently — database CAS prevents double transitions and
@@ -350,7 +355,7 @@ func (w *V2Watcher) doBalanceCheck(ctx context.Context, flowID, currency string,
 		return true, true
 	}
 
-	_, err = w.svc.RecordPostPaymentBalance(flowID, balanceUSD, hardFloorUSD)
+	_, err = w.svc.RecordPostPaymentBalance(flowID, balanceUSD, w.policy.ClientHardFloorUSD)
 	if err != nil && !errors.Is(err, ErrConflict) && !errors.Is(err, ErrInvalidState) {
 		slog.Error("v2 watcher: record post-payment balance", "err", "[internal]")
 		return true, true

@@ -77,6 +77,12 @@ type Config struct {
 	V2InformerBotToken      string // Telegram bot token for Informer outbox delivery
 	V2InformerBotName       string // bot username, must end in "bot"
 	V2InformerWebhookSecret string // Telegram webhook secret for Informer bot
+
+	// V2 configurable balance thresholds (optional; fail-fast validation if invalid).
+	V2ClientPublicMinBalanceUSD      float64
+	V2ClientHardFloorUSD             float64
+	V2HelperPostPaymentMinBalanceUSD float64
+	V2InformerMinBalanceUSD          float64
 }
 
 func Load() *Config {
@@ -135,6 +141,11 @@ func Load() *Config {
 		V2InformerBotToken:      envOr("V2_INFORMER_BOT_TOKEN", ""),
 		V2InformerBotName:       envOr("V2_INFORMER_BOT_NAME", ""),
 		V2InformerWebhookSecret: envOr("V2_INFORMER_WEBHOOK_SECRET", ""),
+
+		V2ClientPublicMinBalanceUSD:      envFloat("V2_CLIENT_PUBLIC_MIN_BALANCE_USD", 150.0),
+		V2ClientHardFloorUSD:             envFloat("V2_CLIENT_HARD_FLOOR_USD", 120.0),
+		V2HelperPostPaymentMinBalanceUSD: envFloat("V2_HELPER_POST_PAYMENT_MIN_BALANCE_USD", 1000.0),
+		V2InformerMinBalanceUSD:          envFloat("V2_INFORMER_MIN_BALANCE_USD", 1000.0),
 	}
 }
 

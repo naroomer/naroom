@@ -6,6 +6,19 @@
 
 	let t = $derived((key, params) => tFn($lang, key, params));
 
+	// ── Public config ──────────────────────────────────────────────────────────────
+	const DEFAULT_CONFIG = { client_public_min_usd: 150, client_hard_floor_usd: 120, helper_pre_invoice_min_usd: 1010, helper_post_payment_min_usd: 1000, informer_min_usd: 1000 };
+	let pubConfig = $state({ ...DEFAULT_CONFIG });
+	let configLoaded = $state(false);
+
+	async function fetchPubConfig() {
+		try {
+			const r = await fetch('/api/v2/public-config');
+			if (r.ok) pubConfig = { ...DEFAULT_CONFIG, ...(await r.json()) };
+		} catch {}
+		configLoaded = true;
+	}
+
 	// ── State ──────────────────────────────────────────────────────────────────
 	let step = $state('wallet');      // wallet | invoice | code | balance | form | telegram | done
 	let loading = $state(false);
@@ -50,6 +63,7 @@
 
 	// ── Restore on mount (idempotency) ─────────────────────────────────────────
 	onMount(() => {
+		fetchPubConfig();
 		const saved = sessionStorage.getItem('v2_client_state');
 		if (saved) {
 			try {
@@ -506,9 +520,9 @@
 		<!-- Step 4: Balance check result -->
 		<div class="section">
 			<h2>{t('v2.balance.title')}</h2>
-			{#if balanceUSD !== null && balanceUSD < 120}
+			{#if balanceUSD !== null && balanceUSD < pubConfig.client_hard_floor_usd}
 				<div class="err">
-					{t('v2.balance.low', { balance: balanceUSD.toFixed(0) })}
+					{t('v2.balance.low', { balance: balanceUSD.toFixed(0), min: '$' + pubConfig.client_hard_floor_usd })}
 				</div>
 				<button class="btn-secondary" onclick={recheckBalance} disabled={loading}>
 					{loading ? t('v2.loading') : t('v2.balance.recheck')}

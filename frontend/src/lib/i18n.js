@@ -340,7 +340,7 @@ en: {
 	'v2.hiw.client.visibility':        'A listing is visible for up to 24 hours at a time.',
 	'v2.hiw.client.reactivate':        'Within those 5 days you can reactivate your listing daily at no extra cost.',
 	'v2.hiw.client.reactivate_detail': 'Each activation re-checks your balance and reconnects Telegram for notifications.',
-	'v2.hiw.client.balance':           'Publicly stated minimum client balance: $150.',
+	'v2.hiw.client.balance':           'Publicly stated minimum client balance: ${min}.',
 	'v2.hiw.client.contact':           'Your contact for helpers: Telegram or Signal.',
 	'v2.hiw.client.board':             'Your listing stays on the board for the full 24 hours regardless of how many helpers respond.',
 
@@ -349,7 +349,7 @@ en: {
 	'v2.hiw.helper.cost':           'A helper purchases the client\'s contact for $10.',
 	'v2.hiw.helper.multi':          'The same contact can be purchased by multiple helpers.',
 	'v2.hiw.helper.no_refund':      'No refunds after payment.',
-	'v2.hiw.helper.balance':        'After purchase, at least $1,000 must remain on the helper\'s wallet.',
+	'v2.hiw.helper.balance':        'After purchase, at least ${min} must remain on the helper\'s wallet.',
 	'v2.hiw.helper.country':        'First successful purchase locks the helper\'s wallet profile to a country.',
 	'v2.hiw.helper.contact_reveal': 'After payment, the helper receives the Telegram or Signal specified by the client.',
 	'v2.hiw.helper.reputation':     'Helper and client reputation are both tied to the wallet.',
@@ -357,7 +357,7 @@ en: {
 
 	'v2.hiw.informer.title':      'Informer',
 	'v2.hiw.informer.desc':       'A separate Telegram bot that sends notifications about new listings in a chosen city.',
-	'v2.hiw.informer.balance':    'Requires a BTC/LTC address with a minimum balance of $1,000.',
+	'v2.hiw.informer.balance':    'Requires a BTC/LTC address with a minimum balance of ${min}.',
 	'v2.hiw.informer.not_helper': 'Connecting as an Informer is not a Helper registration and does not allow purchasing contacts.',
 
 	'v2.hiw.privacy.title':        'Privacy',
@@ -404,7 +404,7 @@ en: {
 
 	// ── V2 balance check ───────────────────────────────────────────────────────
 	'v2.balance.title':    'Wallet balance check',
-	'v2.balance.low':      'Balance too low: ${balance} on your wallet, minimum $150 required.',
+	'v2.balance.low':      'Balance too low: ${balance} on your wallet, minimum ${min} required.',
 	'v2.balance.ok':       'Balance verified: ${balance} USD.',
 	'v2.balance.recheck':  'Check balance again',
 	'v2.balance.continue': 'Continue',
@@ -490,7 +490,7 @@ en: {
 	'v2.inf.open_bot':        'Open Informer bot',
 	'v2.inf.waiting':         'Waiting for Telegram connection...',
 	'v2.inf.connected':       'Connected! You will receive new listing notifications for {city}.',
-	'v2.inf.low_balance':     'Balance below $1,000 floor. Use a wallet with at least $1,000 in BTC or LTC.',
+	'v2.inf.low_balance':     'Balance below required floor. Use a wallet with at least ${min} in BTC or LTC.',
 	'v2.inf.provider_error':  'Balance check temporarily unavailable. Please try again.',
 	'v2.inf.invalid_address': 'Invalid wallet address. Enter a valid BTC or LTC mainnet address.',
 	'v2.inf.invalid_city':    'City not supported. Choose from the list.',
@@ -798,7 +798,7 @@ ru: {
 	'v2.hiw.client.visibility':        'Объявление видно не более 24 часов подряд.',
 	'v2.hiw.client.reactivate':        'В течение этих 5 дней можно ежедневно активировать объявление без новой оплаты.',
 	'v2.hiw.client.reactivate_detail': 'При каждой активации повторно проверяется баланс и заново подключается Telegram для уведомлений.',
-	'v2.hiw.client.balance':           'Публично заявляемый минимальный баланс клиента: $150.',
+	'v2.hiw.client.balance':           'Публично заявляемый минимальный баланс клиента: ${min}.',
 	'v2.hiw.client.contact':           'Контакт для помощников: Telegram или Signal.',
 	'v2.hiw.client.board':             'Объявление остаётся на доске до окончания текущих 24 часов независимо от количества покупателей.',
 
@@ -807,7 +807,7 @@ ru: {
 	'v2.hiw.helper.cost':           'Помощник покупает контакт клиента за $10.',
 	'v2.hiw.helper.multi':          'Один контакт могут купить несколько помощников.',
 	'v2.hiw.helper.no_refund':      'После оплаты возврата нет.',
-	'v2.hiw.helper.balance':        'После покупки на кошельке помощника должно оставаться минимум $1 000.',
+	'v2.hiw.helper.balance':        'После покупки на кошельке помощника должно оставаться минимум ${min}.',
 	'v2.hiw.helper.country':        'Первая успешная покупка закрепляет за wallet-профилем страну.',
 	'v2.hiw.helper.contact_reveal': 'После оплаты помощник получает указанный клиентом Telegram или Signal.',
 	'v2.hiw.helper.reputation':     'Репутация помощника и клиента привязана к кошельку.',
@@ -815,7 +815,7 @@ ru: {
 
 	'v2.hiw.informer.title':      'Информатор',
 	'v2.hiw.informer.desc':       'Отдельный Telegram-бот с уведомлениями о новых объявлениях выбранного города.',
-	'v2.hiw.informer.balance':    'Требуется BTC/LTC-адрес с балансом минимум $1 000.',
+	'v2.hiw.informer.balance':    'Требуется BTC/LTC-адрес с балансом минимум ${min}.',
 	'v2.hiw.informer.not_helper': 'Подключение как информатор — это не регистрация помощника и не даёт права на покупку контактов.',
 
 	'v2.hiw.privacy.title':        'Конфиденциальность',
@@ -857,7 +857,7 @@ ru: {
 	'v2.code.continue': 'Продолжить',
 
 	'v2.balance.title':    'Проверка баланса кошелька',
-	'v2.balance.low':      'Баланс слишком низкий: ${balance} на кошельке, требуется минимум $150.',
+	'v2.balance.low':      'Баланс слишком низкий: ${balance} на кошельке, требуется минимум ${min}.',
 	'v2.balance.ok':       'Баланс подтверждён: ${balance} USD.',
 	'v2.balance.recheck':  'Проверить баланс снова',
 	'v2.balance.continue': 'Продолжить',
@@ -936,7 +936,7 @@ ru: {
 	'v2.inf.open_bot':        'Открыть Informer бот',
 	'v2.inf.waiting':         'Ожидаем подключение Telegram...',
 	'v2.inf.connected':       'Подключено! Вы будете получать уведомления о новых объявлениях в {city}.',
-	'v2.inf.low_balance':     'Баланс ниже $1 000. Используйте кошелёк с балансом не менее $1 000 в BTC или LTC.',
+	'v2.inf.low_balance':     'Баланс ниже необходимого порога. Используйте кошелёк с балансом не менее ${min} в BTC или LTC.',
 	'v2.inf.provider_error':  'Проверка баланса временно недоступна. Попробуйте позже.',
 	'v2.inf.invalid_address': 'Неверный адрес кошелька. Введите действительный адрес BTC или LTC mainnet.',
 	'v2.inf.invalid_city':    'Город не поддерживается. Выберите из списка.',
@@ -1238,7 +1238,7 @@ es: {
 	'v2.hiw.client.visibility':        'Un anuncio es visible por hasta 24 horas seguidas.',
 	'v2.hiw.client.reactivate':        'Durante esos 5 días puedes reactivar tu anuncio diariamente sin pagar de nuevo.',
 	'v2.hiw.client.reactivate_detail': 'Cada activación reverifica tu saldo y reconecta Telegram para notificaciones.',
-	'v2.hiw.client.balance':           'Saldo mínimo de cliente declarado públicamente: $150.',
+	'v2.hiw.client.balance':           'Saldo mínimo de cliente declarado públicamente: ${min}.',
 	'v2.hiw.client.contact':           'Tu contacto para helpers: Telegram o Signal.',
 	'v2.hiw.client.board':             'Tu anuncio permanece en el tablero las 24 horas completas independientemente de cuántos helpers respondan.',
 
@@ -1247,7 +1247,7 @@ es: {
 	'v2.hiw.helper.cost':           'Un helper compra el contacto del cliente por $10.',
 	'v2.hiw.helper.multi':          'El mismo contacto puede ser comprado por múltiples helpers.',
 	'v2.hiw.helper.no_refund':      'Sin reembolsos después del pago.',
-	'v2.hiw.helper.balance':        'Después de la compra, debe quedar al menos $1,000 en la billetera del helper.',
+	'v2.hiw.helper.balance':        'Después de la compra, debe quedar al menos ${min} en la billetera del helper.',
 	'v2.hiw.helper.country':        'La primera compra exitosa vincula el perfil de billetera del helper a un país.',
 	'v2.hiw.helper.contact_reveal': 'Tras el pago, el helper recibe el Telegram o Signal especificado por el cliente.',
 	'v2.hiw.helper.reputation':     'La reputación del helper y del cliente están vinculadas a la billetera.',
@@ -1255,7 +1255,7 @@ es: {
 
 	'v2.hiw.informer.title':      'Informador',
 	'v2.hiw.informer.desc':       'Un bot de Telegram separado que envía notificaciones sobre nuevos anuncios en una ciudad elegida.',
-	'v2.hiw.informer.balance':    'Requiere una dirección BTC/LTC con un saldo mínimo de $1,000.',
+	'v2.hiw.informer.balance':    'Requiere una dirección BTC/LTC con un saldo mínimo de ${min}.',
 	'v2.hiw.informer.not_helper': 'Conectarse como Informador no es un registro de Helper y no permite comprar contactos.',
 
 	'v2.hiw.privacy.title':        'Privacidad',
@@ -1297,7 +1297,7 @@ es: {
 	'v2.code.continue': 'Continuar',
 
 	'v2.balance.title':    'Verificación de saldo',
-	'v2.balance.low':      'Saldo insuficiente: ${balance} en tu billetera, se requieren $150 mínimo.',
+	'v2.balance.low':      'Saldo insuficiente: ${balance} en tu billetera, se requieren ${min} mínimo.',
 	'v2.balance.ok':       'Saldo verificado: ${balance} USD.',
 	'v2.balance.recheck':  'Verificar saldo nuevamente',
 	'v2.balance.continue': 'Continuar',
@@ -1376,7 +1376,7 @@ es: {
 	'v2.inf.open_bot':        'Abrir bot Informer',
 	'v2.inf.waiting':         'Esperando conexión de Telegram...',
 	'v2.inf.connected':       'Conectado. Recibirás notificaciones de nuevos anuncios en {city}.',
-	'v2.inf.low_balance':     'Saldo inferior a $1,000. Usa una billetera con al menos $1,000 en BTC o LTC.',
+	'v2.inf.low_balance':     'Saldo inferior al mínimo requerido. Usa una billetera con al menos ${min} en BTC o LTC.',
 	'v2.inf.provider_error':  'Verificación de saldo temporalmente no disponible. Intenta de nuevo.',
 	'v2.inf.invalid_address': 'Dirección de billetera inválida. Ingresa una dirección válida de BTC o LTC mainnet.',
 	'v2.inf.invalid_city':    'Ciudad no admitida. Elige de la lista.',
@@ -1679,7 +1679,7 @@ ka: {
 	'v2.hiw.client.visibility':        'განცხადება ხილულია ერთდროულად მაქსიმუმ 24 საათი.',
 	'v2.hiw.client.reactivate':        'ამ 5 დღის განმავლობაში შესაძლებელია ყოველდღიური გააქტიურება დამატებითი გადახდის გარეშე.',
 	'v2.hiw.client.reactivate_detail': 'თითოეული გააქტიურებისას ხელახლა მოწმდება ბალანსი და ხელახლა უკავშირდება Telegram შეტყობინებებისთვის.',
-	'v2.hiw.client.balance':           'საჯაროდ დეკლარირებული კლიენტის მინიმალური ბალანსი: $150.',
+	'v2.hiw.client.balance':           'საჯაროდ დეკლარირებული კლიენტის მინიმალური ბალანსი: ${min}.',
 	'v2.hiw.client.contact':           'კლიენტის კონტაქტი დამხმარეებისთვის: Telegram ან Signal.',
 	'v2.hiw.client.board':             'განცხადება რჩება დაფაზე სრული 24 საათის განმავლობაში, მიუხედავად მყიდველთა რაოდენობისა.',
 
@@ -1688,7 +1688,7 @@ ka: {
 	'v2.hiw.helper.cost':           'დამხმარე ყიდულობს კლიენტის კონტაქტს $10-ად.',
 	'v2.hiw.helper.multi':          'ერთი კონტაქტი შეიძლება შეიძინოს რამდენიმე დამხმარემ.',
 	'v2.hiw.helper.no_refund':      'გადახდის შემდეგ თანხა არ ბრუნდება.',
-	'v2.hiw.helper.balance':        'შეძენის შემდეგ დამხმარის საფულეზე უნდა დარჩეს მინიმუმ $1 000.',
+	'v2.hiw.helper.balance':        'შეძენის შემდეგ დამხმარის საფულეზე უნდა დარჩეს მინიმუმ ${min}.',
 	'v2.hiw.helper.country':        'პირველი წარმატებული შეძენა საფულის პროფილს ქვეყანას უკავშირებს.',
 	'v2.hiw.helper.contact_reveal': 'გადახდის შემდეგ დამხმარე იღებს კლიენტის მიერ მითითებულ Telegram ან Signal-ს.',
 	'v2.hiw.helper.reputation':     'დამხმარისა და კლიენტის რეპუტაცია საფულეს უკავშირდება.',
@@ -1696,7 +1696,7 @@ ka: {
 
 	'v2.hiw.informer.title':      'ინფორმატორი',
 	'v2.hiw.informer.desc':       'ცალკე Telegram-ბოტი, რომელიც აგზავნის შეტყობინებებს არჩეული ქალაქის ახალ განცხადებებზე.',
-	'v2.hiw.informer.balance':    'საჭიროა BTC/LTC-მისამართი მინიმუმ $1 000 ბალანსით.',
+	'v2.hiw.informer.balance':    'საჭიროა BTC/LTC-მისამართი მინიმუმ ${min} ბალანსით.',
 	'v2.hiw.informer.not_helper': 'ინფორმატორად დაკავშირება არ არის დამხმარის რეგისტრაცია და არ იძლევა კონტაქტების შეძენის უფლებას.',
 
 	'v2.hiw.privacy.title':        'კონფიდენციალობა',
@@ -1738,7 +1738,7 @@ ka: {
 	'v2.code.continue': 'გაგრძელება',
 
 	'v2.balance.title':    'საფულის ბალანსის შემოწმება',
-	'v2.balance.low':      'ბალანსი არასაკმარისია: ${balance} საფულეზე, საჭიროა მინიმუმ $150.',
+	'v2.balance.low':      'ბალანსი არასაკმარისია: ${balance} საფულეზე, საჭიროა მინიმუმ ${min}.',
 	'v2.balance.ok':       'ბალანსი დადასტურებულია: ${balance} USD.',
 	'v2.balance.recheck':  'ბალანსის ხელახლა შემოწმება',
 	'v2.balance.continue': 'გაგრძელება',
@@ -1817,7 +1817,7 @@ ka: {
 	'v2.inf.open_bot':            'Telegram-ბოტის გახსნა',
 	'v2.inf.waiting':             'ბოტი ელოდება შენს /start-ს. ქვემოთ დააჭირე ღილაკს.',
 	'v2.inf.connected':           'დაკავშირებულია. შეტყობინებები ჩართულია.',
-	'v2.inf.low_balance':         'ბალანსი $1,000-ზე დაბალია. გთხოვთ შეავსოთ საფულე.',
+	'v2.inf.low_balance':         'ბალანსი მინიმალური ზღვარის ქვემოთ. გამოიყენეთ საფულე მინიმუმ ${min} BTC ან LTC ბალანსით.',
 	'v2.inf.provider_error':      'სერვისი დროებით მიუწვდომელია. სცადეთ მოგვიანებით.',
 	'v2.inf.invalid_address':     'საფულის მისამართი არასწორია.',
 	'v2.inf.invalid_city':        'ქალაქი მხარდაჭერილი არ არის.',

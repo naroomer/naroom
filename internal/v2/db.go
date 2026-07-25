@@ -190,6 +190,22 @@ func connOutboxInspect(ctx context.Context, conn *sql.Conn) (needsRebuild, hasCl
 	return false, hasClaimedBy, hasClaimToken, hasLeaseUntil, nil
 }
 
+// connHelperPurchasesNeedsRebuild checks if v2_helper_purchases needs to be
+// rebuilt to update the CHECK constraints to use required_post_payment_floor_usd.
+func connHelperPurchasesNeedsRebuild(ctx context.Context, conn *sql.Conn) (bool, error) {
+	var createSQL string
+	err := conn.QueryRowContext(ctx,
+		`SELECT sql FROM sqlite_master WHERE type='table' AND name='v2_helper_purchases'`,
+	).Scan(&createSQL)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("connHelperPurchasesNeedsRebuild: %w", err)
+	}
+	return !strings.Contains(createSQL, "required_post_payment_floor_usd"), nil
+}
+
 // connRecipientsMigrateNeeded reads sqlite_master to check if the recipients table
 // has the old CHECK constraint (missing retry_exhausted). Returns (needsRebuild, err).
 func connRecipientsMigrateNeeded(ctx context.Context, conn *sql.Conn) (bool, error) {
@@ -263,12 +279,25 @@ func MigrateSchema(db *sql.DB) error {
 		}
 	}
 
+	// Task 10C: check new snapshot columns.
+	clientFlowsHardFloor, err := connColumnExists(ctx, conn, "v2_client_flows", "required_hard_floor_usd")
+	if err != nil {
+		return fmt.Errorf("v2: MigrateSchema: client_flows hard_floor check: %w", err)
+	}
+
+	helperPurchasesNeedsRebuild, err := connHelperPurchasesNeedsRebuild(ctx, conn)
+	if err != nil {
+		return fmt.Errorf("v2: MigrateSchema: helper_purchases rebuild check: %w", err)
+	}
+
 	// ── Early return: nothing to do ──────────────────────────────────────────
 	//
 	// Condition: outbox exists and is clean, all optional cols present,
-	// recipients exists and is current, attempts column present.
+	// recipients exists and is current, attempts column present,
+	// and Task 10C snapshot columns are present.
 	if outboxExists && !outboxNeedsRebuild && hasClaimedBy && hasClaimToken && hasLeaseUntil &&
-		recipientsExists && !recipientsNeedsRebuild && attemptsExists {
+		recipientsExists && !recipientsNeedsRebuild && attemptsExists &&
+		clientFlowsHardFloor && !helperPurchasesNeedsRebuild {
 		return nil
 	}
 
@@ -349,6 +378,22 @@ CREATE INDEX IF NOT EXISTS idx_v2_outbox_recipients_pending
 			if err := rebuildRecipientsInTx(ctx, tx); err != nil {
 				return fmt.Errorf("v2: MigrateSchema: rebuild recipients: %w", err)
 			}
+		}
+	}
+
+	// ── Task 10C: v2_client_flows.required_hard_floor_usd ────────────────────
+	if !clientFlowsHardFloor {
+		if _, err := tx.ExecContext(ctx,
+			`ALTER TABLE v2_client_flows ADD COLUMN required_hard_floor_usd REAL NOT NULL DEFAULT 120.0`,
+		); err != nil {
+			return fmt.Errorf("v2: MigrateSchema: add required_hard_floor_usd: %w", err)
+		}
+	}
+
+	// ── Task 10C: v2_helper_purchases rebuild with required_post_payment_floor_usd ──
+	if helperPurchasesNeedsRebuild {
+		if err := rebuildHelperPurchasesInTx(ctx, tx); err != nil {
+			return fmt.Errorf("v2: MigrateSchema: rebuild helper_purchases: %w", err)
 		}
 	}
 
@@ -489,6 +534,133 @@ FROM v2_informer_outbox_recipients`); err != nil {
 CREATE INDEX IF NOT EXISTS idx_v2_outbox_recipients_pending
     ON v2_informer_outbox_recipients(outbox_id) WHERE state='pending'`); err != nil {
 		return fmt.Errorf("rebuildRecipientsInTx: index: %w", err)
+	}
+
+	return nil
+}
+
+// rebuildHelperPurchasesInTx rebuilds v2_helper_purchases with required_post_payment_floor_usd
+// and updated CHECK constraints within an already-open transaction.
+func rebuildHelperPurchasesInTx(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `
+CREATE TABLE v2_helper_purchases_new (
+    id                        TEXT PRIMARY KEY,
+    listing_id                TEXT NOT NULL REFERENCES v2_listings(id),
+    helper_profile_id         TEXT NOT NULL REFERENCES v2_helper_profiles(id),
+    browser_token_hash        TEXT NOT NULL UNIQUE,
+    state                     TEXT NOT NULL DEFAULT 'awaiting_payment'
+                                   CHECK (state IN (
+                                       'awaiting_payment', 'payment_detected',
+                                       'payment_confirmed', 'paid_low_balance',
+                                       'contact_ready', 'failed',
+                                       'invoice_expired', 'receipt_expired'
+                                   )),
+    country_code_snapshot     TEXT NOT NULL,
+    contact_ready_at          INTEGER,
+    first_revealed_at         INTEGER,
+    receipt_expires_at        INTEGER,
+    balance_retry_deadline_at INTEGER,
+    last_balance_usd          REAL CHECK (last_balance_usd IS NULL
+                                          OR (last_balance_usd >= 0 AND last_balance_usd < 1e15)),
+    last_balance_checked_at   INTEGER,
+    required_post_payment_floor_usd REAL NOT NULL DEFAULT 1000.0,
+    created_at                INTEGER NOT NULL,
+    updated_at                INTEGER NOT NULL,
+
+    CHECK (length(id) = 64 AND NOT (id GLOB '*[^0-9a-f]*')),
+    CHECK (length(browser_token_hash) = 64 AND NOT (browser_token_hash GLOB '*[^0-9a-f]*')),
+    CHECK (length(country_code_snapshot) = 2
+           AND NOT (country_code_snapshot GLOB '*[^A-Z]*')),
+    CHECK (first_revealed_at IS NULL OR receipt_expires_at = first_revealed_at + 86400),
+    CHECK (first_revealed_at IS NULL OR contact_ready_at IS NULL
+           OR first_revealed_at >= contact_ready_at),
+    CHECK (
+        (state = 'awaiting_payment'
+            AND last_balance_usd IS NULL AND last_balance_checked_at IS NULL
+            AND balance_retry_deadline_at IS NULL
+            AND contact_ready_at IS NULL
+            AND first_revealed_at IS NULL AND receipt_expires_at IS NULL)
+        OR
+        (state = 'payment_detected'
+            AND last_balance_usd IS NULL AND last_balance_checked_at IS NULL
+            AND balance_retry_deadline_at IS NULL
+            AND contact_ready_at IS NULL
+            AND first_revealed_at IS NULL AND receipt_expires_at IS NULL)
+        OR
+        (state = 'payment_confirmed'
+            AND balance_retry_deadline_at IS NOT NULL
+            AND last_balance_usd IS NULL AND last_balance_checked_at IS NULL
+            AND contact_ready_at IS NULL
+            AND first_revealed_at IS NULL AND receipt_expires_at IS NULL)
+        OR
+        (state = 'paid_low_balance'
+            AND balance_retry_deadline_at IS NOT NULL
+            AND last_balance_usd IS NOT NULL AND last_balance_usd < required_post_payment_floor_usd
+            AND last_balance_checked_at IS NOT NULL
+            AND contact_ready_at IS NULL
+            AND first_revealed_at IS NULL AND receipt_expires_at IS NULL)
+        OR
+        (state = 'contact_ready'
+            AND balance_retry_deadline_at IS NOT NULL
+            AND last_balance_usd IS NOT NULL AND last_balance_usd >= required_post_payment_floor_usd
+            AND last_balance_checked_at IS NOT NULL
+            AND contact_ready_at IS NOT NULL
+            AND (first_revealed_at IS NULL) = (receipt_expires_at IS NULL))
+        OR
+        (state = 'invoice_expired'
+            AND last_balance_usd IS NULL AND last_balance_checked_at IS NULL
+            AND balance_retry_deadline_at IS NULL
+            AND contact_ready_at IS NULL
+            AND first_revealed_at IS NULL AND receipt_expires_at IS NULL)
+        OR
+        (state = 'failed'
+            AND contact_ready_at IS NULL
+            AND first_revealed_at IS NULL AND receipt_expires_at IS NULL)
+        OR
+        (state = 'receipt_expired'
+            AND contact_ready_at IS NOT NULL
+            AND balance_retry_deadline_at IS NOT NULL
+            AND last_balance_usd IS NOT NULL AND last_balance_usd >= required_post_payment_floor_usd
+            AND last_balance_checked_at IS NOT NULL
+            AND (first_revealed_at IS NULL) = (receipt_expires_at IS NULL))
+    ),
+    CHECK (updated_at >= created_at)
+)`); err != nil {
+		return fmt.Errorf("rebuildHelperPurchasesInTx: create new: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO v2_helper_purchases_new
+    (id, listing_id, helper_profile_id, browser_token_hash, state,
+     country_code_snapshot, contact_ready_at, first_revealed_at, receipt_expires_at,
+     balance_retry_deadline_at, last_balance_usd, last_balance_checked_at,
+     required_post_payment_floor_usd, created_at, updated_at)
+SELECT
+    id, listing_id, helper_profile_id, browser_token_hash, state,
+    country_code_snapshot, contact_ready_at, first_revealed_at, receipt_expires_at,
+    balance_retry_deadline_at, last_balance_usd, last_balance_checked_at,
+    COALESCE(required_post_payment_floor_usd, 1000.0),
+    created_at, updated_at
+FROM v2_helper_purchases`); err != nil {
+		return fmt.Errorf("rebuildHelperPurchasesInTx: copy data: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `DROP TABLE v2_helper_purchases`); err != nil {
+		return fmt.Errorf("rebuildHelperPurchasesInTx: drop old: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE v2_helper_purchases_new RENAME TO v2_helper_purchases`); err != nil {
+		return fmt.Errorf("rebuildHelperPurchasesInTx: rename: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+CREATE INDEX IF NOT EXISTS idx_v2_helper_purchases_profile ON v2_helper_purchases(helper_profile_id);
+CREATE INDEX IF NOT EXISTS idx_v2_helper_purchases_listing ON v2_helper_purchases(listing_id);
+CREATE INDEX IF NOT EXISTS idx_v2_helper_purchases_state   ON v2_helper_purchases(state);
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_v2_helper_purchases_active
+    ON v2_helper_purchases(helper_profile_id, listing_id)
+    WHERE state NOT IN ('invoice_expired', 'failed', 'receipt_expired');
+`); err != nil {
+		return fmt.Errorf("rebuildHelperPurchasesInTx: indexes: %w", err)
 	}
 
 	return nil
