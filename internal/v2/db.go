@@ -239,6 +239,20 @@ func connRecipientsMigrateNeeded(ctx context.Context, conn *sql.Conn) (bool, err
 	return !strings.Contains(createSQL, "retry_exhausted"), nil
 }
 
+// connHasLegacyHelperNames returns true if v2_helper_profiles has any rows
+// with a public_name that does not contain the "·" alias separator.
+// Legacy names have the form "adj_noun_<32hex>" (no middle dot).
+func connHasLegacyHelperNames(ctx context.Context, conn *sql.Conn) (bool, error) {
+	var count int
+	err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM v2_helper_profiles WHERE public_name NOT LIKE '%·%'`,
+	).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("connHasLegacyHelperNames: %w", err)
+	}
+	return count > 0, nil
+}
+
 // MigrateSchema applies incremental V2 schema migrations on top of ApplySchema.
 // Each step is idempotent: column existence is checked via PRAGMA table_info
 // before issuing ALTER TABLE. No error-string matching.
@@ -317,15 +331,31 @@ func MigrateSchema(db *sql.DB) error {
 		return fmt.Errorf("v2: MigrateSchema: listings display_name unique check: %w", err)
 	}
 
+	// Task 10D fix: check whether any helper profiles still have legacy names.
+	// Legacy format has no "·" separator; new alias format always contains "·".
+	helperProfilesTableExists, err := connTableExists(ctx, conn, "v2_helper_profiles")
+	if err != nil {
+		return fmt.Errorf("v2: MigrateSchema: helper_profiles table check: %w", err)
+	}
+	hasLegacyHelperNames := false
+	if helperProfilesTableExists {
+		hasLegacyHelperNames, err = connHasLegacyHelperNames(ctx, conn)
+		if err != nil {
+			return fmt.Errorf("v2: MigrateSchema: legacy helper names check: %w", err)
+		}
+	}
+
 	// ── Early return: nothing to do ──────────────────────────────────────────
 	//
 	// Condition: outbox exists and is clean, all optional cols present,
 	// recipients exists and is current, attempts column present,
-	// Task 10C snapshot columns are present, and Task 10D columns are correct.
+	// Task 10C snapshot columns are present, Task 10D columns are correct,
+	// and no legacy helper profile names remain.
 	if outboxExists && !outboxNeedsRebuild && hasClaimedBy && hasClaimToken && hasLeaseUntil &&
 		recipientsExists && !recipientsNeedsRebuild && attemptsExists &&
 		clientFlowsHardFloor && !helperPurchasesNeedsRebuild &&
-		clientProfilesPublicName && !listingsDisplayNameHasUnique {
+		clientProfilesPublicName && !listingsDisplayNameHasUnique &&
+		!hasLegacyHelperNames {
 		return nil
 	}
 
@@ -503,6 +533,57 @@ CREATE INDEX IF NOT EXISTS idx_v2_outbox_recipients_pending
 				WHERE f.id = v2_listings.flow_id AND cp.public_name != ''
 			)`); err != nil {
 			return fmt.Errorf("v2: MigrateSchema: update listings display_name: %w", err)
+		}
+	}
+
+	// ── Task 10D fix: migrate legacy helper profile names to alias format ────
+	// Legacy format: "adj_noun_<32hex>" (contains underscore, no "·" character).
+	// New format: "Adj Noun · XXXX"
+	// Only migrate rows where public_name does not contain the middle dot separator.
+	legacyHelperRows, err := tx.QueryContext(ctx,
+		`SELECT id FROM v2_helper_profiles WHERE public_name NOT LIKE '%·%'`)
+	if err != nil {
+		return fmt.Errorf("v2: MigrateSchema: list legacy helper profiles: %w", err)
+	}
+	var legacyHelperIDs []string
+	for legacyHelperRows.Next() {
+		var hid string
+		if err := legacyHelperRows.Scan(&hid); err != nil {
+			legacyHelperRows.Close()
+			return fmt.Errorf("v2: MigrateSchema: scan legacy helper profile id: %w", err)
+		}
+		legacyHelperIDs = append(legacyHelperIDs, hid)
+	}
+	legacyHelperRows.Close()
+	if err := legacyHelperRows.Err(); err != nil {
+		return fmt.Errorf("v2: MigrateSchema: legacy helper profiles iter: %w", err)
+	}
+	genHelper := NewRandomAliasGenerator()
+	for _, hid := range legacyHelperIDs {
+		var newAlias string
+		var genErr error
+		migrated := false
+		for attempt := 0; attempt < 10; attempt++ {
+			newAlias, genErr = genHelper.GenerateAlias()
+			if genErr != nil {
+				return fmt.Errorf("v2: MigrateSchema: generate helper alias: %w", genErr)
+			}
+			_, upErr := tx.ExecContext(ctx,
+				`UPDATE v2_helper_profiles SET public_name = ?, updated_at = strftime('%s', 'now') WHERE id = ?`,
+				newAlias, hid,
+			)
+			if upErr == nil {
+				migrated = true
+				break
+			}
+			if isSQLiteUniqueOnColumn(upErr, "v2_helper_profiles.public_name") {
+				// Collision: regenerate alias and retry.
+				continue
+			}
+			return fmt.Errorf("v2: MigrateSchema: update helper profile alias: %w", upErr)
+		}
+		if !migrated {
+			return fmt.Errorf("v2: MigrateSchema: exceeded 10 alias retries for helper profile %s", hid)
 		}
 	}
 

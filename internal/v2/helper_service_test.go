@@ -29,7 +29,7 @@ func newTestHelperService(t *testing.T) (*HelperPurchaseService, *sql.DB) {
 		db,
 		testHMACKey,
 		cipher,
-		NewRandomDisplayNameGenerator(),
+		NewRandomAliasGenerator(),
 		time.Now,
 	)
 	if err != nil {
@@ -730,7 +730,7 @@ func TestHelperCountryLock_ConcurrentDifferentCountries(t *testing.T) {
 	defer db.Close()
 	cipher, _ := NewAESGCMContactCipher(testAESKey, "v1")
 
-	svc1, _ := NewHelperPurchaseService(db, testHMACKey, cipher, NewRandomDisplayNameGenerator(), fixedNow)
+	svc1, _ := NewHelperPurchaseService(db, testHMACKey, cipher, NewRandomAliasGenerator(), fixedNow)
 
 	addr := "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
 	normalized, currency, _ := validateAndNormalizeAddress(addr)

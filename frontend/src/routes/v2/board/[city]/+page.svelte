@@ -11,6 +11,7 @@
 	let listings = $state([]);
 	let loading = $state(true);
 	let error = $state('');
+	let savedListingIds = $state(new Set());
 
 	function urgencyColor(u) {
 		if (u === 'urgent')   return 'var(--urgent)';
@@ -50,7 +51,19 @@
 		}
 	}
 
-	onMount(loadBoard);
+	onMount(() => {
+		loadBoard();
+		// Scan localStorage for any saved helper purchases
+		try {
+			for (let i = 0; i < localStorage.length; i++) {
+				const key = localStorage.key(i);
+				if (key && key.startsWith('v2_hpt_')) {
+					const lhptId = key.replace('v2_hpt_', '');
+					savedListingIds = new Set([...savedListingIds, lhptId]);
+				}
+			}
+		} catch {}
+	});
 
 	// Reload when city changes (SvelteKit re-uses the same component instance)
 	$effect(() => { city; loadBoard(); });
@@ -117,6 +130,9 @@
 						{/if}
 						{#if l.display_name}
 							<div class="client-name">{l.display_name}</div>
+						{/if}
+						{#if savedListingIds.has(l.id)}
+							<div class="continue-badge">{t('v2.helper.continue_purchase')}</div>
 						{/if}
 						<div class="footer">
 							<span class="time">{timeLeft(l.time_left_sec)}</span>
@@ -279,4 +295,15 @@
 	}
 	.empty-label { font-size: 11px; color: var(--text-faint); letter-spacing: 1px; text-transform: uppercase; }
 	.client-name { font-size: 10px; color: var(--text-faint); font-style: italic; }
+
+	.continue-badge {
+		font-size: 10px;
+		background: var(--accent);
+		color: var(--bg);
+		border-radius: 4px;
+		padding: 2px 6px;
+		margin-top: 6px;
+		font-weight: 600;
+		display: inline-block;
+	}
 </style>

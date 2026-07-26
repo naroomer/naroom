@@ -272,7 +272,7 @@ func TestHelperHTTP_RevealExpiryAndIdempotency(t *testing.T) {
 	db, _ := OpenMemory()
 	defer db.Close()
 	cipher, _ := NewAESGCMContactCipher(testAESKey, "v1")
-	svc, _ := NewHelperPurchaseService(db, testHMACKey, cipher, NewRandomDisplayNameGenerator(), func() time.Time { return now })
+	svc, _ := NewHelperPurchaseService(db, testHMACKey, cipher, NewRandomAliasGenerator(), func() time.Time { return now })
 
 	listingID := mustCreateVisibleListing(t, db, "US")
 	addr := testBTCBech32Addr
@@ -332,7 +332,7 @@ func TestHelperHTTP_RevealAfterDeadlines(t *testing.T) {
 	db, _ := OpenMemory()
 	defer db.Close()
 	cipher, _ := NewAESGCMContactCipher(testAESKey, "v1")
-	svc, _ := NewHelperPurchaseService(db, testHMACKey, cipher, NewRandomDisplayNameGenerator(), func() time.Time { return pastTime })
+	svc, _ := NewHelperPurchaseService(db, testHMACKey, cipher, NewRandomAliasGenerator(), func() time.Time { return pastTime })
 
 	listingID := mustCreateVisibleListing(t, db, "US")
 	addr := testBTCBech32Addr
@@ -346,7 +346,7 @@ func TestHelperHTTP_RevealAfterDeadlines(t *testing.T) {
 
 	// Now current time is 25h past contact_ready_at → reveal deadline passed.
 	nowFn := func() time.Time { return time.Now() }
-	svc2, _ := NewHelperPurchaseService(db, testHMACKey, cipher, NewRandomDisplayNameGenerator(), nowFn)
+	svc2, _ := NewHelperPurchaseService(db, testHMACKey, cipher, NewRandomAliasGenerator(), nowFn)
 
 	issuer := &fakeHelperIssuer{}
 	bal := &fakeHelperBalance{result: 1500.0}
@@ -371,7 +371,7 @@ func TestHelperHTTP_ConcurrentFirstReveal(t *testing.T) {
 	db, _ := OpenMemory()
 	defer db.Close()
 	cipher, _ := NewAESGCMContactCipher(testAESKey, "v1")
-	svc, _ := NewHelperPurchaseService(db, testHMACKey, cipher, NewRandomDisplayNameGenerator(), func() time.Time { return now })
+	svc, _ := NewHelperPurchaseService(db, testHMACKey, cipher, NewRandomAliasGenerator(), func() time.Time { return now })
 
 	listingID := mustCreateVisibleListing(t, db, "US")
 	addr := testBTCBech32Addr
@@ -662,7 +662,7 @@ func TestHelperPurchaseLifecycle(t *testing.T) {
 	defer db.Close()
 	cipher, _ := NewAESGCMContactCipher(testAESKey, "v1")
 	clockFn := func() time.Time { return now }
-	svc, _ := NewHelperPurchaseService(db, testHMACKey, cipher, NewRandomDisplayNameGenerator(), clockFn)
+	svc, _ := NewHelperPurchaseService(db, testHMACKey, cipher, NewRandomAliasGenerator(), clockFn)
 
 	listingID := mustCreateVisibleListing(t, db, "US")
 	addr := testBTCBech32Addr

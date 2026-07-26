@@ -81,14 +81,15 @@ type HelperInvoiceDraft struct {
 // HelperPurchaseView is the safe outward-facing view of a Helper purchase.
 // Never includes raw wallet, browser token, raw txid, or contact plaintext.
 type HelperPurchaseView struct {
-	PurchaseID    string
-	ProfileID     string
-	ListingID     string
-	PublicName    string
-	CountryCode   string // snapshot at purchase creation
-	State         string
-	InvoiceStatus string
-	Currency      string
+	PurchaseID         string
+	ProfileID          string
+	ListingID          string
+	HelperPublicName   string // the helper's own platform alias
+	ListingDisplayName string // the client listing's display_name (client's alias)
+	CountryCode        string // snapshot at purchase creation
+	State              string
+	InvoiceStatus      string
+	Currency           string
 
 	// Invoice snapshot.
 	PaymentAddress          string
@@ -147,7 +148,7 @@ type HelperPurchaseService struct {
 	db      *sql.DB
 	hmacKey []byte
 	cipher  ContactCipher
-	names   DisplayNameGenerator
+	aliases AliasGenerator
 	now     func() time.Time
 	policy  V2BalancePolicy
 	// _testHook is called inside setHelperContactReady between the country read and
@@ -166,7 +167,7 @@ func NewHelperPurchaseService(
 	db *sql.DB,
 	hmacKey []byte,
 	cipher ContactCipher,
-	names DisplayNameGenerator,
+	aliases AliasGenerator,
 	now func() time.Time,
 ) (*HelperPurchaseService, error) {
 	if db == nil {
@@ -178,8 +179,8 @@ func NewHelperPurchaseService(
 	if cipher == nil {
 		return nil, errors.New("v2: NewHelperPurchaseService: cipher must not be nil")
 	}
-	if names == nil {
-		return nil, errors.New("v2: NewHelperPurchaseService: names must not be nil")
+	if aliases == nil {
+		return nil, errors.New("v2: NewHelperPurchaseService: aliases must not be nil")
 	}
 	if now == nil {
 		now = time.Now
@@ -188,7 +189,7 @@ func NewHelperPurchaseService(
 		db:      db,
 		hmacKey: hmacKey,
 		cipher:  cipher,
-		names:   names,
+		aliases: aliases,
 		now:     now,
 		policy:  DefaultV2BalancePolicy(),
 	}, nil
@@ -271,9 +272,9 @@ func (hs *HelperPurchaseService) GetOrCreateProfile(
 	newProfileID := newID()
 
 	for attempt := 0; attempt < maxHelperNameRetries; attempt++ {
-		name, genErr := hs.names.Generate()
+		name, genErr := hs.aliases.GenerateAlias()
 		if genErr != nil {
-			return "", nil, "", fmt.Errorf("v2: GetOrCreateProfile: generate name: %w", genErr)
+			return "", nil, "", fmt.Errorf("v2: GetOrCreateProfile: generate alias: %w", genErr)
 		}
 
 		_, insErr := hs.db.Exec(`
@@ -305,14 +306,14 @@ func (hs *HelperPurchaseService) GetOrCreateProfile(
 			return profileID, countryCode, publicName, nil
 		}
 
-		// public_name collision — retry with a new name.
+		// public_name collision — retry with a new alias.
 		if isSQLiteUniqueOnColumn(insErr, "v2_helper_profiles.public_name") {
 			continue
 		}
 
 		return "", nil, "", fmt.Errorf("v2: GetOrCreateProfile: insert: %w", insErr)
 	}
-	return "", nil, "", fmt.Errorf("v2: GetOrCreateProfile: exceeded %d name retries", maxHelperNameRetries)
+	return "", nil, "", fmt.Errorf("v2: GetOrCreateProfile: exceeded %d alias retries", maxHelperNameRetries)
 }
 
 // getOrCreateProfileTx does the same as GetOrCreateProfile but inside a transaction.
@@ -337,9 +338,9 @@ func (hs *HelperPurchaseService) getOrCreateProfileTx(tx *sql.Tx, currency, norm
 	newProfileID := newID()
 
 	for attempt := 0; attempt < maxHelperNameRetries; attempt++ {
-		name, genErr := hs.names.Generate()
+		name, genErr := hs.aliases.GenerateAlias()
 		if genErr != nil {
-			return "", "", fmt.Errorf("v2: getOrCreateProfileTx: generate name: %w", genErr)
+			return "", "", fmt.Errorf("v2: getOrCreateProfileTx: generate alias: %w", genErr)
 		}
 
 		_, insErr := tx.Exec(`
@@ -368,14 +369,14 @@ func (hs *HelperPurchaseService) getOrCreateProfileTx(tx *sql.Tx, currency, norm
 			return profileID, publicName, nil
 		}
 
-		// public_name collision — retry with a new name.
+		// public_name collision — retry with a new alias.
 		if isSQLiteUniqueOnColumn(insErr, "v2_helper_profiles.public_name") {
 			continue
 		}
 
 		return "", "", fmt.Errorf("v2: getOrCreateProfileTx: insert: %w", insErr)
 	}
-	return "", "", fmt.Errorf("v2: getOrCreateProfileTx: exceeded %d name retries", maxHelperNameRetries)
+	return "", "", fmt.Errorf("v2: getOrCreateProfileTx: exceeded %d alias retries", maxHelperNameRetries)
 }
 
 // ── GetListingForPurchase ──────────────────────────────────────────────────────
@@ -1597,10 +1598,12 @@ func (hs *HelperPurchaseService) readPurchaseView(purchaseID string) (HelperPurc
 		       i.payment_address, i.amount_usd_cents, i.amount_atomic,
 		       i.detection_deadline_at,
 		       i.detected_txid_hash,
-		       i.payment_detected_at, i.confirmation_deadline_at, i.confirmed_at
+		       i.payment_detected_at, i.confirmation_deadline_at, i.confirmed_at,
+		       COALESCE(l.display_name, '')
 		FROM v2_helper_purchases p
 		JOIN v2_helper_profiles hp ON hp.id = p.helper_profile_id
 		JOIN v2_helper_invoices i ON i.purchase_id = p.id
+		LEFT JOIN v2_listings l ON l.id = p.listing_id
 		WHERE p.id = ?`
 
 	var (
@@ -1626,12 +1629,13 @@ func (hs *HelperPurchaseService) readPurchaseView(purchaseID string) (HelperPurc
 		&retryDeadline,
 		&lastBalUSD, &lastBalAt,
 		&createdAt, &updatedAt,
-		&v.PublicName, &v.Currency,
+		&v.HelperPublicName, &v.Currency,
 		&invoiceID, &v.InvoiceStatus,
 		&v.PaymentAddress, &v.AmountUSDCents, &v.AmountAtomic,
 		&detDeadline,
 		&txidHash,
 		&payDetectedAt, &confirmDeadline, &confirmedAt,
+		&v.ListingDisplayName,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return HelperPurchaseView{}, ErrHelperNotFound

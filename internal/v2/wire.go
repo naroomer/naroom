@@ -125,7 +125,7 @@ func WireV2System(db *sql.DB, keys V2Keys, bots V2BotConfig, adapters V2Adapters
 	listingSvc.SetPolicy(policy)
 
 	// ── Helper purchase service ────────────────────────────────────────────────
-	helperSvc, err := NewHelperPurchaseService(db, keys.HMACKey, keys.ContactCipher, names, now)
+	helperSvc, err := NewHelperPurchaseService(db, keys.HMACKey, keys.ContactCipher, aliases, now)
 	if err != nil {
 		return nil, fmt.Errorf("v2: WireV2System: helper service: %w", err)
 	}

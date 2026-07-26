@@ -191,11 +191,12 @@ type helperCreateRequest struct {
 }
 
 type helperCreateResponse struct {
-	PurchaseToken string            `json:"purchase_token,omitempty"` // raw token — returned ONCE (omitted on idempotent)
-	PurchaseID    string            `json:"purchase_id"`
-	Currency      string            `json:"currency"`
-	PublicName    string            `json:"public_name"`
-	Invoice       helperInvoiceJSON `json:"invoice"`
+	PurchaseToken    string            `json:"purchase_token,omitempty"` // raw token — returned ONCE (omitted on idempotent)
+	PurchaseID       string            `json:"purchase_id"`
+	Currency         string            `json:"currency"`
+	HelperPublicName string            `json:"helper_public_name"`
+	ClientPublicName string            `json:"client_public_name"`
+	Invoice          helperInvoiceJSON `json:"invoice"`
 	// Notice fields — informational only.
 	CountryCode                   string `json:"country_code"`
 	InvoiceUSDCents               int    `json:"invoice_usd_cents"`
@@ -369,7 +370,8 @@ func writeHelperCreateResponse(w http.ResponseWriter, isNew bool, view HelperPur
 	resp := helperCreateResponse{
 		PurchaseID:                    view.PurchaseID,
 		Currency:                      view.Currency,
-		PublicName:                    view.PublicName,
+		HelperPublicName:              view.HelperPublicName,
+		ClientPublicName:              view.ListingDisplayName,
 		Invoice:                       toHelperInvoiceJSON(view),
 		CountryCode:                   view.CountryCode,
 		InvoiceUSDCents:               helperInvoiceUSDCents,
@@ -395,12 +397,13 @@ type helperRestoreRequest struct {
 }
 
 type helperRestoreResponse struct {
-	PurchaseID string            `json:"purchase_id"`
-	Phase      string            `json:"phase"`
-	NextAction string            `json:"next_action"`
-	Currency   string            `json:"currency"`
-	PublicName string            `json:"public_name"`
-	Invoice    helperInvoiceJSON `json:"invoice"`
+	PurchaseID       string            `json:"purchase_id"`
+	Phase            string            `json:"phase"`
+	NextAction       string            `json:"next_action"`
+	Currency         string            `json:"currency"`
+	HelperPublicName string            `json:"helper_public_name"`
+	ClientPublicName string            `json:"client_public_name"`
+	Invoice          helperInvoiceJSON `json:"invoice"`
 
 	BalanceRetryDeadlineAt *int64   `json:"balance_retry_deadline_at,omitempty"`
 	LastBalanceUSD         *float64 `json:"last_balance_usd,omitempty"`
@@ -471,12 +474,13 @@ func (h *HelperPurchaseHandler) handleRestore(w http.ResponseWriter, r *http.Req
 
 	phase, nextAction := helperPurchasePhase(view.State)
 	resp := helperRestoreResponse{
-		PurchaseID: view.PurchaseID,
-		Phase:      phase,
-		NextAction: nextAction,
-		Currency:   view.Currency,
-		PublicName: view.PublicName,
-		Invoice:    toHelperInvoiceJSON(view),
+		PurchaseID:       view.PurchaseID,
+		Phase:            phase,
+		NextAction:       nextAction,
+		Currency:         view.Currency,
+		HelperPublicName: view.HelperPublicName,
+		ClientPublicName: view.ListingDisplayName,
+		Invoice:          toHelperInvoiceJSON(view),
 	}
 	if view.BalanceRetryDeadlineAt != nil {
 		u := view.BalanceRetryDeadlineAt.Unix()
@@ -506,10 +510,12 @@ type helperRecheckRequest struct {
 }
 
 type helperRecheckResponse struct {
-	PurchaseID     string   `json:"purchase_id"`
-	Phase          string   `json:"phase"`
-	NextAction     string   `json:"next_action"`
-	LastBalanceUSD *float64 `json:"last_balance_usd,omitempty"`
+	PurchaseID       string   `json:"purchase_id"`
+	Phase            string   `json:"phase"`
+	NextAction       string   `json:"next_action"`
+	LastBalanceUSD   *float64 `json:"last_balance_usd,omitempty"`
+	HelperPublicName string   `json:"helper_public_name"`
+	ClientPublicName string   `json:"client_public_name"`
 }
 
 func (h *HelperPurchaseHandler) handleRecheckBalance(w http.ResponseWriter, r *http.Request) {
@@ -594,10 +600,12 @@ func (h *HelperPurchaseHandler) handleRecheckBalance(w http.ResponseWriter, r *h
 
 	phase, nextAction := helperPurchasePhase(updated.State)
 	resp := helperRecheckResponse{
-		PurchaseID:     updated.PurchaseID,
-		Phase:          phase,
-		NextAction:     nextAction,
-		LastBalanceUSD: updated.LastBalanceUSD,
+		PurchaseID:       updated.PurchaseID,
+		Phase:            phase,
+		NextAction:       nextAction,
+		LastBalanceUSD:   updated.LastBalanceUSD,
+		HelperPublicName: updated.HelperPublicName,
+		ClientPublicName: updated.ListingDisplayName,
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(resp) //nolint:errcheck
@@ -615,6 +623,8 @@ type helperRevealResponse struct {
 	ContactType      string `json:"contact_type"`
 	Contact          string `json:"contact"`
 	ReceiptExpiresAt int64  `json:"receipt_expires_at"`
+	HelperPublicName string `json:"helper_public_name"`
+	ClientPublicName string `json:"client_public_name"`
 }
 
 func (h *HelperPurchaseHandler) handleReveal(w http.ResponseWriter, r *http.Request) {
@@ -681,6 +691,8 @@ func (h *HelperPurchaseHandler) handleReveal(w http.ResponseWriter, r *http.Requ
 		ContactType:      result.ContactType,
 		Contact:          result.Contact,
 		ReceiptExpiresAt: result.ReceiptExpiresAt.Unix(),
+		HelperPublicName: view.HelperPublicName,
+		ClientPublicName: view.ListingDisplayName,
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(resp) //nolint:errcheck

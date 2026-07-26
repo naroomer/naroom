@@ -141,7 +141,7 @@ func TestHelperWatcher_TopUpToContactReady(t *testing.T) {
 	defer db.Close()
 
 	cipher, _ := NewAESGCMContactCipher(testAESKey, "v1")
-	svc, _ := NewHelperPurchaseService(db, testHMACKey, cipher, NewRandomDisplayNameGenerator(), func() time.Time { return now })
+	svc, _ := NewHelperPurchaseService(db, testHMACKey, cipher, NewRandomAliasGenerator(), func() time.Time { return now })
 
 	btcWallet := testBTCBech32Addr
 	listingID := mustCreateVisibleListing(t, db, "US")
@@ -185,7 +185,7 @@ func TestHelperWatcher_RetryAfterDeadline(t *testing.T) {
 	defer db.Close()
 
 	cipher, _ := NewAESGCMContactCipher(testAESKey, "v1")
-	svc, _ := NewHelperPurchaseService(db, testHMACKey, cipher, NewRandomDisplayNameGenerator(), func() time.Time { return now })
+	svc, _ := NewHelperPurchaseService(db, testHMACKey, cipher, NewRandomAliasGenerator(), func() time.Time { return now })
 
 	btcWallet := testBTCBech32Addr
 	listingID := mustCreateVisibleListing(t, db, "US")
