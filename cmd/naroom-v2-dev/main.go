@@ -53,6 +53,15 @@ const devBotUsername = "naroom_devtestbot" // must end in "bot", 5-32 chars
 // devFakeChatID is the fake Telegram chat ID used for all dev Telegram bindings.
 const devFakeChatID int64 = 123456789
 
+// devPolicy is the balance policy used by all dev/test services.
+// Smaller thresholds than production: pre-invoice = $60, post-payment = $50, fee = $10.
+var devPolicy = v2.V2BalancePolicy{
+	ClientPublicMinUSD:      10.0,
+	ClientHardFloorUSD:      8.0,
+	HelperPostPaymentMinUSD: 50.0,
+	InformerMinUSD:          50.0,
+}
+
 // ── Informer dev keys (separate from client bot) ─────────────────────────────
 
 var (
@@ -161,6 +170,7 @@ func (s *devHelperIssuer) CreateHelperInvoice(_ context.Context, currency string
 type devBalanceReader struct {
 	mu       sync.Mutex
 	balances map[string]float64 // wallet_address → USD balance
+	outage   bool               // when true, BalanceUSD returns an error
 }
 
 func newDevBalanceReader() *devBalanceReader {
@@ -170,16 +180,25 @@ func newDevBalanceReader() *devBalanceReader {
 func (r *devBalanceReader) BalanceUSD(_ context.Context, walletAddress, _ string) (float64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.outage {
+		return 0, fmt.Errorf("dev: balance service outage simulated")
+	}
 	if b, ok := r.balances[walletAddress]; ok {
 		return b, nil
 	}
-	return 200.0, nil // default: $200 (above client $120 floor and helper $1000 floor)
+	return 200.0, nil // default: $200 (above client $120 floor and helper $60 dev floor)
 }
 
 func (r *devBalanceReader) set(walletAddress string, balanceUSD float64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.balances[walletAddress] = balanceUSD
+}
+
+func (r *devBalanceReader) setOutage(enabled bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.outage = enabled
 }
 
 // ── Stub: dev BotAPISender ────────────────────────────────────────────────────
@@ -329,6 +348,9 @@ func buildDevServer(db *sql.DB) (*devServer, error) {
 	// Display name generator
 	names := v2.NewRandomDisplayNameGenerator()
 
+	// Alias generator (for helper profiles)
+	aliases := v2.NewRandomAliasGenerator()
+
 	// Contact validator
 	cv := v2.NewProductionContactValidator()
 
@@ -354,10 +376,12 @@ func buildDevServer(db *sql.DB) (*devServer, error) {
 	ds.transport = transport
 
 	// Helper purchase service
-	helperSvc, err := v2.NewHelperPurchaseService(db, devHMACKey, contactCipher, names, time.Now)
+	helperSvc, err := v2.NewHelperPurchaseService(db, devHMACKey, contactCipher, aliases, time.Now)
 	if err != nil {
 		return nil, fmt.Errorf("NewHelperPurchaseService: %w", err)
 	}
+	// Apply dev policy (smaller thresholds for testing)
+	helperSvc.SetPolicy(devPolicy)
 	ds.helperSvc = helperSvc
 
 	// Review service
@@ -663,6 +687,24 @@ func (ds *devServer) devHandleSetBalance(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+// devHandleBalanceOutage handles POST /dev/balance/outage
+// Body: {"enabled": true/false} — enables/disables balance service outage simulation.
+func (ds *devServer) devHandleBalanceOutage(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		devErr(w, 400, "invalid JSON")
+		return
+	}
+	ds.balance.setOutage(req.Enabled)
+	devJSON(w, map[string]any{
+		"ok":      true,
+		"outage":  req.Enabled,
+		"msg":     fmt.Sprintf("Balance outage simulation: %v", req.Enabled),
+	})
+}
+
 // devHandleNotifications handles GET /dev/notifications
 // Returns captured review notification prompts.
 func (ds *devServer) devHandleNotifications(w http.ResponseWriter, r *http.Request) {
@@ -838,6 +880,36 @@ func (ds *devServer) devHandleSimulateStart(w http.ResponseWriter, r *http.Reque
 	devJSON(w, map[string]any{"ok": true, "msg": "Telegram /start simulated via transport webhook"})
 }
 
+// devHandleExpireHelperInvoice handles POST /dev/helper/invoice/expire
+// Body: {"purchase_id":"..."} — forces invoice to 'expired' by passing a far-future time.
+func (ds *devServer) devHandleExpireHelperInvoice(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		PurchaseID string `json:"purchase_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		devErr(w, 400, "invalid JSON")
+		return
+	}
+	if req.PurchaseID == "" {
+		devErr(w, 400, "purchase_id required")
+		return
+	}
+
+	// Use a time 48 hours in the future so the detection_deadline_at has certainly passed.
+	futureTime := time.Now().Add(48 * time.Hour)
+	view, err := ds.helperSvc.ExpireHelperInvoice(req.PurchaseID, futureTime)
+	if err != nil {
+		devErr(w, 500, fmt.Sprintf("ExpireHelperInvoice: %v", err))
+		return
+	}
+
+	devJSON(w, map[string]any{
+		"ok":    true,
+		"phase": view.State,
+		"msg":   "Helper invoice expired. State: " + view.State,
+	})
+}
+
 // devHandleHelperReputation handles GET /dev/helper/reputation?purchase_id=...
 // Returns helper aggregate counts for a purchase. No wallet, token, ciphertext, or chat_id exposed.
 func (ds *devServer) devHandleHelperReputation(w http.ResponseWriter, r *http.Request) {
@@ -982,7 +1054,9 @@ func (ds *devServer) devHandleStatus(w http.ResponseWriter, r *http.Request) {
 			"POST /dev/payment/confirm              {flow_id, wallet_address}",
 			"POST /dev/telegram/connect             {management_code, wallet_address}",
 			"POST /dev/helper/payment/confirm       {purchase_id, wallet_address}",
+			"POST /dev/helper/invoice/expire        {purchase_id}",
 			"POST /dev/balance/set                  {wallet_address, balance_usd}",
+			"POST /dev/balance/outage               {enabled}",
 			"POST /dev/listing/expire               {listing_id}",
 			"POST /dev/telegram/review-callback     {callback_data}",
 			"POST /dev/telegram/simulate-start      {raw_token}",
@@ -1050,15 +1124,45 @@ func main() {
 	devMux.HandleFunc("POST /dev/telegram/connect", ds.devHandleConnectTelegram)
 	devMux.HandleFunc("POST /dev/helper/payment/confirm", ds.devHandleConfirmHelperPayment)
 	devMux.HandleFunc("POST /dev/balance/set", ds.devHandleSetBalance)
+	devMux.HandleFunc("POST /dev/balance/outage", ds.devHandleBalanceOutage)
 	devMux.HandleFunc("POST /dev/listing/expire", ds.devHandleExpireListing)
 	devMux.HandleFunc("POST /dev/telegram/review-callback", ds.devHandleSimulateReviewCallback)
 	devMux.HandleFunc("POST /dev/telegram/simulate-start", ds.devHandleSimulateStart)
 	devMux.HandleFunc("GET /dev/helper/reputation", ds.devHandleHelperReputation)
+	devMux.HandleFunc("POST /dev/helper/invoice/expire", ds.devHandleExpireHelperInvoice)
 	devMux.HandleFunc("POST /dev/informer/simulate-start", ds.devHandleInformerSimulateStart)
 	devMux.HandleFunc("POST /dev/informer/fake-first-publish", ds.devHandleInformerFakeFirstPublish)
 	devMux.HandleFunc("POST /dev/informer/run-worker", ds.devHandleInformerRunWorker)
 	devMux.HandleFunc("GET /dev/informer/notifications", ds.devHandleInformerNotifications)
 	mux.Handle("/dev/", devCORS(devMux))
+
+	// Public config + health endpoints (match wire.go equivalents but using devPolicy)
+	mux.HandleFunc("GET /v2/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"v2":"ready"}`)) //nolint:errcheck
+	})
+	mux.HandleFunc("GET /v2/public-config", func(w http.ResponseWriter, r *http.Request) {
+		type resp struct {
+			ClientFeeUSDCents       int     `json:"client_fee_usd_cents"`
+			ClientPublicMinUSD      float64 `json:"client_public_min_usd"`
+			ClientHardFloorUSD      float64 `json:"client_hard_floor_usd"`
+			HelperFeeUSDCents       int     `json:"helper_fee_usd_cents"`
+			HelperPreInvoiceMinUSD  float64 `json:"helper_pre_invoice_min_usd"`
+			HelperPostPaymentMinUSD float64 `json:"helper_post_payment_min_usd"`
+			InformerMinUSD          float64 `json:"informer_min_usd"`
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		json.NewEncoder(w).Encode(resp{ //nolint:errcheck
+			ClientFeeUSDCents:       500,
+			ClientPublicMinUSD:      devPolicy.ClientPublicMinUSD,
+			ClientHardFloorUSD:      devPolicy.ClientHardFloorUSD,
+			HelperFeeUSDCents:       1000,
+			HelperPreInvoiceMinUSD:  devPolicy.HelperPreInvoiceMinUSD(),
+			HelperPostPaymentMinUSD: devPolicy.HelperPostPaymentMinUSD,
+			InformerMinUSD:          devPolicy.InformerMinUSD,
+		})
+	})
 
 	// CORS middleware for all V2 routes (dev only)
 	handler := devCORS(mux)

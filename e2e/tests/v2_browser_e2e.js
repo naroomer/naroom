@@ -2,7 +2,7 @@
 /**
  * V2 Browser E2E — Playwright with real UI interactions
  *
- * Starts V2 backend + Vite frontend on dynamic ports, runs 10 browser steps,
+ * Starts V2 backend + Vite frontend on dynamic ports, runs 12 browser steps,
  * takes screenshots, verifies teardown. Two sequential runs.
  *
  * Dev API calls (devAPI helper) are ONLY used to simulate external events
@@ -10,6 +10,7 @@
  *   - POST /dev/payment/confirm           (simulate blockchain confirmation)
  *   - POST /dev/telegram/simulate-start   (simulate Telegram /start via real webhook)
  *   - POST /dev/helper/payment/confirm
+ *   - POST /dev/helper/invoice/expire
  *   - POST /dev/balance/set
  *   - POST /dev/listing/expire
  *   - POST /dev/telegram/review-callback  (routes through real transport webhook)
@@ -402,9 +403,52 @@ async function runOnce(runNumber) {
       await clientPage.screenshot({ path: join(SCREENSHOTS_DIR, `run${runNumber}_05_board_mobile.png`) });
     });
 
+    // ── Step 5b: Balance outage → error shown, Retry visible, no invoice created ─
+    await step('5b: Balance outage → error shown, Retry button visible, no invoice created', async () => {
+      await devAPI(backendBase, 'POST', '/dev/balance/outage', { enabled: true });
+
+      const tempPage = await context.newPage();
+      tempPage.on('popup', p => { p.close().catch(() => {}); });
+      await tempPage.setViewportSize({ width: 390, height: 844 });
+      try {
+        await tempPage.goto(`${frontendBase}/v2/listing/${listingId}`);
+        await tempPage.waitForLoadState('networkidle');
+        await tempPage.waitForSelector('input[type="text"]', { timeout: 10000 });
+
+        await tempPage.fill('input[type="text"]', HELPER_WALLET);
+        await tempPage.waitForTimeout(300);
+
+        // Click "Get contact" — balance outage causes 503
+        await tempPage.click('button.btn-primary:not(:disabled)');
+        await tempPage.waitForTimeout(1500);
+
+        // Error message must mention balance/unavailable
+        const errText = (await tempPage.locator('.err').textContent().catch(() => ''));
+        assert(errText.toLowerCase().includes('unavailable') || errText.toLowerCase().includes('balance'),
+          `expected balance unavailable error, got: "${errText}"`);
+
+        // NO invoice should have been created
+        const invoiceBoxCount = await tempPage.locator('.invoice-box').count();
+        assert(invoiceBoxCount === 0, 'invoice-box appeared despite balance outage — invoice was wrongly created');
+
+        // Retry button must be visible
+        const retryCount = await tempPage.locator('button.btn-secondary').count();
+        assert(retryCount > 0, 'Retry button not visible after balance outage error');
+
+        // Main "Get contact" button must be disabled during outage state
+        const disabledCount = await tempPage.locator('button.btn-primary[disabled]').count();
+        assert(disabledCount > 0, 'main purchase button not disabled during balance outage');
+
+        await tempPage.screenshot({ path: join(SCREENSHOTS_DIR, `run${runNumber}_5b_outage.png`) });
+      } finally {
+        await tempPage.close();
+        await devAPI(backendBase, 'POST', '/dev/balance/outage', { enabled: false });
+      }
+    });
+
     // ── Step 6: Helper purchase → no ?pt= → invoice → clipboard ──────────────
     await step('6: Listing detail → helper wallet → purchase → URL has no ?pt= → invoice + clipboard', async () => {
-      // Pre-set balance above $1000 helper floor
+      // Pre-set balance above dev helper floor ($60 pre-invoice, $50 post-payment)
       await devAPI(backendBase, 'POST', '/dev/balance/set', {
         wallet_address: HELPER_WALLET,
         balance_usd: 2000.0,
@@ -420,6 +464,11 @@ async function runOnce(runNumber) {
       // Informational notice must be visible before wallet input
       const noticeCount = await helperPage.locator('.notice-box, .notice-title').count();
       assert(noticeCount > 0, 'informational notice not shown on listing page');
+
+      // Threshold hint must reflect public-config values (dev policy: pre-invoice = $60)
+      const hintText = (await helperPage.locator('.hint').first().textContent().catch(() => ''));
+      assert(hintText.includes('60') || hintText.includes('$60'),
+        `threshold hint does not show dev pre-invoice min ($60): "${hintText}"`);
 
       // Fill helper wallet
       await helperPage.fill('input[type="text"]', HELPER_WALLET);
@@ -461,6 +510,133 @@ async function runOnce(runNumber) {
       purchaseId = saved.purchaseId;
 
       await helperPage.screenshot({ path: join(SCREENSHOTS_DIR, `run${runNumber}_06_helper_invoice.png`) });
+    });
+
+    // ── Step 6b: Continue purchase — board badge, listing Continue, same invoice ─
+    await step('6b: Continue purchase — board shows badge, listing shows Continue, same invoice restored', async () => {
+      // Capture invoice address before navigating away
+      const invoiceAddr = (await helperPage.locator('.inv-val.addr').first().textContent().catch(() => '')).trim();
+      assert(invoiceAddr.length > 0, 'could not read invoice address before continue-purchase test');
+
+      // Board: navigate clientPage → must show continue-badge (same localStorage context)
+      await clientPage.goto(`${frontendBase}/v2/board/tbilisi`);
+      await clientPage.waitForLoadState('networkidle');
+      await clientPage.waitForSelector('.card.listing', { timeout: 10000 });
+      await clientPage.waitForSelector('.continue-badge', { timeout: 10000 });
+      const badgeCount = await clientPage.locator('.continue-badge').count();
+      assert(badgeCount > 0, 'continue-badge not shown on board for listing with pending purchase');
+
+      // Simulate new-session restore: clear helperPage sessionStorage
+      await helperPage.evaluate(() => { try { sessionStorage.clear(); } catch {} });
+
+      // Navigate to listing — localStorage restore kicks in → should show Continue purchase
+      await helperPage.goto(`${frontendBase}/v2/listing/${listingId}`);
+      await helperPage.waitForLoadState('networkidle');
+      await helperPage.waitForSelector('.state-box', { timeout: 15000 });
+      const continueLinkCount = await helperPage.locator('a.btn-link').count();
+      assert(continueLinkCount > 0, 'Continue purchase link not found on listing page after sessionStorage clear');
+
+      // Wallet form must NOT be shown (purchase already exists)
+      const walletFormCount = await helperPage.locator('.field input[type="text"]').count();
+      assert(walletFormCount === 0, 'wallet form shown instead of Continue purchase — localStorage restore failed');
+
+      // Click Continue → /v2/helper/purchase → same invoice
+      await helperPage.locator('a.btn-link').first().click();
+      await helperPage.waitForLoadState('networkidle');
+      await helperPage.waitForSelector('.invoice-box', { timeout: 15000 });
+
+      // Invoice address must be identical — no duplicate invoice created
+      const newAddr = (await helperPage.locator('.inv-val.addr').first().textContent().catch(() => '')).trim();
+      assert(newAddr === invoiceAddr,
+        `invoice address changed — duplicate invoice created? got "${newAddr}", expected "${invoiceAddr}"`);
+
+      await helperPage.screenshot({ path: join(SCREENSHOTS_DIR, `run${runNumber}_6b_continue.png`) });
+    });
+
+    // ── Step 6c: Expired purchase — terminal screen, no redirect loop, new purchase ─
+    await step('6c: Expired invoice → terminal screen → back to board → no loop → new purchase + new invoice', async () => {
+      // Capture the current invoice address before expiring
+      const expiredAddr = (await helperPage.locator('.inv-val.addr').first().textContent().catch(() => '')).trim();
+      assert(expiredAddr.length > 0, 'could not read invoice address before expire test');
+
+      // External event: force invoice to expired state
+      await devAPI(backendBase, 'POST', '/dev/helper/invoice/expire', { purchase_id: purchaseId });
+
+      // Simulate "closed tab": clear sessionStorage so the purchase page must load from localStorage
+      await helperPage.evaluate(() => { try { sessionStorage.clear(); } catch {} });
+
+      // Navigate to /v2/helper/purchase — localStorage has expired token → restore → terminal
+      await helperPage.goto(`${frontendBase}/v2/helper/purchase`);
+      await helperPage.waitForLoadState('networkidle');
+
+      // Terminal screen must be shown (step === 'done')
+      await helperPage.waitForSelector('a.btn-secondary[href*="/v2/board"]', { timeout: 10000 });
+
+      // Error must mention expiry
+      const errText = (await helperPage.locator('.err').textContent().catch(() => '')).trim();
+      assert(errText.toLowerCase().includes('expired'),
+        `expected expiry message on terminal screen, got: "${errText}"`);
+
+      // Still on /v2/helper/purchase (not looped back yet)
+      assert(helperPage.url().includes('/v2/helper/purchase'),
+        `expected /v2/helper/purchase, got: ${helperPage.url()}`);
+
+      await helperPage.screenshot({ path: join(SCREENSHOTS_DIR, `run${runNumber}_6c_terminal.png`) });
+
+      // Click "Back to board" — storage is already cleared by clearHelperPurchaseState
+      await helperPage.click('a.btn-secondary[href*="/v2/board"]');
+      await helperPage.waitForURL(`**\/v2\/board\/**`, { timeout: 8000 });
+      assert(helperPage.url().includes('/v2/board'),
+        `expected /v2/board after back-to-board, got: ${helperPage.url()}`);
+
+      // Wait and confirm no redirect loop back to purchase
+      await helperPage.waitForTimeout(1500);
+      assert(!helperPage.url().includes('/v2/helper/purchase'),
+        `redirect loop detected — bounced back to purchase from board: ${helperPage.url()}`);
+
+      // Navigate to listing — must show wallet form (stale state-box must be gone)
+      await helperPage.goto(`${frontendBase}/v2/listing/${listingId}`);
+      await helperPage.waitForLoadState('networkidle');
+      await helperPage.waitForTimeout(1500); // allow async restore check to complete
+
+      // Wallet input must be visible — expired purchase was cleared
+      const walletFieldCount = await helperPage.locator('.field input[type="text"]').count();
+      assert(walletFieldCount > 0,
+        'wallet input not shown after expired purchase — stale state-box or continue badge still present');
+
+      // state-box (Continue purchase) must NOT be shown
+      const stateBoxCount = await helperPage.locator('.state-box').count();
+      assert(stateBoxCount === 0,
+        'state-box still visible after expired purchase cleared — stale localStorage not removed');
+
+      // Create new purchase for the same wallet
+      await helperPage.fill('input[type="text"]', HELPER_WALLET);
+      await helperPage.waitForTimeout(300);
+      await helperPage.click('button.btn-primary:not(:disabled)');
+      await helperPage.waitForURL(`**\/v2\/helper\/purchase**`, { timeout: 10000 });
+      await helperPage.waitForSelector('.invoice-box', { timeout: 10000 });
+
+      // New invoice must be visible
+      const newAddr = (await helperPage.locator('.inv-val.addr').first().textContent().catch(() => '')).trim();
+      assert(newAddr.length > 0, 'new invoice address is empty');
+
+      // Update purchaseToken and purchaseId BEFORE further assertions
+      // so step 7 always operates on the new purchase.
+      const oldPurchaseId = purchaseId;
+      purchaseToken = await helperPage.evaluate(() => {
+        try { return sessionStorage.getItem('v2_active_purchase_token') || ''; } catch { return ''; }
+      });
+      assert(purchaseToken.length > 0, 'new purchaseToken not in sessionStorage after new purchase');
+
+      const newSaved = await helperPage.evaluate((pt) => {
+        try { return JSON.parse(sessionStorage.getItem(`v2_purchase_${pt}`) || 'null'); } catch { return null; }
+      }, purchaseToken);
+      assert(newSaved && newSaved.purchaseId, 'new purchaseId not found in sessionStorage');
+      purchaseId = newSaved.purchaseId;
+
+      // New purchase must have a different ID — verifies a fresh purchase was created
+      assert(purchaseId !== oldPurchaseId,
+        `new purchase has same ID as expired one — backend allowed reuse: "${purchaseId}"`);
     });
 
     // ── Step 7: Dev confirm helper payment → SAME helperPage.reload() → contact
@@ -636,7 +812,8 @@ async function runOnce(runNumber) {
   // Verify all screenshot files exist and have non-zero size
   const screenshots = [
     '01_invoice', '04_done', '05_board_desktop', '05_board_mobile',
-    '06_helper_invoice', '07_contact', '09_review', '10_reactivated',
+    '5b_outage', '06_helper_invoice', '6b_continue', '6c_terminal',
+    '07_contact', '09_review', '10_reactivated',
   ].map(s => join(SCREENSHOTS_DIR, `run${runNumber}_${s}.png`));
   for (const f of screenshots) {
     const st = statSync(f);

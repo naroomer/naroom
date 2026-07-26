@@ -29,7 +29,8 @@
 	let walletAddress = $state('');
 	let listingId = $state('');
 	let currency = $state('BTC');
-	let publicName = $state('');
+	let helperPublicName = $state('');
+	let clientPublicName = $state('');
 	let invoice = $state(null);
 	let phase = $state('');
 	let balanceRetryDeadline = $state(0);
@@ -57,6 +58,20 @@
 		fetchPubConfig();
 		// Load token from sessionStorage only (never from URL)
 		try { purchaseToken = sessionStorage.getItem('v2_active_purchase_token') || ''; } catch {}
+
+		// Fall back to localStorage if sessionStorage is empty
+		if (!purchaseToken) {
+			try {
+				const lhpt = JSON.parse(localStorage.getItem('v2_active_hpt') || 'null');
+				if (lhpt?.token && lhpt?.wallet) {
+					purchaseToken = lhpt.token;
+					walletAddress = lhpt.wallet;
+					listingId = lhpt.listingId || '';
+					try { sessionStorage.setItem('v2_active_purchase_token', lhpt.token); } catch {}
+				}
+			} catch {}
+		}
+
 		if (!purchaseToken) { error = t('v2.helper.no_token'); loading = false; return; }
 
 		// Restore purchase data from sessionStorage
@@ -67,10 +82,10 @@
 		if (saved) {
 			purchaseId = saved.purchaseId || '';
 			listingId = saved.listingId || '';
-			walletAddress = saved.walletAddress || '';
+			walletAddress = walletAddress || saved.walletAddress || '';
 		}
 
-		if (purchaseId) {
+		if (purchaseToken && walletAddress) {
 			await restorePurchase();
 		} else {
 			error = t('v2.helper.no_purchase');
@@ -94,8 +109,10 @@
 			if (!res.ok) { error = data.error || `HTTP ${res.status}`; loading = false; return; }
 
 			phase = data.phase;
+			purchaseId = data.purchase_id || purchaseId;
 			currency = data.currency || 'BTC';
-			publicName = data.public_name || '';
+			helperPublicName = data.helper_public_name || '';
+			clientPublicName = data.client_public_name || '';
 			invoice = data.invoice || null;
 			balanceRetryDeadline = data.balance_retry_deadline_at || 0;
 			lastBalanceUSD = data.last_balance_usd ?? null;
@@ -107,6 +124,18 @@
 		} finally {
 			loading = false;
 		}
+	}
+
+	// Clears all storage keys associated with a helper purchase.
+	// Call before showing terminal screen so navigation away is clean.
+	function clearHelperPurchaseState(lid, pt) {
+		try {
+			if (lid) localStorage.removeItem(`v2_hpt_${lid}`);
+			localStorage.removeItem('v2_active_hpt');
+			sessionStorage.removeItem('v2_active_purchase_token');
+			if (pt) sessionStorage.removeItem(`v2_purchase_${pt}`);
+			if (lid) sessionStorage.removeItem(`v2_pt_${lid}`);
+		} catch {}
 	}
 
 	function routeByPhase(data) {
@@ -124,9 +153,11 @@
 			// Waiting for contact to be ready — rare transient state
 			step = 'invoice';
 		} else if (ph === 'failed' || ph === 'payment_expired') {
+			clearHelperPurchaseState(listingId, purchaseToken);
 			error = t('v2.helper.payment_expired');
 			step = 'done';
 		} else if (ph === 'receipt_expired') {
+			clearHelperPurchaseState(listingId, purchaseToken);
 			error = t('v2.helper.receipt_expired');
 			step = 'done';
 		} else {
@@ -265,8 +296,33 @@
 	{:else if step === 'invoice'}
 		<div class="section">
 			<h2>{t('v2.helper.invoice_title')}</h2>
-			{#if publicName}
-				<p class="sub">{t('v2.helper.contact_with', { name: publicName })}</p>
+
+			<!-- Progress: step 2 = Payment -->
+			<div class="progress-bar">
+				{#each [1,2,3,4,5] as n}
+					<div class="prog-step" class:done={2 > n} class:active={2 === n}>
+						<div class="prog-dot"></div>
+						<span class="prog-label">{t('v2.helper.progress.step' + n)}</span>
+					</div>
+					{#if n < 5}<div class="prog-line" class:done={2 > n}></div>{/if}
+				{/each}
+			</div>
+
+			<!-- Helper's nickname -->
+			{#if helperPublicName}
+				<div class="nickname-section">
+					<div class="nickname-label">{t('v2.helper.your_nickname')}</div>
+					<div class="nickname-value">{helperPublicName}</div>
+					<div class="nickname-hint">{t('v2.helper.nickname_permanent')}</div>
+				</div>
+			{/if}
+
+			<!-- Who they're buying contact for -->
+			{#if clientPublicName}
+				<div class="nickname-section">
+					<div class="nickname-label">{t('v2.helper.buying_contact_for')}</div>
+					<div class="nickname-value">{clientPublicName}</div>
+				</div>
 			{/if}
 
 			{#if invoice}
@@ -304,9 +360,21 @@
 								<V2QR data={paymentURI(invoice, currency)} />
 							</div>
 						{/if}
-						<p class="poll-note">{t('v2.invoice.polling')}</p>
 					{/if}
 				</div>
+
+				<!-- Auto-check info box -->
+				{#if phase === 'awaiting_payment' || phase === 'payment_detected'}
+					<div class="info-box">
+						<ul class="info-list">
+							<li>{t('v2.helper.payment_auto_check')}</li>
+							<li>{t('v2.helper.one_confirmation')}</li>
+							<li>{t('v2.helper.balance_auto_check')}</li>
+							<li>{t('v2.helper.can_restore')}</li>
+							<li>{t('v2.helper.no_repay')}</li>
+						</ul>
+					</div>
+				{/if}
 			{/if}
 
 			{#if error}<div class="err">{error}</div>{/if}
@@ -402,6 +470,88 @@
 
 	.status-msg { text-align: center; padding: 40px 20px; color: var(--text-dim); }
 
+	/* Progress bar */
+	.progress-bar {
+		display: flex;
+		align-items: flex-start;
+		gap: 0;
+		margin: 4px 0 8px;
+		overflow-x: auto;
+	}
+	.prog-step {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 4px;
+		min-width: 56px;
+	}
+	.prog-dot {
+		width: 10px; height: 10px;
+		border-radius: 50%;
+		background: var(--border);
+		border: 2px solid var(--border);
+		flex-shrink: 0;
+	}
+	.prog-step.done .prog-dot { background: var(--accent); border-color: var(--accent); opacity: 0.5; }
+	.prog-step.active .prog-dot { background: var(--accent); border-color: var(--accent); }
+	.prog-label { font-size: 10px; color: var(--text-faint); text-align: center; white-space: nowrap; }
+	.prog-step.done .prog-label, .prog-step.active .prog-label { color: var(--text-dim); }
+	.prog-line {
+		flex: 1;
+		height: 2px;
+		background: var(--border);
+		margin-top: 4px;
+		min-width: 12px;
+	}
+	.prog-line.done { background: var(--accent); opacity: 0.4; }
+
+	/* Nickname sections */
+	.nickname-section {
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 10px 14px;
+		display: flex;
+		flex-direction: column;
+		gap: 3px;
+	}
+	.nickname-label {
+		font-size: 11px;
+		font-weight: 600;
+		color: var(--text-faint);
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+	}
+	.nickname-value {
+		font-size: 15px;
+		font-weight: 700;
+		color: var(--text);
+	}
+	.nickname-hint {
+		font-size: 11px;
+		color: var(--text-faint);
+	}
+
+	/* Info box */
+	.info-box {
+		background: rgba(123, 166, 142, 0.06);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 12px 14px;
+	}
+	.info-list {
+		margin: 0;
+		padding-left: 18px;
+		display: flex;
+		flex-direction: column;
+		gap: 5px;
+	}
+	.info-list li {
+		font-size: 12px;
+		color: var(--text-dim);
+		line-height: 1.4;
+	}
+
 	.section { display: flex; flex-direction: column; gap: 16px; }
 	h2 { font-size: 18px; font-weight: 700; color: var(--text); margin: 0; }
 	h3 { font-size: 15px; font-weight: 700; color: var(--text); margin: 0; }
@@ -448,7 +598,6 @@
 
 	.qr-wrap { display: flex; justify-content: center; padding: 8px 0; }
 	.qr { width: 160px; height: 160px; border-radius: 6px; }
-	.poll-note { font-size: 12px; color: var(--text-faint); text-align: center; }
 
 	.contact-reveal {
 		background: var(--bg-card);
