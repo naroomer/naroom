@@ -1248,3 +1248,232 @@ func TestNewHTTPBotAPISenderURLTableTests(t *testing.T) {
 		t.Errorf("HTTPS URL with trailing slash rejected: %v", err)
 	}
 }
+
+// ── Test T30: SendPendingReviewNotifications ──────────────────────────────────
+
+// newTestTransportWithHelperSvc constructs a TelegramTransport, HelperPurchaseService,
+// and ReviewService all sharing the same in-memory DB.
+func newTestTransportWithHelperSvc(t *testing.T) (*TelegramTransport, *HelperPurchaseService, *ReviewService, *sql.DB) {
+	t.Helper()
+	transport, _, _, db := newTestTransport(t, nil)
+
+	cipher, err := NewAESGCMContactCipher(testAESKey, "v1")
+	if err != nil {
+		t.Fatalf("NewAESGCMContactCipher: %v", err)
+	}
+	hpSvc, err := NewHelperPurchaseService(db, testHMACKey, cipher, NewRandomAliasGenerator(), time.Now)
+	if err != nil {
+		t.Fatalf("NewHelperPurchaseService: %v", err)
+	}
+	rs, err := NewReviewService(db, testHMACKey, time.Now)
+	if err != nil {
+		t.Fatalf("NewReviewService: %v", err)
+	}
+	return transport, hpSvc, rs, db
+}
+
+// mustSetupPendingSnapshot creates a full purchase flow up to contact_ready (pending_send
+// snapshot), using a real DestinationCipher to encrypt wantChatID into the destination.
+// Returns (purchaseID, helperPublicName).
+func mustSetupPendingSnapshot(t *testing.T, transport *TelegramTransport, hpSvc *HelperPurchaseService, db *sql.DB, wantChatID int64) (purchaseID, helperPublicName string) {
+	t.Helper()
+
+	listingID := mustCreateVisibleListing(t, db, "US")
+
+	// Get the binding_ref so we can encrypt the chatID with the correct AAD.
+	var bindingRef string
+	if err := db.QueryRow(`
+		SELECT binding_ref FROM v2_client_notification_bindings
+		WHERE flow_id = (SELECT flow_id FROM v2_listings WHERE id = ?)`,
+		listingID,
+	).Scan(&bindingRef); err != nil {
+		t.Fatalf("read binding_ref: %v", err)
+	}
+
+	// Encrypt a real chatID using the same DestinationCipher key as the transport.
+	destCipher, err := NewDestinationCipher(testDestKey, "dest_v1")
+	if err != nil {
+		t.Fatalf("NewDestinationCipher: %v", err)
+	}
+	ct, nonce, err := destCipher.EncryptChatID(wantChatID, bindingRef)
+	if err != nil {
+		t.Fatalf("EncryptChatID: %v", err)
+	}
+
+	// Replace the placeholder destination ciphertexts with real encrypted values.
+	if _, err := db.Exec(`
+		UPDATE v2_telegram_destinations
+		SET chat_id_ciphertext=?, chat_id_nonce=?, key_version='dest_v1'
+		WHERE binding_ref=?`, ct, nonce, bindingRef); err != nil {
+		t.Fatalf("update destination: %v", err)
+	}
+
+	// Run the full helper purchase flow to produce a pending_send snapshot.
+	addr := testBTCBech32Addr
+	normalized, currency, err := validateAndNormalizeAddress(addr)
+	if err != nil {
+		t.Fatalf("validateAndNormalizeAddress: %v", err)
+	}
+	draft := HelperInvoiceDraft{
+		PaymentAddress: "payaddr_spn",
+		AmountAtomic:   100000,
+		AmountUSDCents: helperInvoiceUSDCents,
+	}
+	_, view, err := hpSvc.CreatePurchase(newID(), listingID, currency, normalized, draft)
+	if err != nil {
+		t.Fatalf("CreatePurchase: %v", err)
+	}
+	if _, err := hpSvc.RecordHelperDetection(view.PurchaseID, "txid_spn", []string{addr}, 100000, time.Now()); err != nil {
+		t.Fatalf("RecordHelperDetection: %v", err)
+	}
+	if _, err := hpSvc.ConfirmHelperPayment(view.PurchaseID, time.Now()); err != nil {
+		t.Fatalf("ConfirmHelperPayment: %v", err)
+	}
+	if _, err := hpSvc.RecordHelperPostPaymentBalance(view.PurchaseID, 1200.0); err != nil {
+		t.Fatalf("RecordHelperPostPaymentBalance: %v", err)
+	}
+
+	// Verify snapshot was created.
+	var snapCount int
+	db.QueryRow(`SELECT COUNT(*) FROM v2_review_delivery_snapshots WHERE purchase_id=? AND state='pending_send'`, view.PurchaseID).Scan(&snapCount) //nolint:errcheck
+	if snapCount != 1 {
+		t.Fatalf("expected 1 pending_send snapshot, got %d", snapCount)
+	}
+
+	// Look up helper's public_name.
+	fp := hpSvc.helperWalletFingerprint(currency, normalized)
+	var name string
+	db.QueryRow(`SELECT public_name FROM v2_helper_profiles WHERE wallet_fingerprint=?`, fp).Scan(&name) //nolint:errcheck
+
+	return view.PurchaseID, name
+}
+
+// TestTelegramTransport_SendPendingReviewNotifications verifies that:
+//   - Message text contains the helper's public_name and 👍/👎 format.
+//   - Exactly 1 SendReviewPrompt call is made.
+//   - Snapshot transitions to state='sent' with encrypted fields NULLed.
+//   - A second call sends 0 additional prompts (snapshot already 'sent').
+func TestTelegramTransport_SendPendingReviewNotifications(t *testing.T) {
+	transport, hpSvc, rs, db := newTestTransportWithHelperSvc(t)
+	stub := &stubReviewSender{}
+	transport.SetReviewService(rs, stub)
+
+	const wantChatID = int64(99881234)
+	purchaseID, helperName := mustSetupPendingSnapshot(t, transport, hpSvc, db, wantChatID)
+
+	// First call: should send exactly 1 review prompt.
+	if err := transport.SendPendingReviewNotifications(); err != nil {
+		t.Fatalf("SendPendingReviewNotifications: %v", err)
+	}
+
+	stub.mu.Lock()
+	prompts := make([]struct {
+		chatID  int64
+		text    string
+		posData string
+		negData string
+	}, len(stub.prompts))
+	copy(prompts, stub.prompts)
+	stub.mu.Unlock()
+
+	if len(prompts) != 1 {
+		t.Fatalf("want 1 prompt, got %d", len(prompts))
+	}
+	if prompts[0].chatID != wantChatID {
+		t.Errorf("chatID: got %d, want %d", prompts[0].chatID, wantChatID)
+	}
+	if helperName == "" {
+		t.Fatal("helper public_name must not be empty")
+	}
+	if !strings.Contains(prompts[0].text, helperName) {
+		t.Errorf("text missing helper name %q:\n%s", helperName, prompts[0].text)
+	}
+	if !strings.Contains(prompts[0].text, "👍") || !strings.Contains(prompts[0].text, "👎") {
+		t.Errorf("text missing 👍/👎 rating symbols:\n%s", prompts[0].text)
+	}
+
+	// Snapshot must be 'sent' with encrypted fields NULLed.
+	var state string
+	var ctVal, ncVal sql.NullString
+	db.QueryRow(`SELECT state, chat_id_ciphertext, chat_id_nonce FROM v2_review_delivery_snapshots WHERE purchase_id=?`, purchaseID).Scan(&state, &ctVal, &ncVal) //nolint:errcheck
+	if state != "sent" {
+		t.Errorf("snapshot state: got %q, want 'sent'", state)
+	}
+	if ctVal.Valid || ncVal.Valid {
+		t.Error("encrypted fields must be NULL after snapshot is sent")
+	}
+
+	// Second call: no additional prompts (snapshot already 'sent').
+	if err := transport.SendPendingReviewNotifications(); err != nil {
+		t.Fatalf("second SendPendingReviewNotifications: %v", err)
+	}
+	stub.mu.Lock()
+	totalPrompts := len(stub.prompts)
+	stub.mu.Unlock()
+	if totalPrompts != 1 {
+		t.Errorf("after second call: want 1 total prompt (dedup), got %d", totalPrompts)
+	}
+}
+
+// TestTelegramTransport_SendNotifBindingDeletedBeforeSend verifies that a review
+// notification is still delivered even when the Client binding is deleted after
+// the snapshot was created (snapshot stores its own copy of the encrypted chat ID).
+func TestTelegramTransport_SendNotifBindingDeletedBeforeSend(t *testing.T) {
+	transport, hpSvc, rs, db := newTestTransportWithHelperSvc(t)
+	stub := &stubReviewSender{}
+	transport.SetReviewService(rs, stub)
+
+	const wantChatID = int64(77665544)
+	purchaseID, _ := mustSetupPendingSnapshot(t, transport, hpSvc, db, wantChatID)
+
+	// Delete the binding (CASCADE removes destination; snapshot must survive).
+	if _, err := db.Exec(`DELETE FROM v2_client_notification_bindings WHERE flow_id = (
+		SELECT listing_flow FROM (
+			SELECT l.flow_id AS listing_flow FROM v2_helper_purchases hp
+			JOIN v2_listings l ON l.id = hp.listing_id
+			WHERE hp.id = ?
+		)
+	)`, purchaseID); err != nil {
+		t.Fatalf("delete binding: %v", err)
+	}
+
+	// Snapshot must still be pending_send with encrypted data intact.
+	var snapState string
+	var ctVal sql.NullString
+	db.QueryRow(`SELECT state, chat_id_ciphertext FROM v2_review_delivery_snapshots WHERE purchase_id=?`, purchaseID).Scan(&snapState, &ctVal) //nolint:errcheck
+	if snapState != "pending_send" {
+		t.Fatalf("snapshot state after binding delete: %q, want 'pending_send'", snapState)
+	}
+	if !ctVal.Valid {
+		t.Fatal("snapshot chat_id_ciphertext must survive binding deletion")
+	}
+
+	// SendPendingReviewNotifications must still deliver using the snapshot's stored chat ID.
+	if err := transport.SendPendingReviewNotifications(); err != nil {
+		t.Fatalf("SendPendingReviewNotifications: %v", err)
+	}
+
+	stub.mu.Lock()
+	prompts := make([]struct {
+		chatID  int64
+		text    string
+		posData string
+		negData string
+	}, len(stub.prompts))
+	copy(prompts, stub.prompts)
+	stub.mu.Unlock()
+
+	if len(prompts) != 1 {
+		t.Fatalf("want 1 prompt after binding deletion, got %d", len(prompts))
+	}
+	if prompts[0].chatID != wantChatID {
+		t.Errorf("chatID: got %d, want %d", prompts[0].chatID, wantChatID)
+	}
+
+	// Snapshot must be 'sent'.
+	var finalState string
+	db.QueryRow(`SELECT state FROM v2_review_delivery_snapshots WHERE purchase_id=?`, purchaseID).Scan(&finalState) //nolint:errcheck
+	if finalState != "sent" {
+		t.Errorf("snapshot state after delivery: got %q, want 'sent'", finalState)
+	}
+}

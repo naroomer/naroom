@@ -486,7 +486,7 @@ async function runOnce(runNumber) {
         `expected /v2/helper/purchase, got: ${url}`);
 
       // Invoice must be visible
-      await helperPage.waitForSelector('.invoice-box', { timeout: 15000 });
+      await helperPage.waitForSelector('.pay-surface', { timeout: 15000 });
 
       // No external QR
       const extQR = await helperPage.locator('img[src*="qrserver"]').count();
@@ -543,7 +543,7 @@ async function runOnce(runNumber) {
       // Click Continue → /v2/helper/purchase → same invoice
       await helperPage.locator('a.btn-link').first().click();
       await helperPage.waitForLoadState('networkidle');
-      await helperPage.waitForSelector('.invoice-box', { timeout: 15000 });
+      await helperPage.waitForSelector('.pay-surface', { timeout: 15000 });
 
       // Invoice address must be identical — no duplicate invoice created
       const newAddr = (await helperPage.locator('.inv-val.addr').first().textContent().catch(() => '')).trim();
@@ -551,6 +551,111 @@ async function runOnce(runNumber) {
         `invoice address changed — duplicate invoice created? got "${newAddr}", expected "${invoiceAddr}"`);
 
       await helperPage.screenshot({ path: join(SCREENSHOTS_DIR, `run${runNumber}_6b_continue.png`) });
+    });
+
+    // ── Step 6v: Layout acceptance — 5 viewports ─────────────────────────────
+    await step('6v: Layout acceptance — scroll/visibility/overlap on 5 viewports', async () => {
+      // helperPage is on /v2/helper/purchase (awaiting_payment) from step 6b
+      const VIEWPORTS = [
+        { w: 1440, h: 900  },
+        { w: 1280, h: 720  },
+        { w: 390,  h: 844  },
+        { w: 375,  h: 667  },
+        { w: 360,  h: 640  },
+      ];
+
+      for (const vp of VIEWPORTS) {
+        await helperPage.setViewportSize({ width: vp.w, height: vp.h });
+        await helperPage.waitForTimeout(600);
+
+        // 1. No document scroll
+        const scroll = await helperPage.evaluate(() => ({
+          sH: document.documentElement.scrollHeight,
+          cH: document.documentElement.clientHeight,
+          sW: document.documentElement.scrollWidth,
+          cW: document.documentElement.clientWidth,
+        }));
+        assert(scroll.sH <= scroll.cH,
+          `${vp.w}×${vp.h}: scrollHeight ${scroll.sH} > clientHeight ${scroll.cH}`);
+        assert(scroll.sW <= scroll.cW,
+          `${vp.w}×${vp.h}: scrollWidth ${scroll.sW} > clientWidth ${scroll.cW}`);
+
+        // Helper: assert element visible and bounding box fully within viewport
+        async function assertIn(sel, label) {
+          const el = helperPage.locator(sel).first();
+          assert(await el.isVisible(), `${vp.w}×${vp.h}: ${label} not visible`);
+          const box = await el.boundingBox();
+          assert(box !== null, `${vp.w}×${vp.h}: ${label} bbox null`);
+          assert(box.x >= -1, `${vp.w}×${vp.h}: ${label} left=${box.x.toFixed(0)} < 0`);
+          assert(box.y >= -1, `${vp.w}×${vp.h}: ${label} top=${box.y.toFixed(0)} < 0`);
+          assert(box.x + box.width  <= vp.w + 1,
+            `${vp.w}×${vp.h}: ${label} right=${( box.x + box.width ).toFixed(0)} > ${vp.w}`);
+          assert(box.y + box.height <= vp.h + 1,
+            `${vp.w}×${vp.h}: ${label} bottom=${( box.y + box.height).toFixed(0)} > ${vp.h}`);
+          return box;
+        }
+
+        function overlaps(a, b) {
+          if (!a || !b) return false;
+          return !(a.x + a.width <= b.x || b.x + b.width <= a.x ||
+                   a.y + a.height <= b.y || b.y + b.height <= a.y);
+        }
+
+        // 2. Required elements — visible and within viewport
+        const statusBox = await assertIn('.inv-status',          'status');
+        const amountBox = await assertIn('.pay-surface .inv-val','amount');
+        const addrBox   = await assertIn('.inv-val.addr',        'address');
+        const aliasBox  = await assertIn('.alias-block',         'aliases');
+        const instrBox  = await assertIn('.instr-block',         'instructions');
+        await assertIn('.instr',                                  'instr line');
+
+        // All 3 instruction lines present (not hidden)
+        const instrCount = await helperPage.locator('.instr').count();
+        assert(instrCount === 3,
+          `${vp.w}×${vp.h}: expected 3 .instr lines, got ${instrCount}`);
+
+        // 3. QR: visible, >= 112×112, bottom within viewport
+        await helperPage.locator('.v2qr svg').first().waitFor({ state: 'visible', timeout: 5000 });
+        const qrBox = await assertIn('.v2qr svg', 'QR svg');
+        assert(qrBox.width  >= 112, `${vp.w}×${vp.h}: QR width  ${qrBox.width.toFixed(0)} < 112`);
+        assert(qrBox.height >= 112, `${vp.w}×${vp.h}: QR height ${qrBox.height.toFixed(0)} < 112`);
+
+        // 4. Font sizes — main text >= 13px, labels >= 11px, instructions >= 11px
+        const mainFs = await helperPage.locator('.inv-val').first()
+          .evaluate(el => parseFloat(getComputedStyle(el).fontSize));
+        assert(mainFs >= 13, `${vp.w}×${vp.h}: inv-val font ${mainFs}px < 13px`);
+
+        const labelFs = await helperPage.locator('.inv-label').first()
+          .evaluate(el => parseFloat(getComputedStyle(el).fontSize));
+        assert(labelFs >= 11, `${vp.w}×${vp.h}: inv-label font ${labelFs}px < 11px`);
+
+        const instrFs = await helperPage.locator('.instr').first()
+          .evaluate(el => parseFloat(getComputedStyle(el).fontSize));
+        assert(instrFs >= 11, `${vp.w}×${vp.h}: instr font ${instrFs}px < 11px`);
+
+        // 5. No overlaps: alias-block ∩ pay-surface, instr-block ∩ pay-surface
+        const payBox = await helperPage.locator('.pay-surface').first().boundingBox();
+        assert(!overlaps(aliasBox, payBox),
+          `${vp.w}×${vp.h}: alias-block overlaps pay-surface`);
+        assert(!overlaps(instrBox, payBox),
+          `${vp.w}×${vp.h}: instr-block overlaps pay-surface`);
+
+        // 6. Language switcher (if present) must not overlap pay-surface
+        const langCount = await helperPage.locator('.lang-switch, [class*="lang"]').count();
+        if (langCount > 0) {
+          const langBox = await helperPage.locator('.lang-switch, [class*="lang"]').first().boundingBox();
+          assert(!overlaps(langBox, payBox),
+            `${vp.w}×${vp.h}: lang switcher overlaps pay-surface`);
+        }
+
+        await helperPage.screenshot({
+          path: join(SCREENSHOTS_DIR, `run${runNumber}_layout_${vp.w}x${vp.h}.png`),
+        });
+      }
+
+      // Restore viewport for subsequent steps
+      await helperPage.setViewportSize({ width: 390, height: 844 });
+      await helperPage.waitForTimeout(300);
     });
 
     // ── Step 6c: Expired purchase — terminal screen, no redirect loop, new purchase ─
@@ -614,7 +719,7 @@ async function runOnce(runNumber) {
       await helperPage.waitForTimeout(300);
       await helperPage.click('button.btn-primary:not(:disabled)');
       await helperPage.waitForURL(`**\/v2\/helper\/purchase**`, { timeout: 10000 });
-      await helperPage.waitForSelector('.invoice-box', { timeout: 10000 });
+      await helperPage.waitForSelector('.pay-surface', { timeout: 10000 });
 
       // New invoice must be visible
       const newAddr = (await helperPage.locator('.inv-val.addr').first().textContent().catch(() => '')).trim();
@@ -700,6 +805,14 @@ async function runOnce(runNumber) {
       const notifs = await devAPI(backendBase, 'GET', '/dev/notifications');
       const n = (notifs.notifications || [])[0];
       assert(n && n.pos_data, 'no review notification with pos_data found after helper review');
+
+      // Verify notification message text contains Helper info and rating symbols.
+      assert(n.text && n.text.length > 0, 'review notification text must not be empty');
+      assert(n.text.includes('Helper:'), `notification text missing "Helper:" label: ${n.text}`);
+      assert(n.text.includes('👍') && n.text.includes('👎'),
+        `notification text missing 👍/👎 rating symbols: ${n.text}`);
+      assert(n.text.includes('Did this Helper help you?'),
+        `notification text missing review question: ${n.text}`);
 
       await devAPI(backendBase, 'POST', '/dev/telegram/review-callback', { callback_data: n.pos_data });
 
@@ -812,8 +925,9 @@ async function runOnce(runNumber) {
   // Verify all screenshot files exist and have non-zero size
   const screenshots = [
     '01_invoice', '04_done', '05_board_desktop', '05_board_mobile',
-    '5b_outage', '06_helper_invoice', '6b_continue', '6c_terminal',
-    '07_contact', '09_review', '10_reactivated',
+    '5b_outage', '06_helper_invoice', '6b_continue',
+    'layout_1440x900', 'layout_1280x720', 'layout_390x844', 'layout_375x667', 'layout_360x640',
+    '6c_terminal', '07_contact', '09_review', '10_reactivated',
   ].map(s => join(SCREENSHOTS_DIR, `run${runNumber}_${s}.png`));
   for (const f of screenshots) {
     const st = statSync(f);

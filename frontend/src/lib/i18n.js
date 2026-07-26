@@ -506,6 +506,9 @@ en: {
 	'v2.helper.balance_auto_check': 'Once confirmed, your balance is checked automatically.',
 	'v2.helper.can_restore':        'You can close this tab and restore your purchase anytime.',
 	'v2.helper.no_repay':           'Do not pay again if you return to this page.',
+	'v2.helper.instr1':             'Payment is checked automatically.',
+	'v2.helper.instr2':             '1 confirmation is required.',
+	'v2.helper.instr3':             'You may close this page and return. Do not pay twice.',
 
 	'v2.helper.progress.step1': 'Wallet',
 	'v2.helper.progress.step2': 'Payment',
@@ -995,6 +998,9 @@ ru: {
 	'v2.helper.balance_auto_check': 'После подтверждения баланс проверяется автоматически.',
 	'v2.helper.can_restore':        'Вы можете закрыть эту вкладку и восстановить покупку в любой момент.',
 	'v2.helper.no_repay':           'Не платите повторно, если вернётесь на эту страницу.',
+	'v2.helper.instr1':             'Оплата проверяется автоматически.',
+	'v2.helper.instr2':             '1 подтверждение в блокчейне.',
+	'v2.helper.instr3':             'Можно закрыть страницу и вернуться. Не платите повторно.',
 
 	'v2.helper.progress.step1': 'Кошелёк',
 	'v2.helper.progress.step2': 'Оплата',
@@ -1477,6 +1483,9 @@ es: {
 	'v2.helper.balance_auto_check': 'Una vez confirmado, el saldo se verifica automáticamente.',
 	'v2.helper.can_restore':        'Puedes cerrar esta pestaña y restaurar tu compra en cualquier momento.',
 	'v2.helper.no_repay':           'No pagues de nuevo si vuelves a esta página.',
+	'v2.helper.instr1':             'El pago se verifica automáticamente.',
+	'v2.helper.instr2':             'Se requiere 1 confirmación.',
+	'v2.helper.instr3':             'Puedes cerrar esta página y regresar. No pagues dos veces.',
 
 	'v2.helper.progress.step1': 'Billetera',
 	'v2.helper.progress.step2': 'Pago',
@@ -1960,6 +1969,9 @@ ka: {
 	'v2.helper.balance_auto_check': 'დადასტურების შემდეგ ბალანსი მოწმდება ავტომატურად.',
 	'v2.helper.can_restore':        'შეგიძლიათ დახუროთ ეს ჩანართი და ნებისმიერ დროს აღადგინოთ შეძენა.',
 	'v2.helper.no_repay':           'ნუ გადაიხდით კვლავ, თუ დაბრუნდებით ამ გვერდზე.',
+	'v2.helper.instr1':             'გადახდა ავტომატურად მოწმდება.',
+	'v2.helper.instr2':             'საჭიროა 1 დადასტურება.',
+	'v2.helper.instr3':             'შეგიძლია გვერდი დახუროს და დაბრუნდეს. ორჯერ არ გადაიხადო.',
 
 	'v2.helper.progress.step1': 'საფული',
 	'v2.helper.progress.step2': 'გადახდა',

@@ -482,6 +482,38 @@ func TestHelperCreate_InsufficientBalance(t *testing.T) {
 	_ = currency
 }
 
+// Test 6B: Balance exactly at and just above HelperPreInvoiceMinUSD floor → 201 accepted.
+// Complements Test 6 (1009.99 → 402). Verifies the exact boundary:
+//   1009.99 → 402 (below), 1010.00 → 201 (at floor), 1010.01 → 201 (above floor).
+func TestHelperHTTP_BalanceThresholdBoundary(t *testing.T) {
+	cases := []struct {
+		bal     float64
+		wantHTTP int
+		name    string
+	}{
+		{1009.99, http.StatusPaymentRequired, "below_floor"},
+		{1010.00, http.StatusCreated, "at_floor"},
+		{1010.01, http.StatusCreated, "above_floor"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			h, svc := newTestHelperHandler(t, tc.bal)
+			listingID := mustCreateVisibleListing(t, svc.db, "US")
+
+			rr := helperPost(t, h.Routes(), "/v2/helper/contact-purchases", map[string]string{
+				"purchase_token": newID(),
+				"listing_id":     listingID,
+				"wallet_address": testBTCBech32Addr,
+			})
+			if rr.Code != tc.wantHTTP {
+				t.Errorf("bal=%.2f: got %d, want %d: %s", tc.bal, rr.Code, tc.wantHTTP, rr.Body)
+			}
+		})
+	}
+}
+
 // Test 7: Hidden/stale/finished/unknown listing → ErrNotFound, no rows created.
 func TestHelperCreate_InvisibleListing(t *testing.T) {
 	svc, db := newTestHelperService(t)

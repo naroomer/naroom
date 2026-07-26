@@ -19,7 +19,7 @@
 	// purchase_token from sessionStorage only — never exposed in URL/history
 	let purchaseToken = $state('');
 
-	let step = $state('loading'); // loading | invoice | balance | contact | review | done
+	let step = $state('loading'); // loading | invoice | balance | contact | done
 	let loading = $state(true);
 	let error = $state('');
 	let copyMsg = $state('');
@@ -44,6 +44,15 @@
 	let reviewClientReputation = $state(null);
 	let reviewClientName = $state('');
 	let reviewSubmitted = $state(false);
+
+	// Active progress step derived from current step/phase
+	let activeStep = $derived(
+		step === 'invoice' && phase === 'payment_confirmed' ? 3 :
+		step === 'invoice' ? 2 :
+		step === 'balance' ? 4 :
+		step === 'contact' ? 5 :
+		2
+	);
 
 	function paymentURI(inv, curr) {
 		if (!inv?.payment_address) return '';
@@ -285,180 +294,212 @@
 	}
 </script>
 
-<div class="page">
-	<header>
+<div class="layout">
+	<!-- ── Topbar ── -->
+	<div class="topbar">
 		<div class="logo">NA Room <span class="v2-badge">V2</span></div>
-	</header>
-
-	{#if loading && step === 'loading'}
-		<div class="status-msg">{t('v2.loading')}</div>
-
-	{:else if step === 'invoice'}
-		<div class="section">
-			<h2>{t('v2.helper.invoice_title')}</h2>
-
-			<!-- Progress: step 2 = Payment -->
-			<div class="progress-bar">
+		{#if step !== 'loading' && step !== 'done'}
+			<div class="progress">
 				{#each [1,2,3,4,5] as n}
-					<div class="prog-step" class:done={2 > n} class:active={2 === n}>
+					{#if n > 1}<div class="prog-line" class:done={activeStep > n}></div>{/if}
+					<div class="prog-step" class:done={activeStep > n} class:active={activeStep === n}>
 						<div class="prog-dot"></div>
 						<span class="prog-label">{t('v2.helper.progress.step' + n)}</span>
 					</div>
-					{#if n < 5}<div class="prog-line" class:done={2 > n}></div>{/if}
 				{/each}
+				<span class="prog-current">{t('v2.helper.progress.step' + activeStep)} · {activeStep}/5</span>
 			</div>
+		{/if}
+	</div>
 
-			<!-- Helper's nickname -->
-			{#if helperPublicName}
-				<div class="nickname-section">
-					<div class="nickname-label">{t('v2.helper.your_nickname')}</div>
-					<div class="nickname-value">{helperPublicName}</div>
-					<div class="nickname-hint">{t('v2.helper.nickname_permanent')}</div>
-				</div>
-			{/if}
+	<!-- ── Page body ── -->
+	<div class="page-body">
 
-			<!-- Who they're buying contact for -->
-			{#if clientPublicName}
-				<div class="nickname-section">
-					<div class="nickname-label">{t('v2.helper.buying_contact_for')}</div>
-					<div class="nickname-value">{clientPublicName}</div>
-				</div>
-			{/if}
+		{#if loading && step === 'loading'}
+			<div class="center-msg">{t('v2.loading')}</div>
 
-			{#if invoice}
-				<div class="invoice-box">
-					<div class="inv-status" class:confirmed={phase === 'contact_ready' || phase === 'payment_confirmed'} class:detected={phase === 'payment_detected'}>
-						{#if phase === 'awaiting_payment'}
-							{t('v2.invoice.pending')}
-						{:else if phase === 'payment_detected'}
-							{t('v2.invoice.payment_detected')}
-						{:else}
-							{t('v2.invoice.confirmed')}
-						{/if}
-					</div>
-					<div class="inv-row">
-						<span class="inv-label">{t('v2.invoice.amount')}</span>
-						<span class="inv-val">{(invoice.amount_atomic / 1e8).toFixed(8)} {currency}</span>
-						<button class="copy-btn" onclick={() => copyText((invoice.amount_atomic / 1e8).toFixed(8), t('v2.copied'))}>
-							{copyMsg || t('v2.copy')}
-						</button>
-					</div>
-					<div class="inv-row">
-						<span class="inv-label">{t('v2.invoice.address')}</span>
-						<span class="inv-val addr">{invoice.payment_address}</span>
-						<button class="copy-btn" onclick={() => copyText(invoice.payment_address, t('v2.copied'))}>
-							{copyMsg || t('v2.copy')}
-						</button>
-					</div>
-					<div class="inv-row">
-						<span class="inv-label">{t('v2.invoice.usd')}</span>
-						<span class="inv-val">${(invoice.amount_usd_cents / 100).toFixed(2)}</span>
-					</div>
-					{#if phase === 'awaiting_payment' || phase === 'payment_detected'}
-						{#if invoice.payment_address}
-							<div class="qr-wrap">
-								<V2QR data={paymentURI(invoice, currency)} />
+		{:else if step === 'invoice'}
+			<div class="invoice-wrap">
+
+				<!-- Meta panel: aliases + instructions -->
+				<div class="meta-panel">
+					<div class="meta-inner">
+						{#if helperPublicName || clientPublicName}
+							<div class="alias-block">
+								{#if helperPublicName}
+									<div class="alias-row">
+										<span class="alias-label">{t('v2.helper.your_nickname')}</span>
+										<span class="alias-value">{helperPublicName}</span>
+									</div>
+								{/if}
+								{#if clientPublicName}
+									<div class="alias-row">
+										<span class="alias-label">{t('v2.helper.buying_contact_for')}</span>
+										<span class="alias-value">{clientPublicName}</span>
+									</div>
+								{/if}
+								<div class="alias-hint">{t('v2.helper.nickname_permanent')}</div>
 							</div>
 						{/if}
-					{/if}
-				</div>
-
-				<!-- Auto-check info box -->
-				{#if phase === 'awaiting_payment' || phase === 'payment_detected'}
-					<div class="info-box">
-						<ul class="info-list">
-							<li>{t('v2.helper.payment_auto_check')}</li>
-							<li>{t('v2.helper.one_confirmation')}</li>
-							<li>{t('v2.helper.balance_auto_check')}</li>
-							<li>{t('v2.helper.can_restore')}</li>
-							<li>{t('v2.helper.no_repay')}</li>
-						</ul>
-					</div>
-				{/if}
-			{/if}
-
-			{#if error}<div class="err">{error}</div>{/if}
-		</div>
-
-	{:else if step === 'balance'}
-		<div class="section">
-			<h2>{t('v2.balance.title')}</h2>
-			{#if lastBalanceUSD !== null}
-				<div class="err">{t('v2.balance.low', { balance: lastBalanceUSD.toFixed(0), min: '$' + pubConfig.helper_post_payment_min_usd })}</div>
-			{/if}
-			<p class="sub">{t('v2.helper.balance_sub')}</p>
-			<button class="btn-secondary" onclick={restorePurchase} disabled={loading}>
-				{loading ? t('v2.loading') : t('v2.balance.recheck')}
-			</button>
-			{#if error}<div class="err">{error}</div>{/if}
-		</div>
-
-	{:else if step === 'contact'}
-		<div class="section">
-			<h2>{t('v2.helper.contact_title')}</h2>
-
-			{#if contactValue}
-				<div class="contact-reveal">
-					<div class="contact-type-badge">{contactType}</div>
-					<div class="contact-value">
-						<span class="cv-text">{contactValue}</span>
-						<button class="copy-btn-lg" onclick={() => copyText(contactValue, t('v2.copied'))}>
-							{copyMsg || t('v2.copy')}
-						</button>
-						<button class="open-btn" onclick={openContact}>
-							{t('v2.helper.open_contact')}
-						</button>
-					</div>
-					<p class="hint">{t('v2.helper.contact_hint')}</p>
-					{#if receiptExpiresAt}
-						<p class="expiry">{t('v2.helper.receipt_expires', { time: formatExpiry(receiptExpiresAt) })}</p>
-					{/if}
-				</div>
-			{/if}
-
-			<!-- Review section -->
-			{#if reviewToken && !reviewSubmitted}
-				<div class="review-section">
-					<h3>{t('v2.review.title')}</h3>
-					{#if reviewClientName}
-						<p class="sub">{t('v2.review.about', { name: reviewClientName })}</p>
-					{/if}
-					<div class="review-btns">
-						<button class="review-btn positive" onclick={() => submitReview('positive')}>
-							👍 {t('v2.review.positive')}
-						</button>
-						<button class="review-btn negative" onclick={() => submitReview('negative')}>
-							👎 {t('v2.review.negative')}
-						</button>
+						{#if phase === 'awaiting_payment' || phase === 'payment_detected'}
+							<div class="instr-block">
+								<p class="instr">{t('v2.helper.instr1')}</p>
+								<p class="instr">{t('v2.helper.instr2')}</p>
+								<p class="instr">{t('v2.helper.instr3')}</p>
+							</div>
+						{/if}
 					</div>
 				</div>
-			{:else if reviewSubmitted}
-				<div class="review-done">{t('v2.review.submitted')}</div>
-			{/if}
 
-			{#if error}<div class="err">{error}</div>{/if}
-		</div>
+				<!-- Pay panel: status + amount + address + QR -->
+				<div class="pay-panel">
+					{#if invoice}
+						<div class="pay-surface">
+							<div class="inv-status"
+								class:confirmed={phase === 'contact_ready' || phase === 'payment_confirmed'}
+								class:detected={phase === 'payment_detected'}>
+								{#if phase === 'awaiting_payment'}
+									{t('v2.invoice.pending')}
+								{:else if phase === 'payment_detected'}
+									{t('v2.invoice.payment_detected')}
+								{:else}
+									{t('v2.invoice.confirmed')}
+								{/if}
+							</div>
 
-	{:else if step === 'done'}
-		<div class="section">
-			<h2>{t('v2.helper.done_title')}</h2>
-			{#if error}<p class="err">{error}</p>{/if}
-			<a href="/v2/board/tbilisi" class="btn-secondary">{t('v2.listing.back')}</a>
-		</div>
-	{/if}
+							<div class="inv-row">
+								<span class="inv-label">{t('v2.invoice.amount')}</span>
+								<span class="inv-val">{(invoice.amount_atomic / 1e8).toFixed(8)} {currency}</span>
+								<button class="copy-btn" onclick={() => copyText((invoice.amount_atomic / 1e8).toFixed(8), t('v2.copied'))}>
+									{copyMsg || t('v2.copy')}
+								</button>
+							</div>
+
+							<div class="inv-row">
+								<span class="inv-label">{t('v2.invoice.usd')}</span>
+								<span class="inv-val">${(invoice.amount_usd_cents / 100).toFixed(2)}</span>
+							</div>
+
+							<div class="inv-row addr-row">
+								<span class="inv-label">{t('v2.invoice.address')}</span>
+								<span class="inv-val addr">{invoice.payment_address}</span>
+								<button class="copy-btn" onclick={() => copyText(invoice.payment_address, t('v2.copied'))}>
+									{copyMsg || t('v2.copy')}
+								</button>
+							</div>
+
+							{#if (phase === 'awaiting_payment' || phase === 'payment_detected') && invoice.payment_address}
+								<div class="qr-wrap">
+									<V2QR data={paymentURI(invoice, currency)} />
+								</div>
+							{/if}
+						</div>
+					{/if}
+
+					{#if error}<div class="err">{error}</div>{/if}
+				</div>
+			</div>
+
+		{:else if step === 'balance'}
+			<div class="step-center">
+				<div class="step-inner">
+					<h2>{t('v2.balance.title')}</h2>
+					{#if lastBalanceUSD !== null}
+						<div class="err">{t('v2.balance.low', { balance: lastBalanceUSD.toFixed(0), min: '$' + pubConfig.helper_post_payment_min_usd })}</div>
+					{/if}
+					<p class="sub">{t('v2.helper.balance_sub')}</p>
+					<button class="btn-secondary" onclick={restorePurchase} disabled={loading}>
+						{loading ? t('v2.loading') : t('v2.balance.recheck')}
+					</button>
+					{#if error}<div class="err">{error}</div>{/if}
+				</div>
+			</div>
+
+		{:else if step === 'contact'}
+			<div class="step-center">
+				<div class="step-inner">
+					<h2>{t('v2.helper.contact_title')}</h2>
+
+					{#if contactValue}
+						<div class="contact-reveal">
+							<div class="contact-type-badge">{contactType}</div>
+							<div class="contact-value">
+								<span class="cv-text">{contactValue}</span>
+								<button class="copy-btn-lg" onclick={() => copyText(contactValue, t('v2.copied'))}>
+									{copyMsg || t('v2.copy')}
+								</button>
+								<button class="open-btn" onclick={openContact}>
+									{t('v2.helper.open_contact')}
+								</button>
+							</div>
+							<p class="hint">{t('v2.helper.contact_hint')}</p>
+							{#if receiptExpiresAt}
+								<p class="expiry">{t('v2.helper.receipt_expires', { time: formatExpiry(receiptExpiresAt) })}</p>
+							{/if}
+						</div>
+					{/if}
+
+					{#if reviewToken && !reviewSubmitted}
+						<div class="review-section">
+							<h3>{t('v2.review.title')}</h3>
+							{#if reviewClientName}
+								<p class="sub">{t('v2.review.about', { name: reviewClientName })}</p>
+							{/if}
+							<div class="review-btns">
+								<button class="review-btn positive" onclick={() => submitReview('positive')}>
+									👍 {t('v2.review.positive')}
+								</button>
+								<button class="review-btn negative" onclick={() => submitReview('negative')}>
+									👎 {t('v2.review.negative')}
+								</button>
+							</div>
+						</div>
+					{:else if reviewSubmitted}
+						<div class="review-done">{t('v2.review.submitted')}</div>
+					{/if}
+
+					{#if error}<div class="err">{error}</div>{/if}
+				</div>
+			</div>
+
+		{:else if step === 'done'}
+			<div class="step-center">
+				<div class="step-inner">
+					<h2>{t('v2.helper.done_title')}</h2>
+					{#if error}<p class="err">{error}</p>{/if}
+					<a href="/v2/board/tbilisi" class="btn-secondary">{t('v2.listing.back')}</a>
+				</div>
+			</div>
+		{/if}
+
+	</div>
 </div>
 
 <style>
-	.page {
-		max-width: 540px;
-		margin: 0 auto;
-		padding: 0 16px 60px;
+	/* ── Layout shell ── */
+	.layout {
+		min-height: 100dvh;
+		height: 100dvh;
+		overflow: hidden;
+		display: flex;
+		flex-direction: column;
+		background: var(--bg);
 	}
 
-	header { padding: 20px 0 32px; }
-	.logo { font-size: 18px; font-weight: 600; color: var(--text); }
+	/* ── Topbar ── */
+	.topbar {
+		flex-shrink: 0;
+		height: 44px;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 0 20px;
+		border-bottom: 1px solid var(--border);
+	}
+
+	.logo { font-size: 16px; font-weight: 600; color: var(--text); }
 	.v2-badge {
-		font-size: 11px;
+		font-size: 10px;
 		background: var(--accent);
 		color: var(--bg);
 		border-radius: 4px;
@@ -468,109 +509,161 @@
 		vertical-align: middle;
 	}
 
-	.status-msg { text-align: center; padding: 40px 20px; color: var(--text-dim); }
-
-	/* Progress bar */
-	.progress-bar {
+	/* ── Progress bar ── */
+	.progress {
 		display: flex;
-		align-items: flex-start;
-		gap: 0;
-		margin: 4px 0 8px;
-		overflow-x: auto;
+		align-items: center;
 	}
 	.prog-step {
 		display: flex;
 		flex-direction: column;
 		align-items: center;
-		gap: 4px;
-		min-width: 56px;
+		gap: 2px;
 	}
 	.prog-dot {
-		width: 10px; height: 10px;
+		width: 9px; height: 9px;
 		border-radius: 50%;
 		background: var(--border);
 		border: 2px solid var(--border);
 		flex-shrink: 0;
 	}
-	.prog-step.done .prog-dot { background: var(--accent); border-color: var(--accent); opacity: 0.5; }
+	.prog-step.done .prog-dot { background: var(--accent); border-color: var(--accent); opacity: 0.55; }
 	.prog-step.active .prog-dot { background: var(--accent); border-color: var(--accent); }
-	.prog-label { font-size: 10px; color: var(--text-faint); text-align: center; white-space: nowrap; }
-	.prog-step.done .prog-label, .prog-step.active .prog-label { color: var(--text-dim); }
+	.prog-label {
+		font-size: 9px;
+		color: var(--text-faint);
+		white-space: nowrap;
+	}
+	.prog-step.done .prog-label,
+	.prog-step.active .prog-label { color: var(--text-dim); }
 	.prog-line {
-		flex: 1;
-		height: 2px;
+		width: 26px; height: 2px;
 		background: var(--border);
-		margin-top: 4px;
-		min-width: 12px;
+		margin-bottom: 13px;
+		flex-shrink: 0;
 	}
 	.prog-line.done { background: var(--accent); opacity: 0.4; }
 
-	/* Nickname sections */
-	.nickname-section {
-		background: var(--bg-card);
-		border: 1px solid var(--border);
-		border-radius: 8px;
-		padding: 10px 14px;
+	/* Mobile current step label — hidden on desktop */
+	.prog-current {
+		display: none;
+		font-size: 11px;
+		color: var(--text-dim);
+		white-space: nowrap;
+		margin-left: 10px;
+		font-weight: 500;
+	}
+
+	/* ── Page body ── */
+	.page-body {
+		flex: 1;
+		min-height: 0;
+		display: flex;
+		overflow: hidden;
+	}
+
+	/* ── Loading ── */
+	.center-msg {
+		flex: 1;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		color: var(--text-dim);
+		font-size: 14px;
+	}
+
+	/* ── Invoice step: two-column ── */
+	.invoice-wrap {
+		flex: 1;
+		display: flex;
+		overflow: hidden;
+	}
+
+	.meta-panel {
+		width: 220px;
+		flex-shrink: 0;
+		border-right: 1px solid var(--border);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 20px;
+		overflow-y: auto;
+	}
+
+	.meta-inner {
 		display: flex;
 		flex-direction: column;
-		gap: 3px;
+		gap: 18px;
+		width: 100%;
 	}
-	.nickname-label {
-		font-size: 11px;
+
+	.alias-block {
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+	}
+
+	.alias-row {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+
+	.alias-label {
+		font-size: 10px;
 		font-weight: 600;
 		color: var(--text-faint);
 		text-transform: uppercase;
-		letter-spacing: 0.5px;
-	}
-	.nickname-value {
-		font-size: 15px;
-		font-weight: 700;
-		color: var(--text);
-	}
-	.nickname-hint {
-		font-size: 11px;
-		color: var(--text-faint);
+		letter-spacing: 0.4px;
 	}
 
-	/* Info box */
-	.info-box {
-		background: rgba(123, 166, 142, 0.06);
-		border: 1px solid var(--border);
-		border-radius: 8px;
-		padding: 12px 14px;
+	.alias-value {
+		font-size: 14px;
+		font-weight: 700;
+		color: var(--text);
+		word-break: break-word;
 	}
-	.info-list {
-		margin: 0;
-		padding-left: 18px;
+
+	.alias-hint {
+		font-size: 10px;
+		color: var(--text-faint);
+		margin-top: 2px;
+	}
+
+	.instr-block {
 		display: flex;
 		flex-direction: column;
 		gap: 5px;
 	}
-	.info-list li {
+
+	.instr {
 		font-size: 12px;
 		color: var(--text-dim);
 		line-height: 1.4;
+		margin: 0;
 	}
 
-	.section { display: flex; flex-direction: column; gap: 16px; }
-	h2 { font-size: 18px; font-weight: 700; color: var(--text); margin: 0; }
-	h3 { font-size: 15px; font-weight: 700; color: var(--text); margin: 0; }
-	.sub { color: var(--text-dim); font-size: 14px; line-height: 1.5; margin: 0; }
-	.hint { font-size: 12px; color: var(--text-faint); line-height: 1.4; margin: 0; }
-	.err { color: var(--danger); font-size: 13px; }
-	.expiry { font-size: 11px; color: var(--text-faint); }
+	/* ── Pay panel ── */
+	.pay-panel {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 16px 28px;
+		overflow-y: auto;
+	}
 
-	.invoice-box {
-		background: var(--bg-card);
-		border: 1px solid var(--border);
-		border-radius: 10px;
-		padding: 16px;
+	.pay-surface {
+		width: 100%;
+		max-width: 380px;
 		display: flex;
 		flex-direction: column;
-		gap: 12px;
+		gap: 11px;
 	}
+
 	.inv-status {
-		font-size: 12px;
+		font-size: 11px;
 		font-weight: 700;
 		text-transform: uppercase;
 		letter-spacing: 0.5px;
@@ -578,27 +671,79 @@
 	}
 	.inv-status.confirmed { color: var(--accent); }
 	.inv-status.detected { color: var(--warn); }
-	.inv-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-	.inv-label { font-size: 12px; color: var(--text-faint); flex: 0 0 70px; }
-	.inv-val { font-size: 13px; color: var(--text); flex: 1; word-break: break-all; }
-	.inv-val.addr { font-family: monospace; font-size: 12px; }
+
+	.inv-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+	.addr-row { flex-wrap: wrap; }
+
+	.inv-label {
+		font-size: 11px;
+		color: var(--text-faint);
+		flex: 0 0 54px;
+	}
+
+	.inv-val {
+		font-size: 13px;
+		color: var(--text);
+		flex: 1;
+		min-width: 0;
+		word-break: break-all;
+	}
+	.inv-val.addr {
+		font-family: monospace;
+		font-size: 11px;
+	}
 
 	.copy-btn {
 		background: none;
 		border: 1px solid var(--border);
 		border-radius: 4px;
 		color: var(--text-dim);
-		font-size: 11px;
-		padding: 2px 8px;
+		font-size: 10px;
+		padding: 2px 7px;
 		cursor: pointer;
 		white-space: nowrap;
 		transition: border-color 0.15s;
 	}
 	.copy-btn:hover { border-color: var(--accent); color: var(--accent); }
 
-	.qr-wrap { display: flex; justify-content: center; padding: 8px 0; }
-	.qr { width: 160px; height: 160px; border-radius: 6px; }
+	.qr-wrap {
+		display: flex;
+		justify-content: center;
+		padding-top: 6px;
+	}
+	/* Desktop default: 180px QR */
+	.qr-wrap :global(.v2qr svg) { width: 180px; height: 180px; display: block; }
 
+	/* ── Centered steps (balance / contact / done) ── */
+	.step-center {
+		flex: 1;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 24px 20px;
+		overflow-y: auto;
+	}
+
+	.step-inner {
+		width: 100%;
+		max-width: 440px;
+		display: flex;
+		flex-direction: column;
+		gap: 16px;
+	}
+
+	h2 { font-size: 18px; font-weight: 700; color: var(--text); margin: 0; }
+	h3 { font-size: 15px; font-weight: 700; color: var(--text); margin: 0; }
+	.sub { color: var(--text-dim); font-size: 14px; line-height: 1.5; margin: 0; }
+	.hint { font-size: 12px; color: var(--text-faint); line-height: 1.4; margin: 0; }
+	.err { color: var(--danger); font-size: 13px; }
+	.expiry { font-size: 11px; color: var(--text-faint); margin: 0; }
+
+	/* ── Contact reveal ── */
 	.contact-reveal {
 		background: var(--bg-card);
 		border: 1px solid var(--accent);
@@ -615,8 +760,9 @@
 		letter-spacing: 1px;
 		color: var(--accent);
 	}
-	.contact-value { display: flex; align-items: center; gap: 12px; }
+	.contact-value { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 	.cv-text { font-size: 18px; font-weight: 700; color: var(--text); word-break: break-all; }
+
 	.copy-btn-lg {
 		background: var(--bg-card);
 		border: 1px solid var(--border);
@@ -643,6 +789,7 @@
 	}
 	.open-btn:hover { opacity: 0.85; }
 
+	/* ── Review ── */
 	.review-section {
 		background: var(--bg-card);
 		border: 1px solid var(--border);
@@ -673,6 +820,7 @@
 		padding: 8px;
 	}
 
+	/* ── Shared button ── */
 	.btn-secondary {
 		background: var(--bg-card);
 		color: var(--text);
@@ -687,4 +835,66 @@
 		text-align: center;
 	}
 	.btn-secondary:hover { border-color: var(--text-dim); }
+
+	/* ── Desktop: tight height — shrink QR slightly ── */
+	@media (min-width: 601px) and (max-height: 780px) {
+		.qr-wrap :global(.v2qr svg) { width: 170px; height: 170px; }
+	}
+
+	/* ── Mobile: single column ── */
+	@media (max-width: 600px) {
+		.topbar { padding: 0 14px; }
+		.prog-label { display: none; }
+		.prog-current { display: inline; }
+
+		.invoice-wrap {
+			flex-direction: column;
+			overflow-y: auto;
+		}
+
+		.meta-panel {
+			width: 100%;
+			border-right: none;
+			border-bottom: 1px solid var(--border);
+			padding: 10px 16px;
+			align-items: flex-start;
+			justify-content: flex-start;
+			overflow-y: visible;
+		}
+
+		.meta-inner {
+			flex-direction: row;
+			flex-wrap: wrap;
+			gap: 12px;
+		}
+
+		.alias-block { flex: 1; min-width: 140px; }
+		.instr-block { flex: 1; min-width: 140px; }
+
+		.pay-panel {
+			flex: none;
+			padding: 12px 16px;
+			overflow-y: visible;
+			align-items: flex-start;
+			justify-content: flex-start;
+		}
+
+		.pay-surface { max-width: 100%; }
+
+		.qr-wrap :global(.v2qr svg) { width: 128px; height: 128px; }
+	}
+
+	/* ── Very small viewport (360×640 class): ultra-compact ── */
+	@media (max-height: 660px) and (max-width: 600px) {
+		.topbar { height: 38px; }
+		.meta-panel { padding: 7px 14px; }
+		.pay-panel { padding: 8px 14px; }
+		.pay-surface { gap: 8px; }
+		.qr-wrap :global(.v2qr svg) { width: 112px; height: 112px; }
+	}
+
+	/* ── Prevent document scroll — this page owns the full viewport ── */
+	:global(html), :global(body) {
+		overflow: hidden;
+	}
 </style>
