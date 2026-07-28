@@ -1319,7 +1319,8 @@ func mustSetupPendingSnapshot(t *testing.T, transport *TelegramTransport, hpSvc 
 		AmountAtomic:   100000,
 		AmountUSDCents: helperInvoiceUSDCents,
 	}
-	_, view, err := hpSvc.CreatePurchase(newID(), listingID, currency, normalized, draft)
+	rawToken := newID()
+	_, view, err := hpSvc.CreatePurchase(rawToken, listingID, currency, normalized, draft)
 	if err != nil {
 		t.Fatalf("CreatePurchase: %v", err)
 	}
@@ -1333,7 +1334,18 @@ func mustSetupPendingSnapshot(t *testing.T, transport *TelegramTransport, hpSvc 
 		t.Fatalf("RecordHelperPostPaymentBalance: %v", err)
 	}
 
-	// Verify snapshot was created.
+	// Reveal the contact: snapshot transitions awaiting_contact_ready → pending_send
+	// and entitlements are created with available_at = now+3600.
+	if _, err := hpSvc.RevealHelperContact(view.PurchaseID, rawToken, normalized, currency); err != nil {
+		t.Fatalf("RevealHelperContact: %v", err)
+	}
+
+	// Zero out available_at so LoadPendingDeliverySnapshots returns the snapshot immediately.
+	if _, err := db.Exec(`UPDATE v2_review_entitlements SET available_at = 0 WHERE purchase_id = ?`, view.PurchaseID); err != nil {
+		t.Fatalf("reset available_at: %v", err)
+	}
+
+	// Verify snapshot is now pending_send.
 	var snapCount int
 	db.QueryRow(`SELECT COUNT(*) FROM v2_review_delivery_snapshots WHERE purchase_id=? AND state='pending_send'`, view.PurchaseID).Scan(&snapCount) //nolint:errcheck
 	if snapCount != 1 {

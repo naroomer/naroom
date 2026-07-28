@@ -12,12 +12,6 @@ import (
 // normalizes the raw contact. Raw and normalized values are never included in errors.
 const maxNormalizedContactBytes = 256
 
-var cityCountry = map[string]string{
-	"buenos_aires": "AR", "sao_paulo": "BR", "nha_trang": "VN",
-	"da_nang": "VN", "tbilisi": "GE", "batumi": "GE",
-	"almaty": "KZ", "yerevan": "AM", "moscow": "RU",
-}
-
 var validDependencyTypes = map[string]bool{
 	"alcohol": true, "opioids": true, "stimulants": true, "cannabis": true,
 	"cocaine": true, "mephedrone": true, "benzodiazepines": true,
@@ -60,10 +54,11 @@ type validatedListing struct {
 
 func validateListingInput(input ListingInput, cv ContactValidator) (validatedListing, error) {
 	city := strings.TrimSpace(strings.ToLower(input.City))
-	country, ok := cityCountry[city]
+	cityEntry, ok := CityByID(city)
 	if !ok {
 		return validatedListing{}, fmt.Errorf("%w: unknown city", ErrInvalidListingInput)
 	}
+	country := cityEntry.CountryCode
 	dep := strings.TrimSpace(strings.ToLower(input.DependencyType))
 	if !validDependencyTypes[dep] {
 		return validatedListing{}, fmt.Errorf("%w: unknown dependency_type", ErrInvalidListingInput)

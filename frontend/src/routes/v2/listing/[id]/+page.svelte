@@ -1,5 +1,5 @@
 <script>
-	import { onMount } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import { page } from '$app/state';
 	import { lang, t as tFn } from '$lib/i18n.js';
 
@@ -22,6 +22,131 @@
 	let purchasePhase = $state(''); // 'awaiting_payment' | 'payment_detected' | etc.
 	let savedPurchaseState = $state(null); // { phase, purchase_id } from localStorage restore
 	let checkingRestore = $state(false);
+
+	// ── Owner mode (server-authenticated via management_code) ───────────────────
+	// storage (localStorage) is never itself an authorization basis — it only
+	// carries the code as input; the server independently re-verifies it on
+	// every load via POST /api/v2/listings/{id}/owner-view. A private window
+	// (no localStorage entry) always falls through to the public Helper view.
+	let ownerView = $state(null);
+	let ownerCode = $state('');
+	let ownerWalletAddr = $state('');
+	let ownerChecking = $state(true);
+	let ownerError = $state('');
+	let ownerTgLinkUrl = $state('');
+	let ownerTgStatus = $state('needs_link');
+	let ownerReactivating = $state(false);
+	let ownerRemainingSec = $state(0);
+	let ownerCountdownTimer = null;
+
+	async function checkOwnerCapability() {
+		let saved = null;
+		try { saved = JSON.parse(localStorage.getItem(`v2_mgmt_${id}`) || 'null'); } catch {}
+		if (!saved?.code || !saved?.wallet) { ownerChecking = false; return; }
+		ownerCode = saved.code;
+		ownerWalletAddr = saved.wallet;
+		try {
+			const res = await fetch(`/api/v2/listings/${id}/owner-view`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ management_code: ownerCode }),
+			});
+			if (res.ok) {
+				ownerView = await res.json();
+				startOwnerCountdown();
+			} else {
+				// Stale/invalid code for this listing — never treat storage as authority.
+				try { localStorage.removeItem(`v2_mgmt_${id}`); } catch {}
+				ownerView = null;
+			}
+		} catch {} finally {
+			ownerChecking = false;
+		}
+	}
+
+	function startOwnerCountdown() {
+		stopOwnerCountdown();
+		updateOwnerCountdown();
+		ownerCountdownTimer = setInterval(updateOwnerCountdown, 1000);
+	}
+	function stopOwnerCountdown() {
+		if (ownerCountdownTimer) { clearInterval(ownerCountdownTimer); ownerCountdownTimer = null; }
+	}
+	function updateOwnerCountdown() {
+		if (!ownerView?.visible_until) { ownerRemainingSec = 0; return; }
+		const now = Math.floor(Date.now() / 1000);
+		ownerRemainingSec = Math.max(0, ownerView.visible_until - now);
+	}
+	function formatOwnerRemaining(sec) {
+		const h = Math.floor(sec / 3600);
+		const m = Math.floor((sec % 3600) / 60);
+		return `${h}h ${m}m`;
+	}
+
+	async function createOwnerTelegramLink() {
+		ownerError = '';
+		try {
+			const res = await fetch('/api/v2/client/telegram-links', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ management_code: ownerCode, wallet_address: ownerWalletAddr }),
+			});
+			const data = await res.json();
+			if (!res.ok) {
+				if (data.code === 'already_visible') { ownerTgStatus = 'active'; return; }
+				ownerError = data.error || `HTTP ${res.status}`;
+				return;
+			}
+			ownerTgLinkUrl = data.bot_url;
+			ownerTgStatus = 'link_pending';
+			window.open(ownerTgLinkUrl, '_blank', 'noopener');
+			startOwnerTgPoll();
+		} catch (e) {
+			ownerError = e.message;
+		}
+	}
+
+	let ownerTgPollTimer = null;
+	function startOwnerTgPoll() { stopOwnerTgPoll(); ownerTgPollTimer = setInterval(pollOwnerTgStatus, 3000); }
+	function stopOwnerTgPoll() { if (ownerTgPollTimer) { clearInterval(ownerTgPollTimer); ownerTgPollTimer = null; } }
+	async function pollOwnerTgStatus() {
+		try {
+			const res = await fetch('/api/v2/client/telegram-links/status', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ management_code: ownerCode, wallet_address: ownerWalletAddr }),
+			});
+			if (!res.ok) return;
+			const data = await res.json();
+			ownerTgStatus = data.status;
+			if (data.status === 'ready' || data.status === 'active') {
+				stopOwnerTgPoll();
+				await checkOwnerCapability();
+			}
+		} catch {}
+	}
+
+	async function reactivateOwnerListing() {
+		ownerReactivating = true;
+		ownerError = '';
+		try {
+			const res = await fetch('/api/v2/client/listings/reactivate', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ management_code: ownerCode, wallet_address: ownerWalletAddr }),
+			});
+			const data = await res.json();
+			if (!res.ok) {
+				ownerError = data.error || `HTTP ${res.status}`;
+				return;
+			}
+			await checkOwnerCapability();
+		} catch (e) {
+			ownerError = e.message;
+		} finally {
+			ownerReactivating = false;
+		}
+	}
 
 	// Public config for threshold display
 	const DEFAULT_HELPER_CONFIG = { helper_pre_invoice_min_usd: 1010, helper_post_payment_min_usd: 1000, helper_fee_usd_cents: 1000 };
@@ -53,12 +178,13 @@
 	}
 
 	function reputationAge(memberSinceUnix) {
-		if (!memberSinceUnix) return '';
+		if (!memberSinceUnix) return null;
 		const days = Math.floor((Date.now() / 1000 - memberSinceUnix) / 86400);
-		if (days < 7) return t('v2.rep.days', { n: days });
-		if (days < 30) return t('v2.rep.weeks', { n: Math.floor(days / 7) });
-		if (days < 365) return t('v2.rep.months', { n: Math.floor(days / 30) });
-		return t('v2.rep.years', { n: Math.floor(days / 365) });
+		if (days === 0) return t('v2.rep.today');
+		if (days < 7)   return t('v2.rep.days_short',   { n: days });
+		if (days < 30)  return t('v2.rep.weeks_short',  { n: Math.floor(days / 7) });
+		if (days < 365) return t('v2.rep.months_short', { n: Math.floor(days / 30) });
+		return t('v2.rep.years_short', { n: Math.floor(days / 365) });
 	}
 
 	function detectCurrency(addr) {
@@ -87,6 +213,11 @@
 	}
 
 	onMount(loadListing);
+	onMount(checkOwnerCapability);
+	onDestroy(() => {
+		stopOwnerCountdown();
+		stopOwnerTgPoll();
+	});
 
 	// Generate or load purchase_token for this listing, and restore any saved purchase state.
 	onMount(async () => {
@@ -204,11 +335,11 @@
 				}));
 			} catch {}
 			try { sessionStorage.setItem('v2_active_purchase_token', purchaseToken); } catch {}
-			// Save to localStorage for cross-session restore
+			// Save to localStorage for cross-session restore (include city for back-nav)
 			try {
-				const lhptData = JSON.stringify({ token: purchaseToken, wallet: helperWallet.trim() });
+				const lhptData = JSON.stringify({ token: purchaseToken, wallet: helperWallet.trim(), city: listing?.city || '' });
 				localStorage.setItem(`v2_hpt_${id}`, lhptData);
-				localStorage.setItem('v2_active_hpt', JSON.stringify({ token: purchaseToken, wallet: helperWallet.trim(), listingId: id }));
+				localStorage.setItem('v2_active_hpt', JSON.stringify({ token: purchaseToken, wallet: helperWallet.trim(), listingId: id, city: listing?.city || '' }));
 			} catch {}
 			// Show inline purchase state before redirecting
 			purchaseView = data;
@@ -227,14 +358,102 @@
 	<header>
 		<div class="logo">NA Room <span class="v2-badge">V2</span></div>
 		<nav>
-			<a href="/v2/board/{listing?.city || 'tbilisi'}" class="back-link">
+			<a href="/v2/board/{listing?.city || ownerView?.city || 'tbilisi'}" class="back-link">
 				← {t('v2.listing.back')}
 			</a>
 		</nav>
 	</header>
 
-	{#if loading}
+	{#if loading || ownerChecking}
 		<div class="status-msg">{t('v2.loading')}</div>
+
+	{:else if ownerView}
+		<!-- ── Owner mode: server-authenticated via management_code. ──────────────
+		     Independent of the public listing fetch above (which 404s for
+		     hidden/finished listings) — owner mode uses ownerView exclusively.
+		     The Helper wallet form, Helper progress, and "Get contact" button
+		     are entirely absent here. -->
+		<div class="owner-card" data-testid="owner-mode">
+			<div class="owner-head">
+				<h2>{t('v2.owner.title')}</h2>
+				<p class="sub">{t('v2.owner.subtitle')}</p>
+			</div>
+
+			<div class="listing-card">
+				<div class="urgency-strip" style="background: {urgencyColor(ownerView.urgency)}"></div>
+				<div class="listing-body">
+					<div class="listing-head">
+						<div class="dep">{t('dep.' + ownerView.dep_type)}</div>
+						<span class="urgency-tag" style="color: {urgencyColor(ownerView.urgency)}">
+							{t('urgency.' + ownerView.urgency)}
+						</span>
+					</div>
+					<div class="help">{t('help.' + ownerView.help_type)}</div>
+					<div class="meta-row">
+						<span class="langs">{(ownerView.languages || []).join(', ').toUpperCase()}</span>
+					</div>
+					{#if ownerView.display_name}
+						<div class="client-name">
+							<span class="client-name-label">{t('v2.rep.label')}:</span>
+							<span>{ownerView.display_name}</span>
+						</div>
+					{/if}
+				</div>
+			</div>
+
+			<div class="owner-meta">
+				<div class="owner-meta-row">
+					<span class="owner-meta-label">{t('v2.done.city')}</span>
+					<span class="owner-meta-val">{ownerView.city}</span>
+				</div>
+				<div class="owner-meta-row">
+					<span class="owner-meta-label">{t('v2.owner.title')}</span>
+					<span class="owner-meta-val" data-testid="owner-state">
+						{#if ownerView.state === 'visible'}{t('v2.owner.state_visible')}
+						{:else if ownerView.state === 'hidden'}{t('v2.owner.state_hidden')}
+						{:else}{t('v2.owner.state_finished')}{/if}
+					</span>
+				</div>
+				{#if ownerView.state === 'visible' && ownerView.visible_until}
+					<div class="owner-meta-row">
+						<span class="owner-meta-label">{t('v2.done.visible_until')}</span>
+						<span class="owner-meta-val">{new Date(ownerView.visible_until * 1000).toLocaleString()}</span>
+					</div>
+					<div class="owner-meta-row owner-remaining">
+						{t('v2.owner.remaining', { time: formatOwnerRemaining(ownerRemainingSec) })}
+					</div>
+				{/if}
+				{#if ownerView.state !== 'finished'}
+					<div class="owner-meta-row">
+						<span class="owner-meta-label">Telegram</span>
+						<span class="owner-meta-val" data-testid="owner-telegram-status">
+							{ownerView.telegram_ready ? t('v2.owner.telegram_ready') : t('v2.owner.telegram_not_ready')}
+						</span>
+					</div>
+				{/if}
+			</div>
+
+			{#if ownerError}<div class="err">{ownerError}</div>{/if}
+
+			{#if ownerView.state === 'hidden'}
+				{#if ownerView.telegram_ready}
+					<button class="btn-primary" data-testid="owner-reactivate-btn" onclick={reactivateOwnerListing} disabled={ownerReactivating}>
+						{ownerReactivating ? t('v2.loading') : t('v2.owner.reactivate_btn')}
+					</button>
+				{:else if ownerTgStatus === 'link_pending' && ownerTgLinkUrl}
+					<a href={ownerTgLinkUrl} target="_blank" rel="noopener" class="btn-primary owner-tg-btn">{t('v2.telegram.open_bot')}</a>
+				{:else}
+					<button class="btn-primary" data-testid="owner-connect-telegram-btn" onclick={createOwnerTelegramLink}>
+						{t('v2.owner.connect_telegram_btn')}
+					</button>
+				{/if}
+			{:else if ownerView.state === 'finished'}
+				<a href="/v2/new" class="btn-primary btn-link">{t('v2.owner.state_finished')} · {t('back_to_board')}</a>
+			{/if}
+
+			<a href="/v2/board/{listing?.city || ownerView.city || 'tbilisi'}" class="btn-secondary" data-testid="owner-back-board">{t('v2.listing.back')}</a>
+		</div>
+
 	{:else if error}
 		<div class="status-msg error">{error}</div>
 	{:else if listing}
@@ -251,19 +470,20 @@
 				<div class="meta-row">
 					<span class="langs">{(listing.languages || []).join(', ').toUpperCase()}</span>
 					{#if listing.client_reputation}
-						<span class="rep-age">{reputationAge(listing.client_reputation.member_since)}</span>
-						{#if listing.client_reputation.positive_count > 0 || listing.client_reputation.negative_count > 0}
-							<span class="rep-score">
-								👍{listing.client_reputation.positive_count}
-								{#if listing.client_reputation.negative_count > 0}
-								 👎{listing.client_reputation.negative_count}
-								{/if}
-							</span>
+						{@const repAge = reputationAge(listing.client_reputation.member_since_unix ?? listing.client_reputation.member_since)}
+						{#if repAge}
+							<span class="rep-age">{t('v2.rep.since', { age: repAge })}</span>
 						{/if}
+						<span class="rep-score">
+							{t('v2.rep.rating', { pos: listing.client_reputation.positive_count ?? 0, neg: listing.client_reputation.negative_count ?? 0 })}
+						</span>
 					{/if}
 				</div>
 				{#if listing.display_name}
-					<div class="client-name">{listing.display_name}</div>
+					<div class="client-name">
+						<span class="client-name-label">{t('v2.rep.label')}:</span>
+						<span>{listing.display_name}</span>
+					</div>
 				{/if}
 			</div>
 		</div>
@@ -403,6 +623,38 @@
 </div>
 
 <style>
+	/* ── Owner mode ── */
+	.owner-card {
+		display: flex;
+		flex-direction: column;
+		gap: 16px;
+	}
+	.owner-head h2 { font-size: 18px; font-weight: 700; color: var(--text); margin: 0 0 4px; }
+	.owner-head .sub { color: var(--text-dim); font-size: 13px; margin: 0; }
+	.owner-meta {
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		padding: 12px 16px;
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+	.owner-meta-row {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 8px;
+		font-size: 13px;
+	}
+	.owner-meta-label { color: var(--text-faint); }
+	.owner-meta-val { color: var(--text); font-weight: 600; }
+	.owner-remaining {
+		justify-content: flex-start;
+		color: var(--accent);
+		font-weight: 600;
+	}
+
 	.page {
 		max-width: 600px;
 		margin: 0 auto;
@@ -502,7 +754,8 @@
 	.notice-title { font-size: 12px; font-weight: 700; color: var(--warn); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
 	.notice-list { margin: 0; padding: 0 0 0 16px; display: flex; flex-direction: column; gap: 4px; }
 	.notice-list li { font-size: 12px; color: var(--text-dim); line-height: 1.4; }
-	.client-name { font-size: 11px; color: var(--text-faint); font-style: italic; }
+	.client-name { font-size: 11px; color: var(--text-faint); display: flex; gap: 4px; align-items: baseline; }
+	.client-name-label { color: var(--text-faint); font-weight: 600; }
 
 	/* Progress bar */
 	.progress-bar {

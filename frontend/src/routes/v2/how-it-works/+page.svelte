@@ -1,21 +1,37 @@
 <script>
 	import { onMount } from 'svelte';
 	import { lang, t as tFn } from '$lib/i18n.js';
-	import { CITIES } from '$lib/cities.js';
+	import { FALLBACK_CITY_ID } from '$lib/cities.js';
 
 	let t = $derived((key, params) => tFn($lang, key, params));
 
-	const boardUrl = '/v2/board/' + CITIES[0].id;
+	let boardCity = $state(FALLBACK_CITY_ID);
+	let boardUrl = $derived('/v2/board/' + boardCity);
 
 	// ── Public config ──────────────────────────────────────────────────────────────
 	const DEFAULT_CONFIG = { client_public_min_usd: 150, helper_post_payment_min_usd: 1000, informer_min_usd: 1000 };
 	let pubConfig = $state({ ...DEFAULT_CONFIG });
 
 	onMount(async () => {
-		try {
-			const r = await fetch('/api/v2/public-config');
-			if (r.ok) pubConfig = { ...DEFAULT_CONFIG, ...(await r.json()) };
-		} catch {}
+		await Promise.all([
+			(async () => {
+				try {
+					const r = await fetch('/api/v2/public-config');
+					if (r.ok) pubConfig = { ...DEFAULT_CONFIG, ...(await r.json()) };
+				} catch {}
+			})(),
+			(async () => {
+				try {
+					const r = await fetch('/api/v2/board/cities');
+					if (!r.ok) return;
+					const cities = await r.json();
+					if (Array.isArray(cities) && cities.length > 0) {
+						const fallbackEnabled = cities.some((city) => city.id === FALLBACK_CITY_ID);
+						boardCity = fallbackEnabled ? FALLBACK_CITY_ID : cities[0].id;
+					}
+				} catch {}
+			})(),
+		]);
 	});
 </script>
 

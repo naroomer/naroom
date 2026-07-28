@@ -53,13 +53,14 @@ type V2Adapters struct {
 // V2System is the fully assembled V2 subsystem returned by WireV2System.
 type V2System struct {
 	// HTTP handlers (exported — used by cmd/naroom/v2wire.go and MountRoutes)
-	ClientHandler     *ClientHandler
-	JourneyHandler    *ClientJourneyHandler
-	TelegramLink      *TelegramLinkHandler
-	InformerHandler   *InformerHandler
-	InformerTransport *InformerTransport
-	HelperHandler     *HelperPurchaseHandler
-	ReviewHandler     *HelperReviewHandler
+	ClientHandler      *ClientHandler
+	JourneyHandler     *ClientJourneyHandler
+	TelegramLink       *TelegramLinkHandler
+	InformerHandler    *InformerHandler
+	InformerTransport  *InformerTransport
+	HelperHandler      *HelperPurchaseHandler
+	ReviewHandler      *HelperReviewHandler
+	CitySummaryHandler *CitySummaryHandler
 
 	// Workers (exported — goroutines started by cmd/naroom/v2wire.go)
 	V2Watcher       *V2Watcher
@@ -200,6 +201,8 @@ func WireV2System(db *sql.DB, keys V2Keys, bots V2BotConfig, adapters V2Adapters
 		return nil, fmt.Errorf("v2: WireV2System: review handler: %w", err)
 	}
 
+	citySummaryHandler := NewCitySummaryHandler(db, now)
+
 	// ── Workers ────────────────────────────────────────────────────────────────
 	v2Watcher, err := NewV2Watcher(svc, chainClients, balReader, now, nil, 5*time.Second)
 	if err != nil {
@@ -216,17 +219,18 @@ func WireV2System(db *sql.DB, keys V2Keys, bots V2BotConfig, adapters V2Adapters
 	lifecycleWorker := NewLifecycleWorker(listingSvc, helperSvc, telegramTransport, now)
 
 	return &V2System{
-		ClientHandler:     clientHandler,
-		JourneyHandler:    journeyHandler,
-		TelegramLink:      telegramLinkHandler,
-		InformerHandler:   informerHandler,
-		InformerTransport: informerTransport,
-		HelperHandler:     helperHandler,
-		ReviewHandler:     reviewHandler,
-		V2Watcher:         v2Watcher,
-		HelperWatcher:     helperWatcher,
-		InformerWorker:    informerWorker,
-		LifecycleWorker:   lifecycleWorker,
+		ClientHandler:      clientHandler,
+		JourneyHandler:     journeyHandler,
+		TelegramLink:       telegramLinkHandler,
+		InformerHandler:    informerHandler,
+		InformerTransport:  informerTransport,
+		HelperHandler:      helperHandler,
+		ReviewHandler:      reviewHandler,
+		CitySummaryHandler: citySummaryHandler,
+		V2Watcher:          v2Watcher,
+		HelperWatcher:      helperWatcher,
+		InformerWorker:     informerWorker,
+		LifecycleWorker:    lifecycleWorker,
 		// Unexported — for package-internal test access only.
 		db:          db,
 		svc:         svc,
@@ -252,6 +256,7 @@ func (sys *V2System) MountRoutes(mux *http.ServeMux) {
 	iwMux := sys.InformerTransport.Routes()
 	hMux := sys.HelperHandler.Routes()
 	rMux := sys.ReviewHandler.Routes()
+	csMux := sys.CitySummaryHandler.Routes()
 
 	// Client payment intents
 	mux.HandleFunc("POST /v2/client/payment-intents", cMux.ServeHTTP)
@@ -262,6 +267,7 @@ func (sys *V2System) MountRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v2/client/listings/restore", jMux.ServeHTTP)
 	mux.HandleFunc("POST /v2/client/listings/publish", jMux.ServeHTTP)
 	mux.HandleFunc("POST /v2/client/listings/reactivate", jMux.ServeHTTP)
+	mux.HandleFunc("POST /v2/listings/{id}/owner-view", jMux.ServeHTTP)
 	mux.HandleFunc("GET /v2/board/{city}", jMux.ServeHTTP)
 	mux.HandleFunc("GET /v2/listings/{listing_id}", jMux.ServeHTTP)
 
@@ -283,9 +289,17 @@ func (sys *V2System) MountRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v2/helper/contact-purchases/recheck-balance", hMux.ServeHTTP)
 	mux.HandleFunc("POST /v2/helper/contact-purchases/reveal", hMux.ServeHTTP)
 
+	// Helper handoff (cross-device transfer)
+	mux.HandleFunc("POST /v2/helper/handoff/create", hMux.ServeHTTP)
+	mux.HandleFunc("POST /v2/helper/handoff/redeem", hMux.ServeHTTP)
+	mux.HandleFunc("POST /v2/helper/reviews/reminder-link", hMux.ServeHTTP)
+
 	// Helper reviews
 	mux.HandleFunc("POST /v2/helper/reviews/capability", rMux.ServeHTTP)
 	mux.HandleFunc("POST /v2/helper/reviews", rMux.ServeHTTP)
+
+	// City summary (H2.2)
+	mux.HandleFunc("GET /v2/board/cities", csMux.ServeHTTP)
 
 	// V2 public configuration endpoint — returns all configurable balance thresholds.
 	mux.HandleFunc("GET /v2/public-config", func(w http.ResponseWriter, r *http.Request) {

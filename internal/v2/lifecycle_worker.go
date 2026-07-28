@@ -65,7 +65,16 @@ func NewLifecycleWorker(
 	w.opNormalizeExpired = listingSvc.NormalizeExpired
 	w.opNormalizeHelper = helperSvc.NormalizeHelperExpired
 	w.opNormalizeAttempts = telegramTr.NormalizeExpiredAttempts
-	w.opSendReviews = func() error { return telegramTr.SendPendingReviewNotifications() }
+	w.opSendReviews = func() error {
+		// Send immediate notices first, then delayed review prompts, then Helper reminders.
+		if err := telegramTr.SendPendingImmediateNotices(); err != nil {
+			return err
+		}
+		if err := telegramTr.SendPendingReviewNotifications(); err != nil {
+			return err
+		}
+		return telegramTr.SendPendingReminderNotifications()
+	}
 	return w
 }
 

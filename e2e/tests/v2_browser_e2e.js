@@ -2,8 +2,23 @@
 /**
  * V2 Browser E2E — Playwright with real UI interactions
  *
- * Starts V2 backend + Vite frontend on dynamic ports, runs 12 browser steps,
- * takes screenshots, verifies teardown. Two sequential runs.
+ * Starts V2 backend + Vite frontend on dynamic ports, runs the full browser
+ * journey (create/publish, owner mode, private-window public mode, self-purchase
+ * guard, cross-device handoff threat matrix, helper purchase, review lifecycle,
+ * hidden-listing reactivation, restore-page matrix), takes screenshots, verifies
+ * teardown. Two sequential runs.
+ *
+ * Context/persona model:
+ *   - `context` (with clipboard perms) is the CLIENT's own browser throughout
+ *     the run — clientPage lives here from step 1 through the end.
+ *   - `helperContext` is a SEPARATE browser context representing the Helper's
+ *     own device — helperPage lives here. This matters once owner mode exists:
+ *     a page sharing the Client's context/localStorage would incorrectly see
+ *     owner mode when visiting the Client's own listing.
+ *   - Any step that needs to simulate "a different person/device" (balance
+ *     outage check, self-purchase attempt, handoff redeem, restore-page entry)
+ *     uses a fresh `browser.newContext()` — real incognito-style isolation,
+ *     no shared storage with `context` or `helperContext`.
  *
  * Dev API calls (devAPI helper) are ONLY used to simulate external events
  * that cannot happen in a test without a real blockchain/Telegram:
@@ -15,6 +30,7 @@
  *   - POST /dev/listing/expire
  *   - POST /dev/telegram/review-callback  (routes through real transport webhook)
  *   - GET  /dev/helper/reputation         (helper aggregate counts)
+ *   - GET  /dev/db/counts                 (domain-effect row counts — E2E-only)
  * All user actions (fill, click, navigate, read DOM) go through the browser.
  */
 
@@ -176,13 +192,29 @@ async function runOnce(runNumber) {
   const env = await startTestEnv();
   const { backendBase, frontendBase } = env;
 
-  // Browser context with clipboard permissions so copy-btn assertions work.
   const browser = await chromium.launch({ headless: true });
+  // Client persona: clipboard perms needed for invoice/code copy-button assertions.
   const context = await browser.newContext({ permissions: ['clipboard-read', 'clipboard-write'] });
 
   let passed = 0;
   let failed = 0;
   const failures = [];
+  // Tracks pages/contexts opened mid-run so a failure doesn't leak them past teardown.
+  const scratchContexts = [];
+
+  async function withIncognito(fn) {
+    const ctx = await browser.newContext({ permissions: ['clipboard-read', 'clipboard-write'] });
+    scratchContexts.push(ctx);
+    const page = await ctx.newPage();
+    page.on('popup', p => { p.close().catch(() => {}); });
+    try {
+      return await fn(page, ctx);
+    } finally {
+      await ctx.close().catch(() => {});
+      const idx = scratchContexts.indexOf(ctx);
+      if (idx >= 0) scratchContexts.splice(idx, 1);
+    }
+  }
 
   async function step(name, fn) {
     try {
@@ -193,19 +225,26 @@ async function runOnce(runNumber) {
       console.error(`    ✗ ${name}: ${e.message}`);
       failed++;
       failures.push({ name, error: e.message });
+      // Print last 20 backend log lines to aid debugging
+      if (env && env.backend && env.backend._lines) {
+        const lines = env.backend._lines.slice(-20).filter(l => l.trim());
+        if (lines.length > 0) console.error('    [backend log]', lines.join('\n    [backend log] '));
+      }
     }
   }
 
-  // Shared state across steps — persists through all 10 steps within a run.
+  // Shared state across steps — persists through the whole run.
   let managementCode = '';
   let flowId = '';
   let listingId = '';
   let purchaseToken = '';
   let purchaseId = '';
 
-  // clientPage is kept alive across steps 1-5 and 10.
-  // helperPage is created in step 6 and kept alive through steps 6-9.
+  // clientPage lives in `context` (Client's own browser) for the whole run.
+  // helperPage lives in a SEPARATE `helperContext` (Helper's own device) from
+  // step 6 onward — critical once owner mode exists (see file header).
   let clientPage = null;
+  let helperContext = null;
   let helperPage = null;
 
   try {
@@ -247,9 +286,8 @@ async function runOnce(runNumber) {
       const qrExt = await clientPage.locator('img[src*="qrserver"]').count();
       assert(qrExt === 0, 'qrserver.com external QR still present — must use local V2QR');
 
-      // Local V2QR must render
-      const localQR = await clientPage.locator('.v2qr svg, .v2qr').count();
-      assert(localQR > 0, 'local V2QR component not rendered on invoice step');
+      // V2QR renders its SVG asynchronously after the invoice shell appears.
+      await clientPage.locator('.v2qr svg').waitFor({ state: 'visible', timeout: 10000 });
 
       // Exact 8-decimal invoice amount
       const amtText = await clientPage.locator('.inv-val').first().textContent();
@@ -333,7 +371,7 @@ async function runOnce(runNumber) {
     });
 
     // ── Step 4: Fill form → publish → done screen ─────────────────────────────
-    await step('4: Fill listing form → publish → done screen with listing link', async () => {
+    await step('4: Fill listing form → publish → done screen with Manage-listing link', async () => {
       // Already on form step (chip-group visible from step 3)
       await clientPage.waitForSelector('.chip-group', { timeout: 10000 });
 
@@ -352,8 +390,12 @@ async function runOnce(runNumber) {
       // Publish
       await clientPage.click('button.btn-primary:not(:disabled)');
       await clientPage.waitForSelector('.done-icon, .done', { timeout: 15000 });
-      // Wait for the listing link to appear (rendered conditionally after listingId is set)
+      // Wait for the "Manage listing" link to appear (rendered conditionally after listingId is set)
       await clientPage.waitForSelector('a[href*="/v2/listing/"]', { timeout: 5000 }).catch(() => {});
+
+      // Button must now say "Manage listing", not the old "View listing".
+      const manageBtn = clientPage.locator('[data-testid="manage-listing-btn"]');
+      assert(await manageBtn.count() > 0, 'Manage-listing button (data-testid=manage-listing-btn) not found on done screen');
 
       // Get listing ID from the done screen link
       listingId = await clientPage.evaluate(() => {
@@ -365,6 +407,33 @@ async function runOnce(runNumber) {
       assert(listingId.length > 0, 'listing ID not found on done screen');
 
       await clientPage.screenshot({ path: join(SCREENSHOTS_DIR, `run${runNumber}_04_done.png`) });
+    });
+
+    // ── Step 4b: Owner mode — Client's own browser sees "Your listing", no purchase form ─
+    await step('4b: Owner mode — Client visiting own listing sees Your listing, no Helper form, Back to board', async () => {
+      // Same shared `context` as clientPage: localStorage carries the owner
+      // capability (v2_mgmt_<id>) saved by /v2/new on publish success.
+      await clientPage.goto(`${frontendBase}/v2/listing/${listingId}`);
+      await clientPage.waitForLoadState('networkidle');
+      await clientPage.waitForSelector('[data-testid="owner-mode"]', { timeout: 10000 });
+
+      // Helper wallet form / progress / purchase button must be entirely absent.
+      const walletFormCount = await clientPage.locator('.field input[type="text"]').count();
+      assert(walletFormCount === 0, 'owner mode: Helper wallet form must not render');
+      const purchaseBtnCount = await clientPage.locator('button:has-text("Get contact")').count();
+      assert(purchaseBtnCount === 0, 'owner mode: Get-contact purchase button must not render');
+      const progressCount = await clientPage.locator('.progress-bar').count();
+      assert(progressCount === 0, 'owner mode: Helper progress bar must not render');
+
+      // State must be visible (published just now) with a remaining-time indicator.
+      const stateText = ((await clientPage.locator('[data-testid="owner-state"]').textContent()) || '').toLowerCase();
+      assert(stateText.length > 0, 'owner state text empty');
+
+      // Back to board must always be present.
+      assert(await clientPage.locator('[data-testid="owner-back-board"]').count() > 0,
+        'owner mode: Back to board link missing');
+
+      await clientPage.screenshot({ path: join(SCREENSHOTS_DIR, `run${runNumber}_04b_owner_mode.png`) });
     });
 
     // ── Step 5: Board shows listing; no privacy leaks; no overflow ────────────
@@ -407,10 +476,10 @@ async function runOnce(runNumber) {
     await step('5b: Balance outage → error shown, Retry button visible, no invoice created', async () => {
       await devAPI(backendBase, 'POST', '/dev/balance/outage', { enabled: true });
 
-      const tempPage = await context.newPage();
-      tempPage.on('popup', p => { p.close().catch(() => {}); });
-      await tempPage.setViewportSize({ width: 390, height: 844 });
-      try {
+      // Fresh incognito context: a real Helper device, never shares the Client's
+      // localStorage (so owner mode never fires here regardless of listing state).
+      await withIncognito(async (tempPage) => {
+        await tempPage.setViewportSize({ width: 390, height: 844 });
         await tempPage.goto(`${frontendBase}/v2/listing/${listingId}`);
         await tempPage.waitForLoadState('networkidle');
         await tempPage.waitForSelector('input[type="text"]', { timeout: 10000 });
@@ -440,10 +509,170 @@ async function runOnce(runNumber) {
         assert(disabledCount > 0, 'main purchase button not disabled during balance outage');
 
         await tempPage.screenshot({ path: join(SCREENSHOTS_DIR, `run${runNumber}_5b_outage.png`) });
-      } finally {
-        await tempPage.close();
-        await devAPI(backendBase, 'POST', '/dev/balance/outage', { enabled: false });
-      }
+      });
+
+      await devAPI(backendBase, 'POST', '/dev/balance/outage', { enabled: false });
+    });
+
+    // ── Step 5c: wallet_already_visible — second listing attempt rejected ──────
+    await step('5c: wallet_already_visible — localized error, no invoice, 0 new client flows/invoices', async () => {
+      const before = await devAPI(backendBase, 'GET', '/dev/db/counts');
+
+      // CLIENT_WALLET already has a visible listing from step 4.
+      // Attempting to create another payment intent for the same wallet must return 409
+      // with code=wallet_already_visible, and the page must show a localized error message.
+      await withIncognito(async (tempPage) => {
+        await tempPage.setViewportSize({ width: 390, height: 844 });
+        await tempPage.goto(`${frontendBase}/v2/new`);
+        await tempPage.waitForLoadState('networkidle');
+        await tempPage.waitForSelector('input[type="text"]', { timeout: 10000 });
+
+        // Fill same wallet that already has a listing
+        await tempPage.fill('input[type="text"]', CLIENT_WALLET);
+        await tempPage.waitForTimeout(400);
+
+        // Click primary button — should trigger wallet_already_visible 409
+        await tempPage.click('button.btn-primary:not(:disabled)');
+
+        // Might hit code gate first — if code-box appears, fill checkbox and continue
+        const codeBoxVisible = await tempPage.locator('.code-box').isVisible().catch(() => false);
+        if (codeBoxVisible) {
+          await tempPage.check('input[type="checkbox"]');
+          await tempPage.waitForTimeout(200);
+          await tempPage.click('button.btn-primary:not(:disabled)');
+        }
+
+        // Wait for error — must appear (no invoice-box must follow)
+        await tempPage.waitForSelector('.err', { timeout: 10000 });
+        const errText = ((await tempPage.locator('.err').first().textContent()) || '').toLowerCase();
+        assert(
+          errText.includes('wallet') || errText.includes('already') || errText.includes('active') || errText.includes('listing'),
+          `expected wallet_already_visible error, got: "${errText}"`
+        );
+
+        // Invoice must NOT have appeared
+        const invoiceCount = await tempPage.locator('.invoice-box').count();
+        assert(invoiceCount === 0, 'invoice-box appeared after wallet_already_visible — guard failed');
+
+        await tempPage.screenshot({ path: join(SCREENSHOTS_DIR, `run${runNumber}_5c_wallet_already.png`) });
+      });
+
+      const after = await devAPI(backendBase, 'GET', '/dev/db/counts');
+      assert(after.v2_client_flows === before.v2_client_flows,
+        `wallet_already_visible must create 0 new client flows: before=${before.v2_client_flows}, after=${after.v2_client_flows}`);
+      assert(after.v2_invoices === before.v2_invoices,
+        `wallet_already_visible must create 0 new client invoices: before=${before.v2_invoices}, after=${after.v2_invoices}`);
+    });
+
+    // ── Step 5d: Self-purchase — private-window public mode + 0 external effects ─
+    await step('5d: Private-window public mode + self-purchase guard — 0 new helper purchases/invoices', async () => {
+      const before = await devAPI(backendBase, 'GET', '/dev/db/counts');
+
+      await withIncognito(async (tempPage) => {
+        await tempPage.setViewportSize({ width: 390, height: 844 });
+        await tempPage.goto(`${frontendBase}/v2/listing/${listingId}`);
+        await tempPage.waitForLoadState('networkidle');
+
+        // Private window (no owner localStorage): must see the ORDINARY public
+        // Helper view, never owner mode.
+        assert(await tempPage.locator('[data-testid="owner-mode"]').count() === 0,
+          'private window incorrectly shows owner mode — storage must not be an authorization basis');
+        await tempPage.waitForSelector('input[type="text"]', { timeout: 10000 });
+
+        // CLIENT_WALLET owns listingId. Trying to purchase it as a helper must fail —
+        // guard runs before any balance/invoice provider call.
+        await tempPage.fill('input[type="text"]', CLIENT_WALLET);
+        await tempPage.waitForTimeout(300);
+        await tempPage.click('button.btn-primary:not(:disabled)');
+        await tempPage.waitForTimeout(2000);
+
+        // Must show an error — no invoice
+        const errText = ((await tempPage.locator('.err').first().textContent().catch(() => '')) || '').toLowerCase();
+        assert(errText.length > 0, 'no error shown for self-purchase attempt');
+
+        // Must NOT redirect to /v2/helper/purchase
+        assert(
+          !tempPage.url().includes('/v2/helper/purchase'),
+          `redirected to purchase page on self-purchase attempt: ${tempPage.url()}`
+        );
+
+        await tempPage.screenshot({ path: join(SCREENSHOTS_DIR, `run${runNumber}_5d_self_purchase.png`) });
+      });
+
+      const after = await devAPI(backendBase, 'GET', '/dev/db/counts');
+      assert(after.v2_helper_purchases === before.v2_helper_purchases,
+        `self-purchase must create 0 helper purchases: before=${before.v2_helper_purchases}, after=${after.v2_helper_purchases}`);
+      assert(after.v2_helper_invoices === before.v2_helper_invoices,
+        `self-purchase must create 0 helper invoices: before=${before.v2_helper_invoices}, after=${after.v2_helper_invoices}`);
+      assert(after.balance_provider_calls === before.balance_provider_calls,
+        `self-purchase must make 0 balance-provider calls: before=${before.balance_provider_calls}, after=${after.balance_provider_calls}`);
+      assert(after.helper_invoice_provider_calls === before.helper_invoice_provider_calls,
+        `self-purchase must make 0 helper-invoice-provider calls: before=${before.helper_invoice_provider_calls}, after=${after.helper_invoice_provider_calls}`);
+    });
+
+    // ── Step 5e: hidden listing permits a brand-new paid create flow ──────────
+    // then Client reactivates the ORIGINAL listing through owner mode (never
+    // through /v2/new — create must never drive reactivation).
+    await step('5e: Hidden listing does not block a new paid flow; owner-mode reactivation restores visibility', async () => {
+      // External event: force listing to 'hidden' AND delete binding (binding TTL simulated)
+      await devAPI(backendBase, 'POST', '/dev/listing/expire', { listing_id: listingId });
+
+      // Same wallet, listing now hidden (not visible) → /v2/new must NOT block a
+      // brand new paid flow (only an effectively VISIBLE listing blocks create).
+      await withIncognito(async (tempPage) => {
+        await tempPage.setViewportSize({ width: 390, height: 844 });
+        await tempPage.goto(`${frontendBase}/v2/new`);
+        await tempPage.waitForLoadState('networkidle');
+        await tempPage.waitForSelector('input[type="text"]', { timeout: 10000 });
+        await tempPage.fill('input[type="text"]', CLIENT_WALLET);
+        await tempPage.waitForTimeout(300);
+        await tempPage.click('button.btn-primary:not(:disabled)');
+        // A NEW payment intent must be created (code gate reached), not a wallet_already_visible error.
+        await tempPage.waitForSelector('.code-box', { timeout: 10000 });
+        const errCount = await tempPage.locator('.err').count();
+        assert(errCount === 0, 'hidden listing incorrectly blocked a brand-new paid create flow');
+        // Abandon this throwaway second flow deliberately — no payment, no publish.
+      });
+
+      // Owner mode: Client's own browser revisits the (now hidden) listing.
+      await clientPage.goto(`${frontendBase}/v2/listing/${listingId}`);
+      await clientPage.waitForLoadState('networkidle');
+      await clientPage.waitForSelector('[data-testid="owner-mode"]', { timeout: 10000 });
+      const stateText = ((await clientPage.locator('[data-testid="owner-state"]').textContent()) || '').toLowerCase();
+      assert(stateText.length > 0, 'owner state missing after expiry');
+
+      // Telegram binding was deleted by /dev/listing/expire → must show connect button.
+      await clientPage.waitForSelector('[data-testid="owner-connect-telegram-btn"]', { timeout: 10000 });
+      await clientPage.click('[data-testid="owner-connect-telegram-btn"]');
+
+      // Wait for the "open bot" link with a real bot URL.
+      await clientPage.waitForSelector('a.owner-tg-btn[href*="t.me"]', { timeout: 15000 });
+      const href = await clientPage.locator('a.owner-tg-btn[href*="t.me"]').first().getAttribute('href');
+      assert(href, 'owner Telegram anchor has no href');
+      const tokenMatch = href.match(/[?&]start=([^&]+)/);
+      assert(tokenMatch, `no ?start= param in owner bot_url: ${href}`);
+      await devAPI(backendBase, 'POST', '/dev/telegram/simulate-start', { raw_token: tokenMatch[1] });
+
+      // Poll detects binding=ready → owner view refreshes → Reactivate button appears.
+      await clientPage.waitForSelector('[data-testid="owner-reactivate-btn"]', { timeout: 15000 });
+      await clientPage.click('[data-testid="owner-reactivate-btn"]');
+
+      // Must transition back to visible.
+      await clientPage.waitForFunction(
+        () => (document.querySelector('[data-testid="owner-state"]')?.textContent || '').length > 0 &&
+              !document.querySelector('[data-testid="owner-connect-telegram-btn"]') &&
+              !document.querySelector('[data-testid="owner-reactivate-btn"]'),
+        null,
+        { timeout: 15000 }
+      );
+
+      // Listing must be back on the public board.
+      const boardR = await fetch(`${frontendBase}/api/v2/board/tbilisi`);
+      const board = await boardR.json();
+      assert(Array.isArray(board) && board.find(l => l.id === listingId),
+        'listing NOT back on board after owner-mode reactivation');
+
+      await clientPage.screenshot({ path: join(SCREENSHOTS_DIR, `run${runNumber}_5e_reactivated.png`) });
     });
 
     // ── Step 6: Helper purchase → no ?pt= → invoice → clipboard ──────────────
@@ -454,12 +683,18 @@ async function runOnce(runNumber) {
         balance_usd: 2000.0,
       });
 
-      // Create helperPage from same context (clipboard perms inherited)
-      helperPage = await context.newPage();
+      // Helper persona lives in its OWN browser context — never shares the
+      // Client's localStorage (so owner mode never fires for the Helper).
+      helperContext = await browser.newContext({ permissions: ['clipboard-read', 'clipboard-write'] });
+      helperPage = await helperContext.newPage();
       helperPage.on('popup', p => { p.close().catch(() => {}); });
       await helperPage.setViewportSize({ width: 390, height: 844 });
       await helperPage.goto(`${frontendBase}/v2/listing/${listingId}`);
       await helperPage.waitForLoadState('networkidle');
+
+      // Must be the ordinary public view, never owner mode.
+      assert(await helperPage.locator('[data-testid="owner-mode"]').count() === 0,
+        'Helper (separate device) incorrectly shows owner mode');
 
       // Informational notice must be visible before wallet input
       const noticeCount = await helperPage.locator('.notice-box, .notice-title').count();
@@ -474,6 +709,14 @@ async function runOnce(runNumber) {
       await helperPage.fill('input[type="text"]', HELPER_WALLET);
       await helperPage.waitForTimeout(500);
 
+      // Capture API response for diagnostics
+      let _apiRespBody = null;
+      helperPage.on('response', async resp => {
+        if (resp.url().includes('/api/v2/helper/contact-purchases') && resp.request().method() === 'POST') {
+          try { _apiRespBody = await resp.json(); } catch {}
+        }
+      });
+
       // Click "Get contact" / helper purchase button
       await helperPage.click('button.btn-primary:not(:disabled)');
       await helperPage.waitForTimeout(2000);
@@ -482,8 +725,9 @@ async function runOnce(runNumber) {
       const url = helperPage.url();
       assert(!url.includes('?pt=') && !url.includes('&pt=') && !url.includes('%3Fpt%3D'),
         `purchase token exposed in URL: ${url}`);
+      const _errText = await helperPage.locator('.err').first().textContent().catch(() => '');
       assert(url.includes('/v2/helper/purchase'),
-        `expected /v2/helper/purchase, got: ${url}`);
+        `expected /v2/helper/purchase, got: ${url}; err="${_errText}"; API resp: ${JSON.stringify(_apiRespBody)}`);
 
       // Invoice must be visible
       await helperPage.waitForSelector('.pay-surface', { timeout: 15000 });
@@ -512,18 +756,232 @@ async function runOnce(runNumber) {
       await helperPage.screenshot({ path: join(SCREENSHOTS_DIR, `run${runNumber}_06_helper_invoice.png`) });
     });
 
+    // ── Step 6g: Cross-device handoff — full threat matrix ────────────────────
+    await step('6g: Cross-device handoff — wrong wallet, expiry, concurrent redeem, real redeem, old-token revoked, replay', async () => {
+      // helperPage is on /v2/helper/purchase (invoice step) from step 6.
+      await helperPage.waitForSelector('.btn-handoff', { timeout: 5000 });
+
+      function assertSafeHandoffFailure(status, body, label) {
+        assert(status === 404, `${label}: expected safe 404, got ${status}`);
+        assert(body && body.error === 'purchase not found' && body.code === 'purchase_not_found',
+          `${label}: unexpected safe error body ${JSON.stringify(body)}`);
+        assert(Object.keys(body).length === 2,
+          `${label}: safe error leaked additional fields ${JSON.stringify(body)}`);
+      }
+
+      async function responseJSON(resp, label) {
+        const text = await resp.text();
+        try {
+          return JSON.parse(text);
+        } catch {
+          throw new Error(`${label}: response is not JSON: status=${resp.status()} body=${JSON.stringify(text)}`);
+        }
+      }
+
+      async function createHandoffFromHelperPage() {
+        const [resp] = await Promise.all([
+          helperPage.waitForResponse(r => r.url().includes('/api/v2/helper/handoff/create') && r.request().method() === 'POST'),
+          helperPage.click('.btn-handoff'),
+        ]);
+        const data = await resp.json();
+        assert(data && data.token, 'handoff create response missing token');
+        // Token travels ONLY in the URL fragment — never a query param, never the wallet.
+        const url = `${frontendBase}/v2/helper/purchase#handoff=${encodeURIComponent(data.token)}`;
+        assert(!url.includes('wallet='), 'handoff URL must never contain a wallet param');
+        return url;
+      }
+
+      // UI verification: box, QR, expiry, close button all present.
+      const url1 = await createHandoffFromHelperPage();
+      await helperPage.waitForSelector('.handoff-box', { timeout: 10000 });
+      const qrInBox = await helperPage.locator('.handoff-qr .v2qr svg, .handoff-qr svg').count();
+      assert(qrInBox > 0, 'V2QR SVG not rendered inside .handoff-qr');
+      assert(await helperPage.locator('.handoff-expires').count() > 0, '.handoff-expires element not found');
+      assert(await helperPage.locator('.handoff-box .btn-text').count() > 0, 'close button (.btn-text) not found');
+      const invoiceAddr = (await helperPage.locator('.inv-val.addr').first().textContent().catch(() => '')).trim();
+      assert(invoiceAddr.length > 0, 'cannot read invoice address before handoff redeem tests');
+      await helperPage.locator('.handoff-box .btn-text').first().click();
+      await helperPage.waitForTimeout(300);
+
+      // ── Negative: wrong wallet — token still pending afterward (no consume on failure) ──
+      await withIncognito(async (wrongPage) => {
+        await wrongPage.setViewportSize({ width: 390, height: 844 });
+        await wrongPage.goto(url1);
+        await wrongPage.waitForLoadState('networkidle');
+        // Must show the dedicated redeem form — NOT auto-submitted, NOT pre-filled.
+        await wrongPage.waitForSelector('[data-testid="handoff-redeem-form"]', { timeout: 10000 });
+        const prefilled = await wrongPage.locator('[data-testid="handoff-redeem-wallet-input"]').inputValue();
+        assert(prefilled === '', `redeem wallet field must start empty, got "${prefilled}"`);
+        assert(await wrongPage.locator('.pay-surface').count() === 0, 'invoice rendered before redeem submit — must not auto-submit');
+        await wrongPage.fill('[data-testid="handoff-redeem-wallet-input"]', CLIENT_WALLET); // wrong wallet
+        const [wrongResp] = await Promise.all([
+          wrongPage.waitForResponse(r => r.url().includes('/api/v2/helper/handoff/redeem') && r.request().method() === 'POST'),
+          wrongPage.click('[data-testid="handoff-redeem-submit-btn"]'),
+        ]);
+        const wrongBody = await responseJSON(wrongResp, 'wrong-wallet redeem');
+        assertSafeHandoffFailure(wrongResp.status(), wrongBody, 'wrong-wallet redeem');
+        await wrongPage.waitForTimeout(1500);
+        const errText = (await wrongPage.locator('.err').textContent().catch(() => ''));
+        assert(errText.length > 0, 'wrong-wallet handoff redeem must show an error');
+        assert(await wrongPage.locator('.pay-surface').count() === 0, 'wrong-wallet redeem must not restore the invoice');
+      });
+
+      // ── Negative: expired token — same safe response, no invoice restore ──
+      // Wrong-wallet validation does not consume the capability, so reuse url1
+      // for the expiry boundary and stay inside the production create limiter.
+      await devAPI(backendBase, 'POST', '/dev/helper/handoff/expire', { purchase_id: purchaseId });
+      await withIncognito(async (expiredPage) => {
+        await expiredPage.setViewportSize({ width: 390, height: 844 });
+        await expiredPage.goto(url1);
+        await expiredPage.waitForLoadState('networkidle');
+        await expiredPage.waitForSelector('[data-testid="handoff-redeem-form"]', { timeout: 10000 });
+        await expiredPage.fill('[data-testid="handoff-redeem-wallet-input"]', HELPER_WALLET);
+        const [expiredResp] = await Promise.all([
+          expiredPage.waitForResponse(r => r.url().includes('/api/v2/helper/handoff/redeem') && r.request().method() === 'POST'),
+          expiredPage.click('[data-testid="handoff-redeem-submit-btn"]'),
+        ]);
+        const expiredBody = await responseJSON(expiredResp, 'expired redeem');
+        assertSafeHandoffFailure(expiredResp.status(), expiredBody, 'expired redeem');
+        assert(await expiredPage.locator('.pay-surface').count() === 0,
+          'expired handoff token must not restore the invoice');
+      });
+
+      // ── Concurrent real cross-device redeem — exactly one winner ─────────
+      const url2 = await createHandoffFromHelperPage();
+      await helperPage.locator('.handoff-box .btn-text').first().click();
+      await helperPage.waitForTimeout(300);
+      const staleToken = purchaseToken;
+      let newDeviceToken = '';
+      const raceContexts = await Promise.all([
+        browser.newContext({ permissions: ['clipboard-read', 'clipboard-write'] }),
+        browser.newContext({ permissions: ['clipboard-read', 'clipboard-write'] }),
+      ]);
+      scratchContexts.push(...raceContexts);
+      try {
+        const racePages = await Promise.all(raceContexts.map(ctx => ctx.newPage()));
+        await Promise.all(racePages.map(async page => {
+          await page.setViewportSize({ width: 390, height: 844 });
+          await page.goto(url2);
+          await page.waitForLoadState('networkidle');
+          await page.waitForSelector('[data-testid="handoff-redeem-form"]', { timeout: 10000 });
+          const prefilled = await page.locator('[data-testid="handoff-redeem-wallet-input"]').inputValue();
+          assert(prefilled === '', `concurrent redeem wallet field must start empty, got "${prefilled}"`);
+          await page.fill('[data-testid="handoff-redeem-wallet-input"]', HELPER_WALLET);
+        }));
+
+        const responsePromises = racePages.map(page =>
+          page.waitForResponse(r => r.url().includes('/api/v2/helper/handoff/redeem') && r.request().method() === 'POST')
+        );
+        await Promise.all(racePages.map(page => page.click('[data-testid="handoff-redeem-submit-btn"]')));
+        const responses = await Promise.all(responsePromises);
+        const raceResults = await Promise.all(responses.map(async (resp, index) => ({
+          index,
+          status: resp.status(),
+          body: await responseJSON(resp, `concurrent redeem ${index + 1}`),
+        })));
+        const winners = raceResults.filter(r => r.status === 200 && r.body && r.body.browser_token);
+        const losers = raceResults.filter(r => r.status !== 200);
+        assert(winners.length === 1, `concurrent redeem: want exactly 1 winner, got ${winners.length}`);
+        assert(losers.length === 1, `concurrent redeem: want exactly 1 loser, got ${losers.length}`);
+        assertSafeHandoffFailure(losers[0].status, losers[0].body, 'concurrent redeem loser');
+
+        newDeviceToken = winners[0].body.browser_token;
+        const winningPage = racePages[winners[0].index];
+        try {
+          await winningPage.waitForSelector('.pay-surface', { timeout: 15000 });
+        } catch (e) {
+          const ui = await winningPage.locator('body').innerText().catch(() => '');
+          throw new Error(`winning device did not restore invoice after 200 redeem; body=${JSON.stringify(ui.slice(0, 1000))}; ${e.message}`);
+        }
+        const redeemAddr = (await winningPage.locator('.inv-val.addr').first().textContent().catch(() => '')).trim();
+        assert(redeemAddr === invoiceAddr,
+          `handoff redeem shows wrong invoice address: got "${redeemAddr}", expected "${invoiceAddr}"`);
+        await winningPage.screenshot({ path: join(SCREENSHOTS_DIR, `run${runNumber}_6g_handoff.png`) });
+
+        const losingPage = racePages[losers[0].index];
+        await losingPage.waitForTimeout(800);
+        assert(await losingPage.locator('.pay-surface').count() === 0,
+          'concurrent redeem loser must not restore the invoice');
+      } finally {
+        await Promise.all(raceContexts.map(ctx => ctx.close().catch(() => {})));
+        for (const ctx of raceContexts) {
+          const idx = scratchContexts.indexOf(ctx);
+          if (idx >= 0) scratchContexts.splice(idx, 1);
+        }
+      }
+
+      // Old (pre-redeem) token must be revoked immediately: helperPage still
+      // holds `staleToken` — reloading with it must now fail.
+      await helperPage.evaluate((tok) => {
+        try { sessionStorage.setItem('v2_active_purchase_token', tok); } catch {}
+      }, staleToken);
+      await helperPage.reload();
+      await helperPage.waitForLoadState('networkidle');
+      const revokedOk = await helperPage.locator('.pay-surface').count();
+      assert(revokedOk === 0, 'old browser token still works after handoff redeem — must be revoked');
+
+      // ── Negative: replay — reusing url2's already-consumed token must fail ──
+      await withIncognito(async (replayPage) => {
+        await replayPage.setViewportSize({ width: 390, height: 844 });
+        await replayPage.goto(url2);
+        await replayPage.waitForLoadState('networkidle');
+        await replayPage.waitForSelector('[data-testid="handoff-redeem-form"]', { timeout: 10000 });
+        await replayPage.fill('[data-testid="handoff-redeem-wallet-input"]', HELPER_WALLET);
+        const [replayResp] = await Promise.all([
+          replayPage.waitForResponse(r => r.url().includes('/api/v2/helper/handoff/redeem') && r.request().method() === 'POST'),
+          replayPage.click('[data-testid="handoff-redeem-submit-btn"]'),
+        ]);
+        const replayBody = await responseJSON(replayResp, 'replayed redeem');
+        assertSafeHandoffFailure(replayResp.status(), replayBody, 'replayed redeem');
+        await replayPage.waitForTimeout(1500);
+        assert(await replayPage.locator('.pay-surface').count() === 0, 'replayed handoff token must not restore the invoice');
+        const errText = (await replayPage.locator('.err').textContent().catch(() => ''));
+        assert(errText.length > 0, 'replayed handoff token must show an error');
+      });
+
+      // Restore continuity on helperPage using the new valid token from device 2,
+      // so steps 6b onward continue operating on a working session.
+      await helperPage.evaluate(({ tok, wallet, lid }) => {
+        try { sessionStorage.setItem('v2_active_purchase_token', tok); } catch {}
+        try {
+          const saved = { token: tok, wallet, listingId: lid, city: 'tbilisi' };
+          localStorage.setItem('v2_active_hpt', JSON.stringify(saved));
+          localStorage.setItem(`v2_hpt_${lid}`, JSON.stringify(saved));
+        } catch {}
+      }, { tok: newDeviceToken, wallet: HELPER_WALLET, lid: listingId });
+      const restoreResponsePromise = helperPage.waitForResponse(r =>
+        r.url().includes('/api/v2/helper/contact-purchases/restore') && r.request().method() === 'POST'
+      );
+      await helperPage.reload();
+      const rotatedRestoreResp = await restoreResponsePromise;
+      const rotatedRestoreBody = await responseJSON(rotatedRestoreResp, 'rotated-session restore');
+      const rotatedRestoreRequest = rotatedRestoreResp.request().postData() || '';
+      assert(rotatedRestoreResp.ok(),
+        `rotated-session restore failed: status=${rotatedRestoreResp.status()} request=${rotatedRestoreRequest} body=${JSON.stringify(rotatedRestoreBody)}`);
+      await helperPage.waitForLoadState('networkidle');
+      try {
+        await helperPage.waitForSelector('.pay-surface', { timeout: 15000 });
+      } catch (e) {
+        const ui = await helperPage.locator('body').innerText().catch(() => '');
+        throw new Error(`original device did not restore rotated session; body=${JSON.stringify(ui.slice(0, 1000))}; ${e.message}`);
+      }
+      const finalAddr = (await helperPage.locator('.inv-val.addr').first().textContent().catch(() => '')).trim();
+      assert(finalAddr === invoiceAddr, 'invoice address changed after restoring continuity — wrong purchase');
+      purchaseToken = newDeviceToken;
+    });
+
     // ── Step 6b: Continue purchase — board badge, listing Continue, same invoice ─
     await step('6b: Continue purchase — board shows badge, listing shows Continue, same invoice restored', async () => {
       // Capture invoice address before navigating away
       const invoiceAddr = (await helperPage.locator('.inv-val.addr').first().textContent().catch(() => '')).trim();
       assert(invoiceAddr.length > 0, 'could not read invoice address before continue-purchase test');
 
-      // Board: navigate clientPage → must show continue-badge (same localStorage context)
-      await clientPage.goto(`${frontendBase}/v2/board/tbilisi`);
-      await clientPage.waitForLoadState('networkidle');
-      await clientPage.waitForSelector('.card.listing', { timeout: 10000 });
-      await clientPage.waitForSelector('.continue-badge', { timeout: 10000 });
-      const badgeCount = await clientPage.locator('.continue-badge').count();
+      // The saved purchase belongs to the Helper browser context, not Client.
+      await helperPage.goto(`${frontendBase}/v2/board/tbilisi`);
+      await helperPage.waitForLoadState('networkidle');
+      await helperPage.waitForSelector('.card.listing', { timeout: 10000 });
+      await helperPage.waitForSelector('.continue-badge', { timeout: 10000 });
+      const badgeCount = await helperPage.locator('.continue-badge').count();
       assert(badgeCount > 0, 'continue-badge not shown on board for listing with pending purchase');
 
       // Simulate new-session restore: clear helperPage sessionStorage
@@ -607,6 +1065,9 @@ async function runOnce(runNumber) {
         const addrBox   = await assertIn('.inv-val.addr',        'address');
         const aliasBox  = await assertIn('.alias-block',         'aliases');
         const instrBox  = await assertIn('.instr-block',         'instructions');
+        const topbarBox = await assertIn('.topbar',               'topbar');
+        const navBox    = await assertIn('.topbar-nav',           'topbar navigation');
+        const progBox   = await assertIn('.progress',             'progress');
         await assertIn('.instr',                                  'instr line');
 
         // All 3 instruction lines present (not hidden)
@@ -639,13 +1100,20 @@ async function runOnce(runNumber) {
           `${vp.w}×${vp.h}: alias-block overlaps pay-surface`);
         assert(!overlaps(instrBox, payBox),
           `${vp.w}×${vp.h}: instr-block overlaps pay-surface`);
+        assert(navBox.y >= topbarBox.y - 1 &&
+               navBox.y + navBox.height <= topbarBox.y + topbarBox.height + 1,
+          `${vp.w}×${vp.h}: topbar navigation escapes topbar; nav=${JSON.stringify(navBox)} topbar=${JSON.stringify(topbarBox)}`);
+        assert(!overlaps(navBox, progBox),
+          `${vp.w}×${vp.h}: topbar navigation overlaps progress`);
+        assert(!overlaps(navBox, aliasBox),
+          `${vp.w}×${vp.h}: topbar navigation overlaps aliases`);
 
         // 6. Language switcher (if present) must not overlap pay-surface
-        const langCount = await helperPage.locator('.lang-switch, [class*="lang"]').count();
+        const langCount = await helperPage.locator('.lang-bar').count();
         if (langCount > 0) {
-          const langBox = await helperPage.locator('.lang-switch, [class*="lang"]').first().boundingBox();
+          const langBox = await helperPage.locator('.lang-bar').first().boundingBox();
           assert(!overlaps(langBox, payBox),
-            `${vp.w}×${vp.h}: lang switcher overlaps pay-surface`);
+            `${vp.w}×${vp.h}: lang switcher overlaps pay-surface; lang=${JSON.stringify(langBox)} pay=${JSON.stringify(payBox)}`);
         }
 
         await helperPage.screenshot({
@@ -717,7 +1185,12 @@ async function runOnce(runNumber) {
       // Create new purchase for the same wallet
       await helperPage.fill('input[type="text"]', HELPER_WALLET);
       await helperPage.waitForTimeout(300);
-      await helperPage.click('button.btn-primary:not(:disabled)');
+      const [createAgainResp] = await Promise.all([
+        helperPage.waitForResponse(r => r.url().includes('/api/v2/helper/contact-purchases') && r.request().method() === 'POST'),
+        helperPage.click('button.btn-primary:not(:disabled)'),
+      ]);
+      assert(createAgainResp.ok(),
+        `new purchase after expiry failed: status=${createAgainResp.status()}`);
       await helperPage.waitForURL(`**\/v2\/helper\/purchase**`, { timeout: 10000 });
       await helperPage.waitForSelector('.pay-surface', { timeout: 10000 });
 
@@ -785,6 +1258,14 @@ async function runOnce(runNumber) {
 
     // ── Step 9: Helper review → webhook callback → helper aggregate ───────────
     await step('9: Helper review → client callback via webhook → aggregate +1 exactly once; replay idempotent', async () => {
+      // Unlock review: zero out available_at so review buttons appear immediately
+      // (RevealHelperContact sets available_at = reveal_time + 3600; bypass for E2E).
+      await devAPI(backendBase, 'POST', '/dev/helper/review/unlock', { purchase_id: purchaseId });
+
+      // Reload so the frontend re-fetches review capability with available_at = 0.
+      await helperPage.reload();
+      await helperPage.waitForLoadState('networkidle');
+
       // helperPage is still on the contact page — review buttons must be present. MANDATORY.
       await helperPage.locator('button.review-btn, button.review-btn.positive').first().waitFor({ timeout: 10000 });
 
@@ -803,7 +1284,10 @@ async function runOnce(runNumber) {
 
       // External event: simulate Client clicking Telegram inline button via real webhook
       const notifs = await devAPI(backendBase, 'GET', '/dev/notifications');
-      const n = (notifs.notifications || [])[0];
+      const notificationList = notifs.notifications || [];
+      assert(notificationList.some(item => item.text && !item.pos_data),
+        'immediate purchase notification was not delivered');
+      const n = notificationList.find(item => item.pos_data);
       assert(n && n.pos_data, 'no review notification with pos_data found after helper review');
 
       // Verify notification message text contains Helper info and rating symbols.
@@ -811,7 +1295,7 @@ async function runOnce(runNumber) {
       assert(n.text.includes('Helper:'), `notification text missing "Helper:" label: ${n.text}`);
       assert(n.text.includes('👍') && n.text.includes('👎'),
         `notification text missing 👍/👎 rating symbols: ${n.text}`);
-      assert(n.text.includes('Did this Helper help you?'),
+      assert(n.text.includes('Helper help you?'),
         `notification text missing review question: ${n.text}`);
 
       await devAPI(backendBase, 'POST', '/dev/telegram/review-callback', { callback_data: n.pos_data });
@@ -854,69 +1338,54 @@ async function runOnce(runNumber) {
       await helperPage.screenshot({ path: join(SCREENSHOTS_DIR, `run${runNumber}_09_review.png`) });
     });
 
-    // ── Step 10: Expire → navigate /v2/new → Connect Telegram → reactivate ───
-    await step('10: Daily expire → navigate /v2/new → fresh Connect Telegram → auto-reactivate', async () => {
-      // External event: force listing to 'hidden' AND delete binding (binding TTL simulated)
-      await devAPI(backendBase, 'POST', '/dev/listing/expire', { listing_id: listingId });
+    // ── Step 10: /v2/restore matrix — wrong/mixed/unknown identical error; valid → owner mode ─
+    await step('10: /v2/restore — wrong/mixed/unknown give identical error; valid code+wallet → owner mode', async () => {
+      await withIncognito(async (restorePage) => {
+        await restorePage.setViewportSize({ width: 390, height: 844 });
 
-      // Intercept reactivation responses to verify the call is made
-      const reactivationResponses = [];
-      clientPage.on('response', async (resp) => {
-        if (resp.url().includes('/listings/reactivate')) {
-          try { reactivationResponses.push({ status: resp.status(), body: (await resp.text()).slice(0, 200) }); } catch {}
+        async function tryRestore(wallet, code) {
+          await restorePage.goto(`${frontendBase}/v2/restore`);
+          await restorePage.waitForLoadState('networkidle');
+          await restorePage.fill('input[type="text"]', wallet);
+          await restorePage.fill('input.code-input', code);
+          await restorePage.click('button.btn-primary:not(:disabled)');
+          await restorePage.waitForSelector('.err', { timeout: 10000 });
+          return (await restorePage.locator('.err').textContent()) || '';
         }
+
+        // Wrong code, correct wallet.
+        const errWrongCode = await tryRestore(CLIENT_WALLET, 'wrong-code-0000000000000000');
+        // Correct code, wrong wallet.
+        const errWrongWallet = await tryRestore(HELPER_WALLET, managementCode);
+        // Mixed pair from two different real listings (still both "unknown" together): use a
+        // syntactically-valid but entirely unrelated wallet + unrelated code.
+        const errUnknown = await tryRestore('bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh', 'totally-unknown-code-000000');
+
+        assert(errWrongCode.length > 0 && errWrongCode === errWrongWallet && errWrongWallet === errUnknown,
+          `restore errors must be byte-identical: wrongCode="${errWrongCode}" wrongWallet="${errWrongWallet}" unknown="${errUnknown}"`);
+
+        await restorePage.screenshot({ path: join(SCREENSHOTS_DIR, `run${runNumber}_10_restore_error.png`) });
+
+        // Valid pair → owner mode on the listing page (never /v2/new).
+        await restorePage.goto(`${frontendBase}/v2/restore`);
+        await restorePage.waitForLoadState('networkidle');
+        await restorePage.fill('input[type="text"]', CLIENT_WALLET);
+        await restorePage.fill('input.code-input', managementCode);
+        await restorePage.click('button.btn-primary:not(:disabled)');
+        await restorePage.waitForURL(`**\/v2\/listing\/${listingId}`, { timeout: 10000 });
+        await restorePage.waitForSelector('[data-testid="owner-mode"]', { timeout: 10000 });
+        assert(!restorePage.url().includes('/v2/new'), 'restore must never navigate through /v2/new');
+
+        await restorePage.screenshot({ path: join(SCREENSHOTS_DIR, `run${runNumber}_10_restore_owner.png`) });
       });
-
-      // Navigate clientPage to /v2/new — same tab, sessionStorage has managementCode/flowId/walletAddress
-      // onMount will restore from v2_client_state and detect phase=hidden → isReactivating=true.
-      await clientPage.setViewportSize({ width: 1440, height: 900 });
-      await clientPage.goto(`${frontendBase}/v2/new`);
-
-      // Wait up to 15s for the UI to restore and show: tg-btn (Telegram step), ok-badge, or done-icon.
-      // NOTE: must NOT use '.done' here — the progress bar renders <div class="prog-step done"> for
-      // completed steps even when step='telegram', so '.done' count > 0 is NOT the done screen.
-      await clientPage.waitForSelector('button.tg-btn, .ok-badge, .done-icon', { timeout: 15000 });
-
-      // Use only '.done-icon' (not '.done') — the progress bar adds class 'done' to completed step dots.
-      const isDone = await clientPage.locator('.done-icon').count();
-      if (isDone === 0) {
-        // Telegram step is shown (binding was deleted by expire, need fresh connect)
-        await clientPage.waitForSelector('button.tg-btn', { timeout: 5000 });
-        await clientPage.locator('button.tg-btn').first().click();
-
-        // Wait for link_pending anchor with real bot URL
-        await clientPage.waitForSelector('a.tg-btn[href*="t.me"]', { timeout: 15000 });
-        const href = await clientPage.locator('a.tg-btn[href*="t.me"]').first().getAttribute('href');
-        assert(href, 'tg-btn anchor has no href on reactivation');
-        const tokenMatch = href.match(/[?&]start=([^&]+)/);
-        assert(tokenMatch, `no ?start= param in bot_url on reactivation: ${href}`);
-        const rawToken = tokenMatch[1];
-
-        // External event: simulate Telegram /start via real webhook
-        await devAPI(backendBase, 'POST', '/dev/telegram/simulate-start', { raw_token: rawToken });
-
-        // Poll detects binding=ready → isReactivating=true → reactivateListing() auto-called → done.
-        // Use only '.done-icon' (not '.done') — progress bar adds class 'done' to completed steps.
-        await clientPage.waitForSelector('.done-icon', { timeout: 20000 });
-      }
-
-      await clientPage.waitForTimeout(300); // allow response events to flush
-
-      // Listing must be back on board (no new $5 invoice required)
-      const boardR = await fetch(`${frontendBase}/api/v2/board/tbilisi`);
-      const boardText = await boardR.text();
-      let board;
-      try { board = JSON.parse(boardText); } catch { board = []; }
-      const reactivated = Array.isArray(board) && board.find(l => l.id === listingId);
-      assert(reactivated, `listing NOT back on board after reactivation — five-day window consumed incorrectly\n  listingId=${listingId}\n  boardStatus=${boardR.status}\n  board=${boardText.slice(0, 500)}`);
-
-      await clientPage.screenshot({ path: join(SCREENSHOTS_DIR, `run${runNumber}_10_reactivated.png`) });
     });
 
   } finally {
-    // Close both persistent pages
+    // Close both persistent pages/contexts
     if (clientPage) { try { await clientPage.close(); } catch {} }
     if (helperPage) { try { await helperPage.close(); } catch {} }
+    if (helperContext) { try { await helperContext.close(); } catch {} }
+    for (const ctx of scratchContexts.slice()) { try { await ctx.close(); } catch {} }
     await context.close();
     await browser.close();
     await teardown(env);
@@ -924,10 +1393,11 @@ async function runOnce(runNumber) {
 
   // Verify all screenshot files exist and have non-zero size
   const screenshots = [
-    '01_invoice', '04_done', '05_board_desktop', '05_board_mobile',
-    '5b_outage', '06_helper_invoice', '6b_continue',
+    '01_invoice', '04_done', '04b_owner_mode', '05_board_desktop', '05_board_mobile',
+    '5b_outage', '5c_wallet_already', '5d_self_purchase', '5e_reactivated',
+    '06_helper_invoice', '6g_handoff', '6b_continue',
     'layout_1440x900', 'layout_1280x720', 'layout_390x844', 'layout_375x667', 'layout_360x640',
-    '6c_terminal', '07_contact', '09_review', '10_reactivated',
+    '6c_terminal', '07_contact', '09_review', '10_restore_error', '10_restore_owner',
   ].map(s => join(SCREENSHOTS_DIR, `run${runNumber}_${s}.png`));
   for (const f of screenshots) {
     const st = statSync(f);
@@ -955,7 +1425,7 @@ for (let run = 1; run <= 2; run++) {
     results.push(await runOnce(run));
   } catch (e) {
     console.error(`  FATAL run ${run}: ${e.stack || e.message}`);
-    results.push({ passed: 0, failed: 10, failures: [{ name: 'fatal', error: e.message }] });
+    results.push({ passed: 0, failed: 20, failures: [{ name: 'fatal', error: e.message }] });
   }
   if (run < 2) {
     console.log('\n  Waiting 2s between runs...');

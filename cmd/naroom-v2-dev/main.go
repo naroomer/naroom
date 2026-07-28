@@ -110,6 +110,12 @@ type devClientIssuer struct {
 	counter int
 }
 
+func (s *devClientIssuer) calls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.counter
+}
+
 func (s *devClientIssuer) CreateClientInvoice(_ context.Context, currency string) (v2.InvoiceDraft, error) {
 	s.mu.Lock()
 	s.counter++
@@ -142,6 +148,12 @@ type devHelperIssuer struct {
 	counter int
 }
 
+func (s *devHelperIssuer) calls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.counter
+}
+
 func (s *devHelperIssuer) CreateHelperInvoice(_ context.Context, currency string) (v2.HelperInvoiceDraft, error) {
 	s.mu.Lock()
 	s.counter++
@@ -171,6 +183,7 @@ type devBalanceReader struct {
 	mu       sync.Mutex
 	balances map[string]float64 // wallet_address → USD balance
 	outage   bool               // when true, BalanceUSD returns an error
+	calls    int
 }
 
 func newDevBalanceReader() *devBalanceReader {
@@ -180,6 +193,7 @@ func newDevBalanceReader() *devBalanceReader {
 func (r *devBalanceReader) BalanceUSD(_ context.Context, walletAddress, _ string) (float64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.calls++
 	if r.outage {
 		return 0, fmt.Errorf("dev: balance service outage simulated")
 	}
@@ -187,6 +201,12 @@ func (r *devBalanceReader) BalanceUSD(_ context.Context, walletAddress, _ string
 		return b, nil
 	}
 	return 200.0, nil // default: $200 (above client $120 floor and helper $60 dev floor)
+}
+
+func (r *devBalanceReader) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
 }
 
 func (r *devBalanceReader) set(walletAddress string, balanceUSD float64) {
@@ -244,6 +264,13 @@ func (s *devReviewSender) SendReviewPrompt(_ context.Context, chatID int64, text
 	return nil
 }
 
+func (s *devReviewSender) SendPlainMessage(_ context.Context, chatID int64, text string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.notifications = append(s.notifications, devNotification{ChatID: chatID, Text: text})
+	log.Printf("[dev-telegram] immediate notice to chat %d", chatID)
+	return nil
+}
 func (s *devReviewSender) AnswerCallback(_ context.Context, _, _ string) error { return nil }
 func (s *devReviewSender) EditMessage(_ context.Context, _, _ int64, _ string) error {
 	return nil
@@ -285,6 +312,10 @@ func openFileDB(path string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	if err := v2.MigrateSchema(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate schema: %w", err)
+	}
 	return db, nil
 }
 
@@ -299,6 +330,8 @@ type devServer struct {
 	transport    *v2.TelegramTransport
 	destCipher   *v2.DestinationCipher
 	balance      *devBalanceReader
+	clientIssuer *devClientIssuer
+	helperIssuer *devHelperIssuer
 	reviewSender *devReviewSender
 	botSender    *devBotSender
 
@@ -315,12 +348,15 @@ type devServer struct {
 	tgH      *v2.TelegramLinkHandler
 	helperH  *v2.HelperPurchaseHandler
 	reviewH  *v2.HelperReviewHandler
+	cityH    *v2.CitySummaryHandler
 }
 
 func buildDevServer(db *sql.DB) (*devServer, error) {
 	ds := &devServer{
 		db:           db,
 		balance:      newDevBalanceReader(),
+		clientIssuer: &devClientIssuer{},
+		helperIssuer: &devHelperIssuer{},
 		reviewSender: &devReviewSender{},
 		botSender:    &devBotSender{},
 	}
@@ -427,7 +463,7 @@ func buildDevServer(db *sql.DB) (*devServer, error) {
 	ls.SetInformerNotifier(informerSvc)
 
 	// HTTP handlers
-	clientH, err := v2.NewClientHandler(svc, &devClientIssuer{}, ds.balance, devRateLimitKey, time.Now)
+	clientH, err := v2.NewClientHandler(svc, ds.clientIssuer, ds.balance, devRateLimitKey, time.Now)
 	if err != nil {
 		return nil, fmt.Errorf("NewClientHandler: %w", err)
 	}
@@ -445,7 +481,7 @@ func buildDevServer(db *sql.DB) (*devServer, error) {
 	}
 	ds.tgH = tgH
 
-	helperH, err := v2.NewHelperPurchaseHandler(helperSvc, &devHelperIssuer{}, ds.balance, devRateLimitKey, time.Now)
+	helperH, err := v2.NewHelperPurchaseHandler(helperSvc, ds.helperIssuer, ds.balance, devRateLimitKey, time.Now)
 	if err != nil {
 		return nil, fmt.Errorf("NewHelperPurchaseHandler: %w", err)
 	}
@@ -456,6 +492,7 @@ func buildDevServer(db *sql.DB) (*devServer, error) {
 		return nil, fmt.Errorf("NewHelperReviewHandler: %w", err)
 	}
 	ds.reviewH = reviewH
+	ds.cityH = v2.NewCitySummaryHandler(db, time.Now)
 
 	return ds, nil
 }
@@ -653,7 +690,16 @@ func (ds *devServer) devHandleConfirmHelperPayment(w http.ResponseWriter, r *htt
 		return
 	}
 
-	// Send pending review notifications now (normally done by watcher)
+	// Flush the immediate Client notice (no review buttons) now that contact_ready
+	// has been reached. In production this is done by LifecycleWorker.ReviewDeliveryOnce
+	// on a 30s tick; the dev binary has no background worker, so it must be triggered
+	// explicitly at every point where new deliverable state may exist.
+	if notifyErr := ds.transport.SendPendingImmediateNotices(); notifyErr != nil {
+		log.Printf("[dev] SendPendingImmediateNotices: %v", notifyErr)
+	}
+	// Also flush the delayed review-prompt queue: harmless no-op here (the
+	// entitlement doesn't exist until first reveal), but keeps this call site
+	// consistent with production's combined delivery tick.
 	if notifyErr := ds.transport.SendPendingReviewNotifications(); notifyErr != nil {
 		log.Printf("[dev] SendPendingReviewNotifications: %v", notifyErr)
 	}
@@ -699,9 +745,9 @@ func (ds *devServer) devHandleBalanceOutage(w http.ResponseWriter, r *http.Reque
 	}
 	ds.balance.setOutage(req.Enabled)
 	devJSON(w, map[string]any{
-		"ok":      true,
-		"outage":  req.Enabled,
-		"msg":     fmt.Sprintf("Balance outage simulation: %v", req.Enabled),
+		"ok":     true,
+		"outage": req.Enabled,
+		"msg":    fmt.Sprintf("Balance outage simulation: %v", req.Enabled),
 	})
 }
 
@@ -910,6 +956,47 @@ func (ds *devServer) devHandleExpireHelperInvoice(w http.ResponseWriter, r *http
 	})
 }
 
+// devHandleExpireHelperHandoff handles POST /dev/helper/handoff/expire
+// Body: {"purchase_id":"..."} — expires pending handoffs for one purchase.
+// This is a dev/E2E-only clock boundary control and is never wired in production.
+func (ds *devServer) devHandleExpireHelperHandoff(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		PurchaseID string `json:"purchase_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		devErr(w, 400, "invalid JSON")
+		return
+	}
+	if req.PurchaseID == "" {
+		devErr(w, 400, "purchase_id required")
+		return
+	}
+
+	res, err := ds.db.Exec(`
+		UPDATE v2_helper_purchase_handoffs
+		SET state = 'expired',
+		    expires_at = created_at + 1,
+		    updated_at = ?
+		WHERE purchase_id = ? AND state = 'pending'`,
+		time.Now().Unix(), req.PurchaseID,
+	)
+	if err != nil {
+		devErr(w, 500, fmt.Sprintf("expire helper handoff: %v", err))
+		return
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		devErr(w, 500, fmt.Sprintf("handoff rows affected: %v", err))
+		return
+	}
+	if n == 0 {
+		devErr(w, 404, "pending helper handoff not found")
+		return
+	}
+
+	devJSON(w, map[string]any{"ok": true, "rows": n})
+}
+
 // devHandleHelperReputation handles GET /dev/helper/reputation?purchase_id=...
 // Returns helper aggregate counts for a purchase. No wallet, token, ciphertext, or chat_id exposed.
 func (ds *devServer) devHandleHelperReputation(w http.ResponseWriter, r *http.Request) {
@@ -935,6 +1022,72 @@ func (ds *devServer) devHandleHelperReputation(w http.ResponseWriter, r *http.Re
 		"positive_count": positiveCount,
 		"negative_count": negativeCount,
 	})
+}
+
+// devHandleReviewUnlock handles POST /dev/helper/review/unlock
+// Body: {"purchase_id":"..."} — zeroes out available_at so review buttons appear immediately.
+// E2E-only: bypasses the 1-hour review delay enforced by RevealHelperContact.
+func (ds *devServer) devHandleReviewUnlock(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		PurchaseID string `json:"purchase_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		devErr(w, 400, "invalid JSON")
+		return
+	}
+	if req.PurchaseID == "" {
+		devErr(w, 400, "purchase_id required")
+		return
+	}
+	res, err := ds.db.Exec(
+		`UPDATE v2_review_entitlements SET available_at = 0 WHERE purchase_id = ?`,
+		req.PurchaseID,
+	)
+	if err != nil {
+		devErr(w, 500, fmt.Sprintf("update: %v", err))
+		return
+	}
+	n, _ := res.RowsAffected()
+
+	// Re-trigger delivery now that the entitlement is unlocked. In production,
+	// LifecycleWorker.ReviewDeliveryOnce runs on a 30s tick and would pick this
+	// up automatically; the dev binary has no background worker, so unlocking
+	// without this call left /dev/notifications permanently empty for any flow
+	// that unlocks after the one-shot send in devHandleConfirmHelperPayment.
+	if notifyErr := ds.transport.SendPendingReviewNotifications(); notifyErr != nil {
+		log.Printf("[dev] SendPendingReviewNotifications (post-unlock): %v", notifyErr)
+	}
+
+	devJSON(w, map[string]any{
+		"ok":   true,
+		"rows": n,
+		"msg":  fmt.Sprintf("review available_at zeroed for purchase %s (%d rows)", req.PurchaseID, n),
+	})
+}
+
+// devHandleDBCounts handles GET /dev/db/counts
+// Returns global row counts for tables E2E tests need to prove "0 new rows"
+// domain-side-effect assertions (wallet_already_visible, self-purchase guard).
+// This is a dev/E2E-only diagnostic endpoint — never exposed in production.
+func (ds *devServer) devHandleDBCounts(w http.ResponseWriter, r *http.Request) {
+	counts := map[string]int{}
+	tables := []string{
+		"v2_client_flows", "v2_invoices",
+		"v2_helper_purchases", "v2_helper_invoices",
+		"v2_helper_purchase_handoffs",
+	}
+	for _, tbl := range tables {
+		var n int
+		if err := ds.db.QueryRow(`SELECT COUNT(*) FROM ` + tbl).Scan(&n); err != nil {
+			devErr(w, 500, fmt.Sprintf("count %s: %v", tbl, err))
+			return
+		}
+		counts[tbl] = n
+	}
+	counts["balance_provider_calls"] = ds.balance.callCount()
+	counts["client_invoice_provider_calls"] = ds.clientIssuer.calls()
+	counts["helper_invoice_provider_calls"] = ds.helperIssuer.calls()
+	devJSON(w, counts)
 }
 
 // devHandleInformerSimulateStart handles POST /dev/informer/simulate-start
@@ -1055,6 +1208,8 @@ func (ds *devServer) devHandleStatus(w http.ResponseWriter, r *http.Request) {
 			"POST /dev/telegram/connect             {management_code, wallet_address}",
 			"POST /dev/helper/payment/confirm       {purchase_id, wallet_address}",
 			"POST /dev/helper/invoice/expire        {purchase_id}",
+			"POST /dev/helper/handoff/expire        {purchase_id}",
+			"POST /dev/helper/review/unlock         {purchase_id}",
 			"POST /dev/balance/set                  {wallet_address, balance_usd}",
 			"POST /dev/balance/outage               {enabled}",
 			"POST /dev/listing/expire               {listing_id}",
@@ -1062,6 +1217,7 @@ func (ds *devServer) devHandleStatus(w http.ResponseWriter, r *http.Request) {
 			"POST /dev/telegram/simulate-start      {raw_token}",
 			"GET  /dev/helper/reputation            ?purchase_id=...",
 			"GET  /dev/notifications",
+			"GET  /dev/db/counts",
 			"GET  /dev/status",
 		},
 		"bot_url": "https://t.me/" + devBotUsername + "?start=dev",
@@ -1100,21 +1256,8 @@ func main() {
 		}
 	}
 
-	// Build a combined V2 handler. Each Routes() result handles its own patterns;
-	// we chain them so each handler gets a chance to serve the request, and the
-	// first non-404 response wins.
-	v2Handler := chainHandlers(
-		ds.clientH.Routes(),
-		ds.journeyH.Routes(),
-		ds.tgH.Routes(),
-		ds.helperH.Routes(),
-		ds.reviewH.Routes(),
-		ds.informerH.Routes(),
-		ds.informerTransport.Routes(),
-	)
-
 	mux := http.NewServeMux()
-	mux.Handle("/v2/", v2Handler)
+	mountDevV2Routes(mux, ds)
 
 	// Dev control endpoints
 	devMux := http.NewServeMux()
@@ -1129,11 +1272,14 @@ func main() {
 	devMux.HandleFunc("POST /dev/telegram/review-callback", ds.devHandleSimulateReviewCallback)
 	devMux.HandleFunc("POST /dev/telegram/simulate-start", ds.devHandleSimulateStart)
 	devMux.HandleFunc("GET /dev/helper/reputation", ds.devHandleHelperReputation)
+	devMux.HandleFunc("POST /dev/helper/review/unlock", ds.devHandleReviewUnlock)
 	devMux.HandleFunc("POST /dev/helper/invoice/expire", ds.devHandleExpireHelperInvoice)
+	devMux.HandleFunc("POST /dev/helper/handoff/expire", ds.devHandleExpireHelperHandoff)
 	devMux.HandleFunc("POST /dev/informer/simulate-start", ds.devHandleInformerSimulateStart)
 	devMux.HandleFunc("POST /dev/informer/fake-first-publish", ds.devHandleInformerFakeFirstPublish)
 	devMux.HandleFunc("POST /dev/informer/run-worker", ds.devHandleInformerRunWorker)
 	devMux.HandleFunc("GET /dev/informer/notifications", ds.devHandleInformerNotifications)
+	devMux.HandleFunc("GET /dev/db/counts", ds.devHandleDBCounts)
 	mux.Handle("/dev/", devCORS(devMux))
 
 	// Public config + health endpoints (match wire.go equivalents but using devPolicy)
@@ -1191,69 +1337,48 @@ func main() {
 	}
 }
 
-// captureResponseWriter captures the status code without writing to the real writer.
-type captureResponseWriter struct {
-	http.ResponseWriter
-	code    int
-	headers http.Header
-	buf     []byte
-	written bool
-}
+// mountDevV2Routes mirrors V2System.MountRoutes. Explicit route ownership is
+// important because a domain handler may intentionally return a safe JSON 404.
+func mountDevV2Routes(mux *http.ServeMux, ds *devServer) {
+	cMux := ds.clientH.Routes()
+	jMux := ds.journeyH.Routes()
+	tMux := ds.tgH.Routes()
+	hMux := ds.helperH.Routes()
+	rMux := ds.reviewH.Routes()
+	iMux := ds.informerH.Routes()
+	iwMux := ds.informerTransport.Routes()
+	csMux := ds.cityH.Routes()
 
-func (c *captureResponseWriter) WriteHeader(code int) {
-	if !c.written {
-		c.code = code
-		// Copy real headers into capture buffer
-		for k, vv := range c.ResponseWriter.Header() {
-			c.headers[k] = vv
-		}
-	}
-}
+	mux.HandleFunc("POST /v2/client/payment-intents", cMux.ServeHTTP)
+	mux.HandleFunc("POST /v2/client/payment-intents/restore", cMux.ServeHTTP)
+	mux.HandleFunc("POST /v2/client/payment-intents/recheck-balance", cMux.ServeHTTP)
 
-func (c *captureResponseWriter) Write(b []byte) (int, error) {
-	c.written = true
-	c.buf = append(c.buf, b...)
-	return len(b), nil
-}
+	mux.HandleFunc("POST /v2/client/listings/restore", jMux.ServeHTTP)
+	mux.HandleFunc("POST /v2/client/listings/publish", jMux.ServeHTTP)
+	mux.HandleFunc("POST /v2/client/listings/reactivate", jMux.ServeHTTP)
+	mux.HandleFunc("POST /v2/listings/{id}/owner-view", jMux.ServeHTTP)
+	mux.HandleFunc("GET /v2/board/cities", csMux.ServeHTTP)
+	mux.HandleFunc("GET /v2/board/{city}", jMux.ServeHTTP)
+	mux.HandleFunc("GET /v2/listings/{listing_id}", jMux.ServeHTTP)
 
-func (c *captureResponseWriter) flush() {
-	if c.code != 0 {
-		for k, vv := range c.headers {
-			c.ResponseWriter.Header()[k] = vv
-		}
-		c.ResponseWriter.WriteHeader(c.code)
-	}
-	if len(c.buf) > 0 {
-		c.ResponseWriter.Write(c.buf) //nolint:errcheck
-	}
-}
+	mux.HandleFunc("POST /v2/client/telegram-links", tMux.ServeHTTP)
+	mux.HandleFunc("POST /v2/client/telegram-links/status", tMux.ServeHTTP)
+	mux.HandleFunc("POST /v2/telegram/client/webhook", tMux.ServeHTTP)
 
-// chainHandlers returns an http.Handler that tries each sub-handler in order.
-// The first handler that writes a response (non-404, non-405) wins.
-// This works because each sub-mux from Routes() registers non-overlapping
-// specific patterns and returns 404/405 for patterns it doesn't know.
-func chainHandlers(handlers ...http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		for _, h := range handlers {
-			crw := &captureResponseWriter{
-				ResponseWriter: w,
-				headers:        make(http.Header),
-			}
-			h.ServeHTTP(crw, r)
-			// A real response was written (not just a default ServeMux 404/405)
-			if crw.code != 0 && crw.code != http.StatusNotFound && crw.code != http.StatusMethodNotAllowed {
-				crw.flush()
-				return
-			}
-			if crw.code == 0 && len(crw.buf) > 0 {
-				// Handler wrote body without explicit WriteHeader (implicit 200)
-				crw.code = http.StatusOK
-				crw.flush()
-				return
-			}
-		}
-		http.NotFound(w, r)
-	})
+	mux.HandleFunc("POST /v2/helper/contact-purchases", hMux.ServeHTTP)
+	mux.HandleFunc("POST /v2/helper/contact-purchases/restore", hMux.ServeHTTP)
+	mux.HandleFunc("POST /v2/helper/contact-purchases/recheck-balance", hMux.ServeHTTP)
+	mux.HandleFunc("POST /v2/helper/contact-purchases/reveal", hMux.ServeHTTP)
+	mux.HandleFunc("POST /v2/helper/handoff/create", hMux.ServeHTTP)
+	mux.HandleFunc("POST /v2/helper/handoff/redeem", hMux.ServeHTTP)
+	mux.HandleFunc("POST /v2/helper/reviews/reminder-link", hMux.ServeHTTP)
+
+	mux.HandleFunc("POST /v2/helper/reviews/capability", rMux.ServeHTTP)
+	mux.HandleFunc("POST /v2/helper/reviews", rMux.ServeHTTP)
+
+	mux.HandleFunc("POST /v2/informer/access", iMux.ServeHTTP)
+	mux.HandleFunc("POST /v2/informer/status", iMux.ServeHTTP)
+	mux.HandleFunc("POST /v2/telegram/informer/webhook", iwMux.ServeHTTP)
 }
 
 func truncate(s string, max int) string {

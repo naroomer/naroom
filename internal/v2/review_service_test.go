@@ -14,6 +14,22 @@ import (
 
 // ── Test scaffolding ──────────────────────────────────────────────────────────
 
+// reviewEntitlementRow is a full snapshot of one v2_review_entitlements row,
+// used by TestReview_MigrationPreservesConsumedIdempotency to move rows across
+// a drop/recreate of the table (simulating an old-schema upgrade).
+type reviewEntitlementRow struct {
+	id                    string
+	purchaseID            string
+	reviewerSide          string
+	reviewRef             string
+	targetHelperProfileID sql.NullString
+	targetClientProfileID sql.NullString
+	expiresAt             int64
+	rating                sql.NullString
+	consumedAt            sql.NullInt64
+	createdAt, updatedAt  int64
+}
+
 func newTestReviewService(t *testing.T) (*ReviewService, *sql.DB) {
 	t.Helper()
 	db, err := OpenMemory()
@@ -28,7 +44,9 @@ func newTestReviewService(t *testing.T) (*ReviewService, *sql.DB) {
 	return rs, db
 }
 
-// mustCreateContactReadyPurchase sets up a full schema-valid contact_ready purchase.
+// mustCreateContactReadyPurchase sets up a schema-valid contact_ready purchase
+// plus synthetic review entitlements. Production creates those entitlements at
+// first contact reveal; this fixture isolates lower-level review behavior.
 // The helper wallet fingerprint is derived from testBTCBech32Addr so that HTTP tests
 // can call GetHelperReviewCapability with that address and have it pass auth.
 // Returns (purchaseID, helperProfileID, clientProfileID, helperBrowserRawToken).
@@ -93,7 +111,7 @@ func mustCreateContactReadyPurchase(t *testing.T, db *sql.DB) (purchaseID, helpe
 
 	// Create both review entitlements.
 	mustBeginCommitTx(t, db, func(tx *sql.Tx) error {
-		return createReviewEntitlementsTx(tx, pID, hpID, cpID, now, now)
+		return createReviewEntitlementsTxWithAvailableAt(tx, pID, hpID, cpID, now, 0, now)
 	})
 
 	// Increment purchase_count.
@@ -177,6 +195,9 @@ func (s *stubReviewSender) SendReviewPrompt(_ context.Context, chatID int64, tex
 	return nil
 }
 
+func (s *stubReviewSender) SendPlainMessage(_ context.Context, _ int64, _ string) error {
+	return nil
+}
 func (s *stubReviewSender) AnswerCallback(_ context.Context, _, _ string) error { return nil }
 func (s *stubReviewSender) EditMessage(_ context.Context, _, _ int64, _ string) error {
 	return nil
@@ -256,9 +277,9 @@ func TestReview_NoProfileUntilPayment(t *testing.T) {
 	}
 }
 
-// ── Category 3: First contact_ready → exactly 2 entitlements ─────────────────
+// ── Category 3: First reveal creates exactly 2 entitlements ──────────────────
 
-func TestReview_FirstContactReady(t *testing.T) {
+func TestReview_FirstRevealCreatesTwoEntitlements(t *testing.T) {
 	_, db := newTestReviewService(t)
 	purchaseID, _, _, _ := mustCreateContactReadyPurchase(t, db)
 
@@ -275,19 +296,19 @@ func TestReview_FirstContactReady(t *testing.T) {
 	}
 }
 
-// ── Category 4: Idempotent contact_ready (UNIQUE constraint enforces once) ───
+// ── Category 4: Idempotent first reveal (UNIQUE constraint enforces once) ────
 
-func TestReview_IdempotentContactReady(t *testing.T) {
+func TestReview_FirstRevealEntitlementsIdempotent(t *testing.T) {
 	_, db := newTestReviewService(t)
 	purchaseID, helperProfileID, clientProfileID, _ := mustCreateContactReadyPurchase(t, db)
 	now := time.Now().Unix()
 
 	// Second call with same purchaseID must fail on UNIQUE (purchase_id, reviewer_side).
 	tx, _ := db.Begin()
-	err := createReviewEntitlementsTx(tx, purchaseID, helperProfileID, clientProfileID, now, now)
+	err := createReviewEntitlementsTxWithAvailableAt(tx, purchaseID, helperProfileID, clientProfileID, now, 0, now)
 	tx.Rollback() //nolint:errcheck
 	if err == nil {
-		t.Error("second createReviewEntitlementsTx should fail due to UNIQUE constraint")
+		t.Error("second createReviewEntitlementsTxWithAvailableAt should fail due to UNIQUE constraint")
 	}
 }
 
@@ -297,13 +318,13 @@ func TestReview_RollbackOnFailure(t *testing.T) {
 	_, db := newTestReviewService(t)
 	now := time.Now().Unix()
 
-	// Use an already-rolled-back tx to force errors in createReviewEntitlementsTx.
+	// Use an already-rolled-back tx to force errors in createReviewEntitlementsTxWithAvailableAt.
 	tx, _ := db.Begin()
 	tx.Rollback() //nolint:errcheck
 
-	err := createReviewEntitlementsTx(tx, newID(), newID(), newID(), now, now)
+	err := createReviewEntitlementsTxWithAvailableAt(tx, newID(), newID(), newID(), now, 0, now)
 	if err == nil {
-		t.Error("expected error from createReviewEntitlementsTx with rolled-back tx")
+		t.Error("expected error from createReviewEntitlementsTxWithAvailableAt with rolled-back tx")
 	}
 
 	// Verify no entitlements were written.
@@ -593,7 +614,7 @@ func TestReview_SnapshotLifecycle(t *testing.T) {
 	mustExec(t, db, `INSERT INTO v2_review_delivery_snapshots (id, purchase_id, binding_ref_snapshot, chat_id_ciphertext, chat_id_nonce, key_version, state, expires_at, created_at, updated_at) VALUES (?, ?, ?, 'ctx', 'ncx', 'v1', 'pending_send', ?, ?, ?)`, snapID, pID, bindingRef, now+86400, now, now)
 
 	mustBeginCommitTx(t, db, func(tx *sql.Tx) error {
-		return createReviewEntitlementsTx(tx, pID, hpID, cpID, now, now)
+		return createReviewEntitlementsTxWithAvailableAt(tx, pID, hpID, cpID, now, 0, now)
 	})
 
 	rs, _ := NewReviewService(db, testHMACKey, time.Now)
@@ -895,7 +916,8 @@ func TestReview_ConcurrentContactReady(t *testing.T) {
 	normalized, currency, _ := validateAndNormalizeAddress(addr)
 
 	draft := HelperInvoiceDraft{PaymentAddress: "payaddr_conc", AmountAtomic: 100000, AmountUSDCents: helperInvoiceUSDCents}
-	_, view, err := svc.CreatePurchase(newID(), listingID, currency, normalized, draft)
+	rawToken := newID()
+	_, view, err := svc.CreatePurchase(rawToken, listingID, currency, normalized, draft)
 	if err != nil {
 		t.Fatalf("CreatePurchase: %v", err)
 	}
@@ -914,11 +936,18 @@ func TestReview_ConcurrentContactReady(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Exactly 2 entitlements (one per side).
+	// After contact_ready: entitlements are NOT yet created (deferred to first_revealed_at).
 	var entCount int
 	db.QueryRow(`SELECT COUNT(*) FROM v2_review_entitlements WHERE purchase_id = ?`, view.PurchaseID).Scan(&entCount) //nolint:errcheck
-	if entCount != 2 {
-		t.Errorf("concurrent contact_ready: want 2 entitlements, got %d", entCount)
+	if entCount != 0 {
+		t.Errorf("concurrent contact_ready: want 0 entitlements before reveal, got %d", entCount)
+	}
+
+	// Exactly 1 immediate notice (contact_ready → pending immediate notice, no buttons).
+	var noticeCount int
+	db.QueryRow(`SELECT COUNT(*) FROM v2_review_immediate_notices WHERE purchase_id = ? AND state = 'pending'`, view.PurchaseID).Scan(&noticeCount) //nolint:errcheck
+	if noticeCount != 1 {
+		t.Errorf("concurrent contact_ready: want 1 pending immediate notice, got %d", noticeCount)
 	}
 
 	// Exactly 1 purchase_count increment.
@@ -929,11 +958,22 @@ func TestReview_ConcurrentContactReady(t *testing.T) {
 		t.Errorf("concurrent contact_ready: want purchase_count=1, got %d", pc)
 	}
 
-	// Exactly 1 pending_send snapshot.
+	// Reveal: entitlements and pending_send snapshot are created atomically.
+	if _, err := svc.RevealHelperContact(view.PurchaseID, rawToken, normalized, currency); err != nil {
+		t.Fatalf("RevealHelperContact: %v", err)
+	}
+
+	// After reveal: exactly 2 entitlements (one per side).
+	db.QueryRow(`SELECT COUNT(*) FROM v2_review_entitlements WHERE purchase_id = ?`, view.PurchaseID).Scan(&entCount) //nolint:errcheck
+	if entCount != 2 {
+		t.Errorf("after reveal: want 2 entitlements, got %d", entCount)
+	}
+
+	// After reveal: exactly 1 pending_send snapshot.
 	var snapCount int
 	db.QueryRow(`SELECT COUNT(*) FROM v2_review_delivery_snapshots WHERE purchase_id = ? AND state = 'pending_send'`, view.PurchaseID).Scan(&snapCount) //nolint:errcheck
 	if snapCount != 1 {
-		t.Errorf("concurrent contact_ready: want 1 pending_send snapshot, got %d", snapCount)
+		t.Errorf("after reveal: want 1 pending_send snapshot, got %d", snapCount)
 	}
 }
 
@@ -1055,5 +1095,320 @@ func TestReview_PublicReputationCounts(t *testing.T) {
 	// MemberSince must be non-zero (profile was created).
 	if detail2.ClientReputation.MemberSince.IsZero() {
 		t.Error("detail: ClientReputation.MemberSince must not be zero")
+	}
+}
+
+// ── Task 11G: available_at gate tests ─────────────────────────────────────────
+
+// TestReview_AvailableAtGate verifies that capability and consume are blocked
+// before available_at and allowed at/after available_at.
+func TestReview_AvailableAtGate(t *testing.T) {
+	db, err := OpenMemory()
+	if err != nil {
+		t.Fatalf("OpenMemory: %v", err)
+	}
+	defer db.Close()
+
+	baseNow := time.Now().Unix()
+	// Build a contact_ready purchase with available_at in the future.
+	purchaseID, hpID, cpID, rawToken := mustCreateContactReadyPurchase(t, db)
+
+	// Override the review entitlements' available_at to be baseNow + 3600.
+	mustExec(t, db, `UPDATE v2_review_entitlements SET available_at = ? WHERE purchase_id = ?`,
+		baseNow+3600, purchaseID)
+
+	// At baseNow (before available_at), capability must be blocked.
+	nowBefore := func() time.Time { return time.Unix(baseNow, 0) }
+	rs, err := NewReviewService(db, testHMACKey, nowBefore)
+	if err != nil {
+		t.Fatalf("NewReviewService: %v", err)
+	}
+	_, capErr := rs.GetHelperReviewCapability(purchaseID, rawToken, testBTCBech32Addr, "BTC")
+	if !errors.Is(capErr, ErrReviewNotYetAvailable) {
+		t.Errorf("before available_at: capability got %v, want ErrReviewNotYetAvailable", capErr)
+	}
+
+	// At exactly available_at, capability must succeed.
+	nowAt := func() time.Time { return time.Unix(baseNow+3600, 0) }
+	rsAt, err := NewReviewService(db, testHMACKey, nowAt)
+	if err != nil {
+		t.Fatalf("NewReviewService (at): %v", err)
+	}
+	capResult, capErr2 := rsAt.GetHelperReviewCapability(purchaseID, rawToken, testBTCBech32Addr, "BTC")
+	if capErr2 != nil {
+		t.Fatalf("at available_at: capability error: %v", capErr2)
+	}
+	if capResult.ReviewToken == "" {
+		t.Error("at available_at: expected non-empty review token")
+	}
+
+	// Client consume: also blocked before available_at.
+	var clientRef string
+	db.QueryRow(`SELECT review_ref FROM v2_review_entitlements WHERE purchase_id = ? AND reviewer_side = 'client'`, purchaseID).Scan(&clientRef) //nolint:errcheck
+	consumeErr := rs.ConsumeClientReview(clientRef, "positive", baseNow)
+	if !errors.Is(consumeErr, ErrReviewNotYetAvailable) {
+		t.Errorf("before available_at: consume got %v, want ErrReviewNotYetAvailable", consumeErr)
+	}
+
+	// At available_at, consume succeeds.
+	consumeErrAt := rsAt.ConsumeClientReview(clientRef, "positive", baseNow+3600)
+	if consumeErrAt != nil {
+		t.Errorf("at available_at: consume: %v", consumeErrAt)
+	}
+	_ = hpID
+	_ = cpID
+}
+
+// TestReview_AvailableAtZeroImmediate verifies that available_at=0 (legacy default)
+// is treated as immediately available (no gate applied).
+func TestReview_AvailableAtZeroImmediate(t *testing.T) {
+	db, err := OpenMemory()
+	if err != nil {
+		t.Fatalf("OpenMemory: %v", err)
+	}
+	defer db.Close()
+
+	purchaseID, _, cpID, rawToken := mustCreateContactReadyPurchase(t, db)
+	// Force the legacy/migration value explicitly; production first reveal uses
+	// a one-hour availability gate.
+	mustExec(t, db, `UPDATE v2_review_entitlements SET available_at = 0 WHERE purchase_id = ?`, purchaseID)
+
+	nowFn := func() time.Time { return time.Now() }
+	rs, err := NewReviewService(db, testHMACKey, nowFn)
+	if err != nil {
+		t.Fatalf("NewReviewService: %v", err)
+	}
+	_, capErr := rs.GetHelperReviewCapability(purchaseID, rawToken, testBTCBech32Addr, "BTC")
+	if capErr != nil {
+		t.Errorf("available_at=0: capability should succeed immediately, got %v", capErr)
+	}
+	_ = cpID
+}
+
+// TestReview_AvailableAtColumnPresent verifies that after migration the
+// v2_review_entitlements table has the available_at column and that MigrateSchema
+// is idempotent (running it twice does not error).
+func TestReview_AvailableAtColumnPresent(t *testing.T) {
+	db, err := OpenMemory()
+	if err != nil {
+		t.Fatalf("OpenMemory: %v", err)
+	}
+	defer db.Close()
+
+	// Column must be present after OpenMemory (which calls MigrateSchema).
+	if err := VerifyRequiredColumns(db, "v2_review_entitlements", []string{"available_at"}); err != nil {
+		t.Errorf("available_at column missing: %v", err)
+	}
+
+	// MigrateSchema must be idempotent.
+	if err := MigrateSchema(db); err != nil {
+		t.Errorf("second MigrateSchema run failed: %v", err)
+	}
+	if err := MigrateSchema(db); err != nil {
+		t.Errorf("third MigrateSchema run failed: %v", err)
+	}
+}
+
+// TestReview_AvailableAtBackfillSQL verifies that the migration backfill SQL
+// UPDATE ... WHERE available_at = 0 correctly sets available_at = created_at + 3600.
+// This is a direct SQL test of the backfill logic independent of MigrateSchema guards.
+func TestReview_AvailableAtBackfillSQL(t *testing.T) {
+	db, err := OpenMemory()
+	if err != nil {
+		t.Fatalf("OpenMemory: %v", err)
+	}
+	defer db.Close()
+
+	now := time.Now().Unix()
+
+	// Set up minimum required rows.
+	cpID := newID()
+	mustExec(t, db, `INSERT INTO v2_client_profiles (id, wallet_fingerprint, currency, positive_count, negative_count, created_at, updated_at) VALUES (?, ?, 'BTC', 0, 0, ?, ?)`, cpID, newID(), now, now)
+	hpID := newID()
+	mustExec(t, db, `INSERT INTO v2_helper_profiles (id, wallet_fingerprint, currency, public_name, purchase_count, positive_count, negative_count, created_at, updated_at) VALUES (?, ?, 'BTC', ?, 0, 0, 0, ?, ?)`, hpID, newID(), "Tst · BBBB", now, now)
+	flowID := newID()
+	mustExec(t, db, `INSERT INTO v2_client_flows (id, wallet_fingerprint, currency, management_code_hash, state, client_profile_id, created_at, updated_at) VALUES (?, ?, 'BTC', ?, 'form_ready', ?, ?, ?)`, flowID, newID(), newID(), cpID, now, now)
+	listingID := newID()
+	cipher2, _ := NewAESGCMContactCipher(testAESKey, "v1")
+	ct2, nh2, kv2, _ := cipher2.Encrypt("@m2", listingID, flowID, "telegram")
+	entExp2 := now + 5*24*3600
+	mustExec(t, db, `INSERT INTO v2_listings (id, flow_id, city, country_code, dependency_type, help_type, urgency, languages, display_name, contact_type, contact_ciphertext, contact_nonce, contact_key_version, state, visible_until, first_published_at, last_activated_at, entitlement_expires_at, activation_count, created_at, updated_at) VALUES (?, ?, 'tbilisi', 'GE', 'd', 'h', 'u', '["en"]', ?, 'telegram', ?, ?, ?, 'visible', ?, ?, ?, ?, 1, ?, ?)`, listingID, flowID, "n"+listingID[:6], ct2, nh2, kv2, now+86400, now, now, entExp2, now, now)
+	pID := newID()
+	mustExec(t, db, `INSERT INTO v2_helper_purchases (id, listing_id, helper_profile_id, browser_token_hash, state, country_code_snapshot, balance_retry_deadline_at, last_balance_usd, last_balance_checked_at, contact_ready_at, created_at, updated_at) VALUES (?, ?, ?, ?, 'contact_ready', 'GE', ?, 1100.0, ?, ?, ?, ?)`, pID, listingID, hpID, newID(), now+86400, now, now, now, now)
+
+	// Insert with available_at=0 (simulating a pre-reveal row).
+	revRef := "rev_" + newID()[:32]
+	mustExec(t, db, `INSERT INTO v2_review_entitlements (id, purchase_id, reviewer_side, review_ref, target_client_profile_id, available_at, expires_at, created_at, updated_at) VALUES (?, ?, 'helper', ?, ?, 0, ?, ?, ?)`, newID(), pID, revRef, cpID, now+86400, now, now)
+
+	// Run the exact backfill SQL from MigrateSchema.
+	mustExec(t, db, `UPDATE v2_review_entitlements SET available_at = created_at + 3600 WHERE available_at = 0`)
+
+	// Verify backfill result.
+	var availAt int64
+	db.QueryRow(`SELECT available_at FROM v2_review_entitlements WHERE review_ref = ?`, revRef).Scan(&availAt) //nolint:errcheck
+	if availAt != now+3600 {
+		t.Errorf("backfill: available_at = %d, want %d", availAt, now+3600)
+	}
+}
+
+// TestReview_MigrationPreservesConsumedIdempotency starts from a genuinely
+// old-style DB (v2_review_entitlements has no available_at column at all,
+// matching the schema before Task 11G) with an already-CONSUMED client review,
+// runs MigrateSchema, and proves:
+//  1. the ADD COLUMN + backfill runs and produces available_at = created_at + 3600,
+//     which lands in the FUTURE relative to "now" for a freshly-consumed row;
+//  2. an exact-repeat consume of that already-consumed row still succeeds
+//     (idempotent) despite available_at now being in the future — the migration
+//     must never turn an accepted vote into a temporary 403/ErrReviewGated;
+//  3. a DIFFERENT rating on that row still yields ErrReviewAlreadyConsumed, not
+//     ErrReviewNotYetAvailable;
+//  4. the sibling NOT-yet-consumed (helper-side) row IS properly gated by the
+//     backfilled available_at — the migration does not silently unlock everything.
+func TestReview_MigrationPreservesConsumedIdempotency(t *testing.T) {
+	db, err := OpenMemory()
+	if err != nil {
+		t.Fatalf("OpenMemory: %v", err)
+	}
+	defer db.Close()
+
+	rs, err := NewReviewService(db, testHMACKey, time.Now)
+	if err != nil {
+		t.Fatalf("NewReviewService: %v", err)
+	}
+
+	purchaseID, _, _, _ := mustCreateContactReadyPurchase(t, db)
+
+	var clientRef, helperRef string
+	db.QueryRow(`SELECT review_ref FROM v2_review_entitlements WHERE purchase_id = ? AND reviewer_side = 'client'`, purchaseID).Scan(&clientRef) //nolint:errcheck
+	db.QueryRow(`SELECT review_ref FROM v2_review_entitlements WHERE purchase_id = ? AND reviewer_side = 'helper'`, purchaseID).Scan(&helperRef) //nolint:errcheck
+	if clientRef == "" || helperRef == "" {
+		t.Fatalf("setup: missing review_ref (client=%q helper=%q)", clientRef, helperRef)
+	}
+
+	nowUnix := time.Now().Unix()
+	// Consume the CLIENT side now, while available_at is still the legacy default (0).
+	if err := rs.ConsumeClientReview(clientRef, "positive", nowUnix); err != nil {
+		t.Fatalf("pre-migration consume: %v", err)
+	}
+
+	// Snapshot both entitlement rows in full before downgrading the table.
+	rows, err := db.Query(`
+		SELECT id, purchase_id, reviewer_side, review_ref,
+		       target_helper_profile_id, target_client_profile_id,
+		       expires_at, rating, consumed_at, created_at, updated_at
+		FROM v2_review_entitlements WHERE purchase_id = ?`, purchaseID)
+	if err != nil {
+		t.Fatalf("snapshot query: %v", err)
+	}
+	var saved []reviewEntitlementRow
+	for rows.Next() {
+		var r reviewEntitlementRow
+		if err := rows.Scan(&r.id, &r.purchaseID, &r.reviewerSide, &r.reviewRef,
+			&r.targetHelperProfileID, &r.targetClientProfileID,
+			&r.expiresAt, &r.rating, &r.consumedAt, &r.createdAt, &r.updatedAt); err != nil {
+			t.Fatalf("snapshot scan: %v", err)
+		}
+		saved = append(saved, r)
+	}
+	rows.Close()
+	if len(saved) != 2 {
+		t.Fatalf("want 2 entitlement rows before downgrade, got %d", len(saved))
+	}
+
+	// ── Downgrade: drop and recreate v2_review_entitlements WITHOUT available_at,
+	// exactly matching the pre-Task-11G schema. ──────────────────────────────────
+	if _, err := db.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
+		t.Fatalf("FK off: %v", err)
+	}
+	if _, err := db.Exec(`DROP TABLE v2_review_entitlements`); err != nil {
+		t.Fatalf("drop entitlements: %v", err)
+	}
+	if _, err := db.Exec(`
+CREATE TABLE v2_review_entitlements (
+    id                       TEXT PRIMARY KEY,
+    purchase_id              TEXT NOT NULL REFERENCES v2_helper_purchases(id),
+    reviewer_side            TEXT NOT NULL CHECK (reviewer_side IN ('client', 'helper')),
+    review_ref               TEXT NOT NULL UNIQUE,
+    target_helper_profile_id TEXT REFERENCES v2_helper_profiles(id),
+    target_client_profile_id TEXT REFERENCES v2_client_profiles(id),
+    expires_at               INTEGER NOT NULL,
+    rating                   TEXT CHECK (rating IN ('positive', 'negative')),
+    consumed_at              INTEGER,
+    created_at               INTEGER NOT NULL,
+    updated_at               INTEGER NOT NULL,
+    UNIQUE (purchase_id, reviewer_side),
+    CHECK (
+        length(review_ref) = 36
+        AND substr(review_ref, 1, 4) = 'rev_'
+        AND NOT (substr(review_ref, 5) GLOB '*[^0-9a-f]*')
+    ),
+    CHECK (
+        (reviewer_side = 'client'
+            AND target_helper_profile_id IS NOT NULL
+            AND target_client_profile_id IS NULL)
+        OR
+        (reviewer_side = 'helper'
+            AND target_client_profile_id IS NOT NULL
+            AND target_helper_profile_id IS NULL)
+    ),
+    CHECK ((rating IS NULL) = (consumed_at IS NULL)),
+    CHECK (consumed_at IS NULL OR (consumed_at >= created_at AND consumed_at <= expires_at)),
+    CHECK (expires_at = created_at + 86400),
+    CHECK (updated_at >= created_at)
+)`); err != nil {
+		t.Fatalf("recreate pre-11G entitlements: %v", err)
+	}
+	for _, r := range saved {
+		if _, err := db.Exec(`
+			INSERT INTO v2_review_entitlements
+			  (id, purchase_id, reviewer_side, review_ref,
+			   target_helper_profile_id, target_client_profile_id,
+			   expires_at, rating, consumed_at, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			r.id, r.purchaseID, r.reviewerSide, r.reviewRef,
+			r.targetHelperProfileID, r.targetClientProfileID,
+			r.expiresAt, r.rating, r.consumedAt, r.createdAt, r.updatedAt,
+		); err != nil {
+			t.Fatalf("reinsert %s row: %v", r.reviewerSide, err)
+		}
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		t.Fatalf("FK on: %v", err)
+	}
+
+	// ── Run the real migration against this old-style DB. ────────────────────
+	if err := MigrateSchema(db); err != nil {
+		t.Fatalf("MigrateSchema (upgrade from pre-11G): %v", err)
+	}
+
+	// 1. Backfill landed in the future relative to "now" for the consumed row.
+	var clientAvailAt, clientCreatedAt int64
+	db.QueryRow(`SELECT available_at, created_at FROM v2_review_entitlements WHERE review_ref = ?`, clientRef).
+		Scan(&clientAvailAt, &clientCreatedAt) //nolint:errcheck
+	if clientAvailAt != clientCreatedAt+3600 {
+		t.Fatalf("backfilled available_at = %d, want created_at(%d)+3600", clientAvailAt, clientCreatedAt)
+	}
+	nowAfterMigration := time.Now().Unix()
+	if clientAvailAt <= nowAfterMigration {
+		t.Fatalf("test setup invalid: backfilled available_at (%d) is not in the future relative to now (%d)", clientAvailAt, nowAfterMigration)
+	}
+
+	// 2. Exact-repeat consume of the already-consumed row must still succeed.
+	if err := rs.ConsumeClientReview(clientRef, "positive", nowAfterMigration); err != nil {
+		t.Errorf("exact-repeat consume after migration backfill: want nil (idempotent), got %v", err)
+	}
+
+	// 3. Opposite rating must yield ErrReviewAlreadyConsumed, not ErrReviewNotYetAvailable.
+	err = rs.ConsumeClientReview(clientRef, "negative", nowAfterMigration)
+	if !errors.Is(err, ErrReviewAlreadyConsumed) {
+		t.Errorf("opposite rating after migration: want ErrReviewAlreadyConsumed, got %v", err)
+	}
+
+	// 4. The sibling unconsumed helper-side row IS gated by the backfilled available_at —
+	// migration must not silently unlock rows that were never consumed.
+	err = rs.consumeEntitlement("helper", helperRef, "positive", nowAfterMigration)
+	var gated *ErrReviewGated
+	if !errors.As(err, &gated) {
+		t.Errorf("unconsumed helper row after migration: want ErrReviewGated, got %v", err)
 	}
 }

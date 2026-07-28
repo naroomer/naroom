@@ -40,6 +40,7 @@ package v2
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -124,7 +125,8 @@ func (s *e2eInformerSender) SendInformerNotification(_ context.Context, chatID i
 // e2eBotSender: no-op BotAPISender + ReviewNotificationSender.
 type e2eBotSender struct{}
 
-func (s *e2eBotSender) SendMessage(_ context.Context, _ int64, _ string) error { return nil }
+func (s *e2eBotSender) SendMessage(_ context.Context, _ int64, _ string) error      { return nil }
+func (s *e2eBotSender) SendPlainMessage(_ context.Context, _ int64, _ string) error { return nil }
 func (s *e2eBotSender) SendReviewPrompt(_ context.Context, _ int64, _, _, _ string) error {
 	return nil
 }
@@ -697,6 +699,16 @@ func TestReleaseR08_ReviewCapability(t *testing.T) {
 		t.Fatalf("setup contact_ready: %v (state=%s)", err, pv.State)
 	}
 
+	// Reveal the contact: entitlements are created here (available_at = now+3600).
+	if _, err := c.helperSvc.RevealHelperContact(pv.PurchaseID, rawToken, helperAddr, "BTC"); err != nil {
+		t.Fatalf("RevealHelperContact: %v", err)
+	}
+
+	// Simulate the 1-hour delay by zeroing available_at so the gate passes immediately.
+	if _, err := c.db.Exec(`UPDATE v2_review_entitlements SET available_at = 0 WHERE purchase_id = ?`, pv.PurchaseID); err != nil {
+		t.Fatalf("reset available_at: %v", err)
+	}
+
 	// Check review capability — must succeed without error.
 	cap, err := c.reviewSvc.GetHelperReviewCapability(pv.PurchaseID, rawToken, helperAddr, "BTC")
 	if err != nil {
@@ -704,6 +716,69 @@ func TestReleaseR08_ReviewCapability(t *testing.T) {
 	}
 	if cap.ReviewToken == "" {
 		t.Fatal("expected non-empty ReviewToken in capability result")
+	}
+}
+
+// ── R08b: Self-purchase guard ─────────────────────────────────────────────────
+
+// TestReleaseR08b_SelfPurchaseGuard verifies that the listing owner's wallet
+// cannot buy contact on their own listing. No invoice or external call is created.
+func TestReleaseR08b_SelfPurchaseGuard(t *testing.T) {
+	c := newE2EComp(t)
+
+	// Publish a listing using addr "self_r08b" as the Client wallet.
+	lv := c.e2ePublishListing(t, "self_r08b", "BTC", "tbilisi")
+
+	// Attempt a Helper purchase using THE SAME wallet address.
+	// The wallet fingerprint will match the listing owner's fingerprint.
+	draft := HelperInvoiceDraft{PaymentAddress: "self_pay_r08b", AmountAtomic: 10000, AmountUSDCents: helperInvoiceUSDCents}
+	_, _, err := c.helperSvc.CreatePurchase(newID(), lv.ID, "BTC", "self_r08b", draft)
+	if !errors.Is(err, ErrHelperSelfPurchase) {
+		t.Errorf("self-purchase: want ErrHelperSelfPurchase, got %v", err)
+	}
+
+	// Confirm that no helper invoice was created (0 external calls).
+	var invoiceCount int
+	c.db.QueryRow(`SELECT COUNT(*) FROM v2_helper_invoices`).Scan(&invoiceCount) //nolint:errcheck
+	if invoiceCount != 0 {
+		t.Errorf("self-purchase guard: want 0 invoices, got %d", invoiceCount)
+	}
+}
+
+// ── R08c: One visible listing per Client wallet ───────────────────────────────
+
+// TestReleaseR08c_OneVisiblePerProfile verifies that a Client wallet cannot have
+// two simultaneously visible listings, even if they paid for two separate flows.
+func TestReleaseR08c_OneVisiblePerProfile(t *testing.T) {
+	c := newE2EComp(t)
+
+	// Publish first listing — succeeds.
+	lv1 := c.e2ePublishListing(t, "uni_r08c", "BTC", "tbilisi")
+	if lv1.State != "visible" {
+		t.Fatalf("first publish: want visible, got %s", lv1.State)
+	}
+
+	// Pay for a second flow with the SAME wallet (second $5 payment).
+	rawCode2, flowID2 := c.e2eFormReady(t, "uni_r08c", "BTC")
+	c.e2eInsertReadyBinding(t, flowID2)
+	_, err := c.listingSvc.FirstPublish(rawCode2, "uni_r08c", ListingInput{
+		City:           "batumi",
+		DependencyType: "alcohol",
+		HelpType:       "crisis",
+		Urgency:        "urgent",
+		Languages:      []string{"en"},
+		ContactType:    "telegram",
+		RawContact:     "@e2e_uni_r08c_2",
+	})
+	if !errors.Is(err, ErrProfileAlreadyVisible) {
+		t.Errorf("second publish same profile: want ErrProfileAlreadyVisible, got %v", err)
+	}
+
+	// Only one visible listing should exist.
+	var visibleCount int
+	c.db.QueryRow(`SELECT COUNT(*) FROM v2_listings WHERE state='visible' AND visible_until > ?`, c.now().Unix()).Scan(&visibleCount) //nolint:errcheck
+	if visibleCount != 1 {
+		t.Errorf("one-visible invariant: want 1 visible listing, got %d", visibleCount)
 	}
 }
 

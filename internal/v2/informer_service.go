@@ -152,18 +152,12 @@ func (s *InformerService) tokenHMAC(rawToken string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-// informerSupportedCities returns the set of supported city IDs (same as listing form).
-func informerSupportedCities() map[string]bool {
-	return map[string]bool{
-		"buenos_aires": true, "sao_paulo": true, "nha_trang": true,
-		"da_nang": true, "tbilisi": true, "batumi": true,
-		"almaty": true, "yerevan": true, "moscow": true,
-	}
-}
-
-// isInformerCity reports whether city is in the supported list.
+// isInformerCity reports whether city is a valid enabled city in the registry.
+// Uses AllCities as the single authoritative source so Informer always supports
+// the same set as listings and the board.
 func isInformerCity(city string) bool {
-	return informerSupportedCities()[city]
+	_, ok := CityByID(city)
+	return ok
 }
 
 // CreateAccess validates city, checks balanceUSD ≥ policy.InformerMinUSD, and returns a 15-min raw token.

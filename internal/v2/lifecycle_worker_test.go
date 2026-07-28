@@ -639,6 +639,13 @@ func (s *trackingReviewSender) SendReviewPrompt(_ context.Context, chatID int64,
 	return nil
 }
 
+func (s *trackingReviewSender) SendPlainMessage(_ context.Context, chatID int64, _ string) error {
+	s.mu.Lock()
+	s.calls = append(s.calls, chatID)
+	s.mu.Unlock()
+	return nil
+}
+
 func (s *trackingReviewSender) sentCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()

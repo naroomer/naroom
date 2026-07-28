@@ -98,6 +98,7 @@ en: {
 	'new.listing_fine':    'Listing stays visible for 24 hours · $5 in {currency} · up to 2 paid chats',
 	'new.balance_warning': 'Minimum $150 balance required at the time of posting. After paying $5 your balance is not rechecked — post at your own risk. Payment is non-refundable.',
 	'new.balance_low':     'Balance too low: ${balance} on your wallet, minimum ${required} required. Top up and try again.',
+	'new.wallet_already_visible': 'This wallet already has an active listing. A new one can be created after the current listing expires.',
 	'new.check_again':     'Check balance again',
 	'new.crisis_title':    'Before you continue',
 	'new.crisis_body':     'If you are experiencing an overdose, suicidal thoughts, or a medical emergency — please call local emergency services now.',
@@ -428,7 +429,7 @@ en: {
 	// ── V2 done step ──────────────────────────────────────────────────────────
 	'v2.done.title':        'Your listing is live',
 	'v2.done.sub':          'You will receive a Telegram notification when someone responds.',
-	'v2.done.view_listing': 'View listing',
+	'v2.done.manage_listing': 'Manage listing',
 	'v2.done.board':        'Back to board',
 	'v2.done.restore_hint': 'Lost this tab? Use "Restore listing" with your wallet and recovery code.',
 
@@ -442,6 +443,20 @@ en: {
 	'v2.restore.code_hint':  'The recovery code was shown after payment was confirmed.',
 	'v2.restore.btn':        'Restore',
 	'v2.restore.back':       '← Back to board',
+	'v2.restore.not_found':  'Listing not found. Check your wallet and code.',
+	'v2.restore.no_listing_yet': 'This code does not have a published listing yet. Return to the page where you started your payment to continue it.',
+
+	// ── V2 owner mode (listing page, server-authenticated via management_code) ──
+	'v2.owner.title':              'Your listing',
+	'v2.owner.subtitle':           'Only you can see this view.',
+	'v2.owner.state_visible':      'Visible on the board',
+	'v2.owner.state_hidden':       'Hidden — daily window closed',
+	'v2.owner.state_finished':     'Finished',
+	'v2.owner.remaining':          'Time remaining: {time}',
+	'v2.owner.telegram_ready':     'Telegram: connected',
+	'v2.owner.telegram_not_ready': 'Telegram: not connected',
+	'v2.owner.reactivate_btn':     'Reactivate listing',
+	'v2.owner.connect_telegram_btn': 'Connect Telegram to reactivate',
 	'v2.progress.step1':           'Payment',
 	'v2.progress.step2':           'Wallet check',
 	'v2.progress.step3':           'Listing details',
@@ -541,6 +556,69 @@ en: {
 	'v2.inf.token_expired':   'Link expired (15 min). Please start again.',
 	'v2.inf.eligibility_verified': 'Wallet eligibility verified. This address meets the ${min} balance requirement.',
 	'v2.inf.privacy_note':    'Your wallet address is used only for balance verification and is not stored. One subscription per Telegram account.',
+
+	// ── V2 reputation (H) ─────────────────────────────────────────────────────
+	'v2.rep.today':        'today',
+	'v2.rep.label':        'Platform nickname',
+	'v2.rep.days_short':   '{n}d',
+	'v2.rep.weeks_short':  '{n}w',
+	'v2.rep.months_short': '{n}mo',
+	'v2.rep.years_short':  '{n}y',
+	'v2.rep.rating':       '👍 {pos} / 👎 {neg}',
+	'v2.rep.since':        'On platform: {age}',
+
+	// ── V2 payment observability (D) ──────────────────────────────────────────
+	'v2.helper.provider_checking':  'Checking network every 5 seconds',
+	'v2.helper.provider_degraded':  'Payment check service temporarily unavailable. Do not pay again — your purchase is saved.',
+	'v2.helper.confirmations':       'Payment found: {conf} of {req} confirmation(s)',
+	'v2.helper.last_check':          'Last successful check: {time}',
+	'v2.helper.provider_healthy':    'Payment status up to date',
+
+	// ── V2 cross-device handoff (G) ───────────────────────────────────────────
+	'v2.helper.handoff_btn':     'Continue on another device',
+	'v2.helper.handoff_title':   'Scan to continue',
+	'v2.helper.handoff_scan':    'Scan this QR or copy the link on your other device. Valid for 15 minutes.',
+	'v2.helper.handoff_expires': 'Expires: {time}',
+	'v2.helper.handoff_close':   'Close',
+	'v2.helper.handoff_invalid': 'This link cannot be used — it may be wrong, expired, or already used.',
+	'v2.helper.handoff_redeem_title': 'Continue this purchase',
+	'v2.helper.handoff_redeem_sub':   'Enter your wallet address to continue on this device.',
+	'v2.helper.handoff_redeem_btn':   'Continue',
+
+	// ── V2 review reminder (C) ────────────────────────────────────────────────
+	'v2.helper.reminder_btn':     'Get Telegram reminder when review is available',
+	'v2.helper.reminder_sent':    'Reminder registered. You will receive a Telegram message when you can review.',
+	'v2.helper.reminder_open':    'Open Telegram to confirm reminder',
+
+	// ── V2 navigation + My Purchases (E) ─────────────────────────────────────
+	'v2.helper.my_purchases':        'My purchases',
+	'v2.helper.back_to_listing':     '← Listing',
+	'v2.helper.back_to_board':       '← Board',
+	'v2.helper.purchases_empty':     'No purchases yet. Find a listing to get started.',
+	'v2.helper.purchases_title':     'My Purchases',
+	'v2.helper.purchase_phase_awaiting':     'Continue payment',
+	'v2.helper.purchase_phase_detected':     'Payment detected — waiting for confirmation',
+	'v2.helper.purchase_phase_confirmed':    'Processing...',
+	'v2.helper.purchase_phase_balance':      'Balance check pending',
+	'v2.helper.purchase_phase_contact_ready':'Contact available',
+	'v2.helper.purchase_phase_review':       'Rate this person',
+	'v2.helper.purchase_phase_done':         'Completed',
+
+	// ── V2 review countdown (G) ───────────────────────────────────────────────
+	'v2.review.countdown': 'Review available in {time}',
+	'v2.review.not_yet':   'You can rate this person after 1 hour — this ensures you\'ve had time to connect.',
+
+	// ── V2 board examples (H2) ────────────────────────────────────────────────
+	'v2.board.examples_heading': 'Examples',
+	'v2.board.example_badge':    'Example',
+	'v2.board.example_1_title':  'Help with apartment paperwork',
+	'v2.board.example_1_desc':   'Need someone to help navigate rental documents and translation.',
+	'v2.board.example_2_title':  'Help with visa application',
+	'v2.board.example_2_desc':   'Looking for someone familiar with local visa offices and procedures.',
+
+	// ── V2 board empty state (H2.5) ───────────────────────────────────────────
+	'v2.board.empty_state': 'No active requests in this city right now.',
+	'v2.board.empty_cta':   'Create the first one',
 },
 
 // ═══════════════════════════════════════ RUSSIAN ════════════════════════════
@@ -602,6 +680,7 @@ ru: {
 	'new.listing_fine':   'Объявление видно 24 часа · $5 в {currency} · до 2 платных чатов',
 	'new.balance_warning': 'Минимальный баланс $150 на момент размещения. После оплаты $5 баланс не перепроверяется — размещаете на свой страх и риск. Платёж не возвращается.',
 	'new.balance_low':     'Недостаточный баланс: ${balance} на вашем кошельке, требуется минимум ${required}. Пополните и попробуйте снова.',
+	'new.wallet_already_visible': 'У этого кошелька уже есть активное объявление. Новое можно создать после окончания текущего показа.',
 	'new.check_again':     'Проверить баланс снова',
 	'new.crisis_title':   'Прежде чем продолжить',
 	'new.crisis_body':    'Если вы переживаете передозировку, суицидальные мысли или медицинский кризис — немедленно позвоните в экстренные службы.',
@@ -923,9 +1002,21 @@ ru: {
 
 	'v2.done.title':        'Ваше объявление опубликовано',
 	'v2.done.sub':          'Вы получите уведомление в Telegram, когда кто-то ответит.',
-	'v2.done.view_listing': 'Посмотреть объявление',
+	'v2.done.manage_listing': 'Управление объявлением',
 	'v2.done.board':        'На доску',
 	'v2.done.restore_hint': 'Закрыли вкладку? Используйте «Восстановить объявление» с кошельком и кодом.',
+
+	// ── V2 owner mode (страница объявления, авторизация по management_code) ───
+	'v2.owner.title':              'Ваше объявление',
+	'v2.owner.subtitle':           'Этот вид виден только вам.',
+	'v2.owner.state_visible':      'Видно на доске',
+	'v2.owner.state_hidden':       'Скрыто — суточное окно закончилось',
+	'v2.owner.state_finished':     'Завершено',
+	'v2.owner.remaining':          'Осталось времени: {time}',
+	'v2.owner.telegram_ready':     'Telegram: подключён',
+	'v2.owner.telegram_not_ready': 'Telegram: не подключён',
+	'v2.owner.reactivate_btn':     'Возобновить показ',
+	'v2.owner.connect_telegram_btn': 'Подключить Telegram для возобновления',
 
 	'v2.restore.title':      'Восстановить объявление',
 	'v2.restore.sub':        'Введите адрес кошелька и код восстановления, чтобы продолжить с того места.',
@@ -936,6 +1027,8 @@ ru: {
 	'v2.restore.code_hint':  'Код восстановления был показан после подтверждения платежа.',
 	'v2.restore.btn':        'Восстановить',
 	'v2.restore.back':       '← На доску',
+	'v2.restore.not_found':  'Объявление не найдено. Проверьте кошелёк и код.',
+	'v2.restore.no_listing_yet': 'По этому коду объявление ещё не опубликовано. Вернитесь на страницу, где вы начали оплату, чтобы продолжить её.',
 	'v2.progress.step1':           'Оплата',
 	'v2.progress.step2':           'Проверка кошелька',
 	'v2.progress.step3':           'Детали',
@@ -1032,6 +1125,69 @@ ru: {
 	'v2.inf.token_expired':   'Ссылка истекла (15 мин). Начните заново.',
 	'v2.inf.eligibility_verified': 'Eligibility подтверждена. Адрес соответствует требованию минимального баланса ${min}.',
 	'v2.inf.privacy_note':    'Адрес кошелька используется только для проверки баланса и не сохраняется. Одна подписка на аккаунт Telegram.',
+
+	// ── V2 reputation (H) ─────────────────────────────────────────────────────
+	'v2.rep.today':        'сегодня',
+	'v2.rep.label':        'Никнейм на платформе',
+	'v2.rep.days_short':   '{n}д',
+	'v2.rep.weeks_short':  '{n}н',
+	'v2.rep.months_short': '{n}м',
+	'v2.rep.years_short':  '{n}г',
+	'v2.rep.rating':       '👍 {pos} / 👎 {neg}',
+	'v2.rep.since':        'На платформе: {age}',
+
+	// ── V2 payment observability (D) ──────────────────────────────────────────
+	'v2.helper.provider_checking':  'Проверяем сеть каждые 5 секунд',
+	'v2.helper.provider_degraded':  'Сервис проверки временно недоступен. Не платите повторно: ваша покупка сохранена.',
+	'v2.helper.confirmations':       'Платёж найден: {conf} из {req} подтверждений',
+	'v2.helper.last_check':          'Последняя успешная проверка: {time}',
+	'v2.helper.provider_healthy':    'Статус платежа актуален',
+
+	// ── V2 cross-device handoff (G) ───────────────────────────────────────────
+	'v2.helper.handoff_btn':     'Продолжить на другом устройстве',
+	'v2.helper.handoff_title':   'Отсканируйте для продолжения',
+	'v2.helper.handoff_scan':    'Отсканируйте QR или скопируйте ссылку на другом устройстве. Действует 15 минут.',
+	'v2.helper.handoff_expires': 'Истекает: {time}',
+	'v2.helper.handoff_close':   'Закрыть',
+	'v2.helper.handoff_invalid': 'Эту ссылку нельзя использовать — возможно, она неверна, истекла или уже была использована.',
+	'v2.helper.handoff_redeem_title': 'Продолжить покупку',
+	'v2.helper.handoff_redeem_sub':   'Введите адрес кошелька, чтобы продолжить на этом устройстве.',
+	'v2.helper.handoff_redeem_btn':   'Продолжить',
+
+	// ── V2 review reminder (C) ────────────────────────────────────────────────
+	'v2.helper.reminder_btn':     'Получить напоминание в Telegram, когда отзыв станет доступен',
+	'v2.helper.reminder_sent':    'Напоминание зарегистрировано. Вы получите сообщение в Telegram, когда сможете оставить отзыв.',
+	'v2.helper.reminder_open':    'Откройте Telegram для подтверждения напоминания',
+
+	// ── V2 navigation + My Purchases (E) ─────────────────────────────────────
+	'v2.helper.my_purchases':        'Мои покупки',
+	'v2.helper.back_to_listing':     '← Объявление',
+	'v2.helper.back_to_board':       '← Доска',
+	'v2.helper.purchases_empty':     'Нет покупок. Найдите объявление чтобы начать.',
+	'v2.helper.purchases_title':     'Мои покупки',
+	'v2.helper.purchase_phase_awaiting':     'Продолжить оплату',
+	'v2.helper.purchase_phase_detected':     'Платёж найден — ожидаем подтверждения',
+	'v2.helper.purchase_phase_confirmed':    'Обработка...',
+	'v2.helper.purchase_phase_balance':      'Проверяем баланс',
+	'v2.helper.purchase_phase_contact_ready':'Контакт доступен',
+	'v2.helper.purchase_phase_review':       'Оценить клиента',
+	'v2.helper.purchase_phase_done':         'Завершено',
+
+	// ── V2 review countdown (G) ───────────────────────────────────────────────
+	'v2.review.countdown': 'Оценка доступна через {time}',
+	'v2.review.not_yet':   'Вы сможете оценить через 1 час — это время нужно, чтобы успеть связаться.',
+
+	// ── V2 board examples (H2) ────────────────────────────────────────────────
+	'v2.board.examples_heading': 'Примеры',
+	'v2.board.example_badge':    'Образец',
+	'v2.board.example_1_title':  'Помощь с оформлением квартиры',
+	'v2.board.example_1_desc':   'Нужна помощь с документами при аренде и переводом.',
+	'v2.board.example_2_title':  'Помощь с подачей на визу',
+	'v2.board.example_2_desc':   'Ищу человека знакомого с местными визовыми центрами.',
+
+	// ── V2 board empty state (H2.5) ───────────────────────────────────────────
+	'v2.board.empty_state': 'В этом городе сейчас нет активных объявлений.',
+	'v2.board.empty_cta':   'Создайте первое',
 },
 
 // ═══════════════════════════════════════ SPANISH ════════════════════════════
@@ -1092,6 +1248,7 @@ es: {
 	'new.listing_fine':   'El anuncio es visible por 24 horas · $5 en {currency} · hasta 2 chats pagados',
 	'new.balance_warning': 'Se requiere un saldo mínimo de $150 al momento de publicar. Tras pagar $5 el saldo no se vuelve a verificar — publicas bajo tu propio riesgo. El pago no es reembolsable.',
 	'new.balance_low':     'Saldo insuficiente: ${balance} en tu billetera, se requieren mínimo ${required}. Recarga e intenta de nuevo.',
+	'new.wallet_already_visible': 'Esta billetera ya tiene un anuncio activo. Se puede crear uno nuevo después de que expire el anuncio actual.',
 	'new.check_again':     'Verificar saldo de nuevo',
 	'new.crisis_title':   'Antes de continuar',
 	'new.crisis_body':    'Si estás sufriendo una sobredosis, pensamientos suicidas o una emergencia médica — llama a los servicios de emergencia locales ahora.',
@@ -1408,9 +1565,21 @@ es: {
 
 	'v2.done.title':        'Tu anuncio está en vivo',
 	'v2.done.sub':          'Recibirás una notificación de Telegram cuando alguien responda.',
-	'v2.done.view_listing': 'Ver anuncio',
+	'v2.done.manage_listing': 'Gestionar anuncio',
 	'v2.done.board':        'Volver al tablero',
 	'v2.done.restore_hint': '¿Cerraste la pestaña? Usa "Restaurar anuncio" con tu billetera y código.',
+
+	// ── V2 owner mode (página del anuncio, autenticada por management_code) ───
+	'v2.owner.title':              'Tu anuncio',
+	'v2.owner.subtitle':           'Solo tú puedes ver esta vista.',
+	'v2.owner.state_visible':      'Visible en el tablero',
+	'v2.owner.state_hidden':       'Oculto — ventana diaria cerrada',
+	'v2.owner.state_finished':     'Finalizado',
+	'v2.owner.remaining':          'Tiempo restante: {time}',
+	'v2.owner.telegram_ready':     'Telegram: conectado',
+	'v2.owner.telegram_not_ready': 'Telegram: no conectado',
+	'v2.owner.reactivate_btn':     'Reactivar anuncio',
+	'v2.owner.connect_telegram_btn': 'Conectar Telegram para reactivar',
 
 	'v2.restore.title':      'Restaurar tu anuncio',
 	'v2.restore.sub':        'Ingresa tu dirección de billetera y código de recuperación para continuar.',
@@ -1421,6 +1590,8 @@ es: {
 	'v2.restore.code_hint':  'El código de recuperación se mostró después de confirmar el pago.',
 	'v2.restore.btn':        'Restaurar',
 	'v2.restore.back':       '← Volver al tablero',
+	'v2.restore.not_found':  'Anuncio no encontrado. Verifica tu billetera y código.',
+	'v2.restore.no_listing_yet': 'Este código todavía no tiene un anuncio publicado. Vuelve a la página donde iniciaste el pago para continuarlo.',
 	'v2.progress.step1':           'Pago',
 	'v2.progress.step2':           'Verificación',
 	'v2.progress.step3':           'Detalles',
@@ -1517,6 +1688,69 @@ es: {
 	'v2.inf.token_expired':   'Enlace expirado (15 min). Empieza de nuevo.',
 	'v2.inf.eligibility_verified': 'Elegibilidad verificada. Esta dirección cumple el requisito de saldo mínimo de ${min}.',
 	'v2.inf.privacy_note':    'Tu dirección solo se usa para verificar el saldo y no se almacena. Una suscripción por cuenta de Telegram.',
+
+	// ── V2 reputation (H) ─────────────────────────────────────────────────────
+	'v2.rep.today':        'hoy',
+	'v2.rep.label':        'Apodo en la plataforma',
+	'v2.rep.days_short':   '{n}d',
+	'v2.rep.weeks_short':  '{n}sem',
+	'v2.rep.months_short': '{n}mes',
+	'v2.rep.years_short':  '{n}a',
+	'v2.rep.rating':       '👍 {pos} / 👎 {neg}',
+	'v2.rep.since':        'En la plataforma: {age}',
+
+	// ── V2 payment observability (D) ──────────────────────────────────────────
+	'v2.helper.provider_checking':  'Verificando red cada 5 segundos',
+	'v2.helper.provider_degraded':  'Servicio de verificación de pago temporalmente no disponible. No vuelvas a pagar — tu compra está guardada.',
+	'v2.helper.confirmations':       'Pago encontrado: {conf} de {req} confirmación(es)',
+	'v2.helper.last_check':          'Última verificación exitosa: {time}',
+	'v2.helper.provider_healthy':    'Estado del pago actualizado',
+
+	// ── V2 cross-device handoff (G) ───────────────────────────────────────────
+	'v2.helper.handoff_btn':     'Continuar en otro dispositivo',
+	'v2.helper.handoff_title':   'Escanea para continuar',
+	'v2.helper.handoff_scan':    'Escanea este QR o copia el enlace en tu otro dispositivo. Válido por 15 minutos.',
+	'v2.helper.handoff_expires': 'Expira: {time}',
+	'v2.helper.handoff_close':   'Cerrar',
+	'v2.helper.handoff_invalid': 'Este enlace no se puede usar — puede ser incorrecto, haber expirado o ya haber sido usado.',
+	'v2.helper.handoff_redeem_title': 'Continuar esta compra',
+	'v2.helper.handoff_redeem_sub':   'Ingresa tu dirección de billetera para continuar en este dispositivo.',
+	'v2.helper.handoff_redeem_btn':   'Continuar',
+
+	// ── V2 review reminder (C) ────────────────────────────────────────────────
+	'v2.helper.reminder_btn':     'Recibir recordatorio en Telegram cuando la reseña esté disponible',
+	'v2.helper.reminder_sent':    'Recordatorio registrado. Recibirás un mensaje en Telegram cuando puedas dejar una reseña.',
+	'v2.helper.reminder_open':    'Abre Telegram para confirmar el recordatorio',
+
+	// ── V2 navigation + My Purchases (E) ─────────────────────────────────────
+	'v2.helper.my_purchases':        'Mis compras',
+	'v2.helper.back_to_listing':     '← Anuncio',
+	'v2.helper.back_to_board':       '← Tablero',
+	'v2.helper.purchases_empty':     'Sin compras aún. Encuentra un anuncio para empezar.',
+	'v2.helper.purchases_title':     'Mis Compras',
+	'v2.helper.purchase_phase_awaiting':     'Continuar pago',
+	'v2.helper.purchase_phase_detected':     'Pago detectado — esperando confirmación',
+	'v2.helper.purchase_phase_confirmed':    'Procesando...',
+	'v2.helper.purchase_phase_balance':      'Verificación de saldo pendiente',
+	'v2.helper.purchase_phase_contact_ready':'Contacto disponible',
+	'v2.helper.purchase_phase_review':       'Calificar a esta persona',
+	'v2.helper.purchase_phase_done':         'Completado',
+
+	// ── V2 review countdown (G) ───────────────────────────────────────────────
+	'v2.review.countdown': 'Calificación disponible en {time}',
+	'v2.review.not_yet':   'Puedes calificar a esta persona después de 1 hora — esto asegura que hayas tenido tiempo para conectar.',
+
+	// ── V2 board examples (H2) ────────────────────────────────────────────────
+	'v2.board.examples_heading': 'Ejemplos',
+	'v2.board.example_badge':    'Ejemplo',
+	'v2.board.example_1_title':  'Ayuda con trámites del apartamento',
+	'v2.board.example_1_desc':   'Necesito a alguien que ayude a gestionar documentos de alquiler y traducción.',
+	'v2.board.example_2_title':  'Ayuda con solicitud de visa',
+	'v2.board.example_2_desc':   'Busco a alguien familiarizado con las oficinas de visas locales y procedimientos.',
+
+	// ── V2 board empty state (H2.5) ───────────────────────────────────────────
+	'v2.board.empty_state': 'No hay solicitudes activas en esta ciudad ahora mismo.',
+	'v2.board.empty_cta':   'Crea la primera',
 },
 
 // ═══════════════════════════════════════ GEORGIAN ═══════════════════════════
@@ -1578,6 +1812,7 @@ ka: {
 	'new.listing_fine':   'განცხადება ჩანს 24 საათის განმავლობაში · $5 {currency}-ში · მაქსიმუმ 2 ანაზღაურებადი ჩატი',
 	'new.balance_warning': 'განთავსებისას საჭიროა მინიმუმ $150 ბალანსი. $5 გადახდის შემდეგ ბალანსი აღარ მოწმდება — განათავსებ შენი რისკის ქვეშ. გადახდა არ ბრუნდება.',
 	'new.balance_low':     'არასაკმარისი ბალანსი: ${balance} შენს საფულეში, საჭიროა მინიმუმ ${required}. შეავსე და სცადე ისევ.',
+	'new.wallet_already_visible': 'ამ საფულეს უკვე აქვს აქტიური განცხადება. ახალი შეიძლება შეიქმნას მიმდინარე განცხადების ვადის გასვლის შემდეგ.',
 	'new.check_again':     'ბალანსის კვლავ შემოწმება',
 	'new.crisis_title':   'გაგრძელებამდე',
 	'new.crisis_body':    'თუ გაქვთ ზედოზირება, სუიციდური აზრები ან სხვა გადაუდებელი სამედიცინო მდგომარეობა — დაუყოვნებლივ დაუკავშირდით ადგილობრივ საგანგებო სამსახურს.',
@@ -1894,9 +2129,21 @@ ka: {
 
 	'v2.done.title':        'თქვენი განცხადება გამოქვეყნებულია',
 	'v2.done.sub':          'Telegram-ში მიიღებთ შეტყობინებას, როცა ვინმე გიპასუხებს.',
-	'v2.done.view_listing': 'განცხადების ნახვა',
+	'v2.done.manage_listing': 'განცხადების მართვა',
 	'v2.done.board':        'დაფაზე დაბრუნება',
 	'v2.done.restore_hint': 'ჩანართი დახურეთ? გამოიყენეთ "განცხადების აღდგენა" საფულით და კოდით.',
+
+	// ── V2 owner mode (განცხადების გვერდი, management_code-ით ავტორიზებული) ──
+	'v2.owner.title':              'თქვენი განცხადება',
+	'v2.owner.subtitle':           'ეს ხედი მხოლოდ თქვენ გხედავთ.',
+	'v2.owner.state_visible':      'ჩანს დაფაზე',
+	'v2.owner.state_hidden':       'დამალულია — დღიური ფანჯარა დახურულია',
+	'v2.owner.state_finished':     'დასრულებულია',
+	'v2.owner.remaining':          'დარჩენილი დრო: {time}',
+	'v2.owner.telegram_ready':     'Telegram: დაკავშირებულია',
+	'v2.owner.telegram_not_ready': 'Telegram: არ არის დაკავშირებული',
+	'v2.owner.reactivate_btn':     'ხელახლა გააქტიურება',
+	'v2.owner.connect_telegram_btn': 'დააკავშირეთ Telegram გასააქტიურებლად',
 
 	'v2.restore.title':      'განცხადების აღდგენა',
 	'v2.restore.sub':        'შეიყვანეთ საფულის მისამართი და აღდგენის კოდი, რათა გააგრძელოთ.',
@@ -1907,6 +2154,8 @@ ka: {
 	'v2.restore.code_hint':  'აღდგენის კოდი ნაჩვენები იყო გადახდის დადასტურების შემდეგ.',
 	'v2.restore.btn':        'აღდგენა',
 	'v2.restore.back':       '← დაფაზე დაბრუნება',
+	'v2.restore.not_found':  'განცხადება ვერ მოიძებნა. შეამოწმეთ საფულე და კოდი.',
+	'v2.restore.no_listing_yet': 'ამ კოდზე განცხადება ჯერ არ არის გამოქვეყნებული. დაუბრუნდით გვერდს, სადაც გადახდა დაიწყეთ, რომ გააგრძელოთ იგი.',
 	'v2.progress.step1':           'გადახდა',
 	'v2.progress.step2':           'საფულის შემოწმება',
 	'v2.progress.step3':           'დეტალები',
@@ -2003,6 +2252,69 @@ ka: {
 	'v2.inf.token_expired':       'ბმული ამოიწურა. გადაიტვირთეთ გვერდი და სცადეთ ხელახლა.',
 	'v2.inf.eligibility_verified':    'Eligibility დადასტურებულია. ეს მისამართი აკმაყოფილებს ${min} მინიმალური ბალანსის მოთხოვნას.',
 	'v2.inf.privacy_note':        'მისამართი გამოიყენება მხოლოდ ბალანსის შესამოწმებლად. ჩვენ მას არ ვინახავთ.',
+
+	// ── V2 reputation (H) ─────────────────────────────────────────────────────
+	'v2.rep.today':        'დღეს',
+	'v2.rep.label':        'პლატფორმის მეტსახელი',
+	'v2.rep.days_short':   '{n}დ',
+	'v2.rep.weeks_short':  '{n}კ',
+	'v2.rep.months_short': '{n}თ',
+	'v2.rep.years_short':  '{n}წ',
+	'v2.rep.rating':       '👍 {pos} / 👎 {neg}',
+	'v2.rep.since':        'პლატფორმაზე: {age}',
+
+	// ── V2 payment observability (D) ──────────────────────────────────────────
+	'v2.helper.provider_checking':  'ქსელს ვამოწმებთ ყოველ 5 წამში',
+	'v2.helper.provider_degraded':  'გადახდის შემოწმების სერვისი დროებით მიუწვდომელია. ხელახლა ნუ გადაიხდით — თქვენი შეძენა შენახულია.',
+	'v2.helper.confirmations':       'გადახდა ნაპოვნია: {conf} / {req} დადასტურება',
+	'v2.helper.last_check':          'ბოლო წარმატებული შემოწმება: {time}',
+	'v2.helper.provider_healthy':    'გადახდის სტატუსი აქტუალურია',
+
+	// ── V2 cross-device handoff (G) ───────────────────────────────────────────
+	'v2.helper.handoff_btn':     'სხვა მოწყობილობაზე გაგრძელება',
+	'v2.helper.handoff_title':   'სკანირება გასაგრძელებლად',
+	'v2.helper.handoff_scan':    'დაასკანირეთ QR ან დააკოპირეთ ბმული სხვა მოწყობილობაზე. მოქმედია 15 წუთი.',
+	'v2.helper.handoff_expires': 'იწურება: {time}',
+	'v2.helper.handoff_close':   'დახურვა',
+	'v2.helper.handoff_invalid': 'ამ ბმულის გამოყენება შეუძლებელია — შესაძლოა არასწორია, ვადაგასულია ან უკვე გამოყენებულია.',
+	'v2.helper.handoff_redeem_title': 'შეძენის გაგრძელება',
+	'v2.helper.handoff_redeem_sub':   'შეიყვანეთ საფულის მისამართი ამ მოწყობილობაზე გასაგრძელებლად.',
+	'v2.helper.handoff_redeem_btn':   'გაგრძელება',
+
+	// ── V2 review reminder (C) ────────────────────────────────────────────────
+	'v2.helper.reminder_btn':     'მიიღე Telegram შეხსენება, როცა შეფასება ხელმისაწვდომი გახდება',
+	'v2.helper.reminder_sent':    'შეხსენება დარეგისტრირდა. Telegram-ში მიიღებ შეტყობინებას, როცა შეგეძლება შეფასების დატოვება.',
+	'v2.helper.reminder_open':    'გახსენი Telegram შეხსენების დასადასტურებლად',
+
+	// ── V2 navigation + My Purchases (E) ─────────────────────────────────────
+	'v2.helper.my_purchases':        'ჩემი შეძენები',
+	'v2.helper.back_to_listing':     '← განცხადება',
+	'v2.helper.back_to_board':       '← დაფა',
+	'v2.helper.purchases_empty':     'შეძენები ჯერ არ არის. იპოვეთ განცხადება დასაწყებად.',
+	'v2.helper.purchases_title':     'ჩემი შეძენები',
+	'v2.helper.purchase_phase_awaiting':     'გადახდის გაგრძელება',
+	'v2.helper.purchase_phase_detected':     'გადახდა ნაპოვნია — ველოდებით დადასტურებას',
+	'v2.helper.purchase_phase_confirmed':    'მუშავდება...',
+	'v2.helper.purchase_phase_balance':      'ბალანსი მოწმდება',
+	'v2.helper.purchase_phase_contact_ready':'კონტაქტი ხელმისაწვდომია',
+	'v2.helper.purchase_phase_review':       'შეაფასეთ კლიენტი',
+	'v2.helper.purchase_phase_done':         'დასრულდა',
+
+	// ── V2 review countdown (G) ───────────────────────────────────────────────
+	'v2.review.countdown': 'შეფასება ხელმისაწვდომია {time}-ში',
+	'v2.review.not_yet':   'ამ ადამიანის შეფასება შეგიძლიათ 1 საათის შემდეგ — ეს დრო საჭიროა დასაკავშირებლად.',
+
+	// ── V2 board examples (H2) ────────────────────────────────────────────────
+	'v2.board.examples_heading': 'მაგალითები',
+	'v2.board.example_badge':    'მაგალითი',
+	'v2.board.example_1_title':  'დახმარება ბინის დოკუმენტებით',
+	'v2.board.example_1_desc':   'საჭიროა ვინმე, ვინც დაეხმარება გაქირავების დოკუმენტებსა და თარგმანში.',
+	'v2.board.example_2_title':  'დახმარება ვიზის განაცხადით',
+	'v2.board.example_2_desc':   'ვეძებ ადამიანს, ვინც ადგილობრივ საკონსულო ოფისებს იცნობს.',
+
+	// ── V2 board empty state (H2.5) ───────────────────────────────────────────
+	'v2.board.empty_state': 'ამ ქალაქში ახლა აქტიური განცხადებები არ არის.',
+	'v2.board.empty_cta':   'შექმენით პირველი',
 },
 
 };

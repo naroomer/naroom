@@ -35,6 +35,7 @@ var (
 	ErrBindingRequired           = errors.New("v2: active notification binding required")
 	ErrListingAlreadyExists      = errors.New("v2: listing already exists for this flow")
 	ErrAlreadyVisible            = errors.New("v2: listing is already visible")
+	ErrProfileAlreadyVisible     = errors.New("v2: another listing from this wallet is already visible")
 	ErrLowBalance                = errors.New("v2: balance below required floor")
 	ErrInvalidListingInput       = errors.New("v2: invalid listing or contact input")
 	ErrBindingTTLInvalid         = errors.New("v2: binding TTL must be between 1s and 15m")
@@ -419,6 +420,21 @@ func (ls *ListingService) FirstPublish(rawCode, walletAddress string, input List
 			return ListingView{}, fmt.Errorf("v2: FirstPublish: unexpected destination row count: [internal]")
 		}
 
+		// One-visible-per-profile guard: reject if another listing from the same
+		// client profile is currently effectively visible (race-safe: inside tx).
+		var otherVisible int
+		tx.QueryRow(`
+			SELECT COUNT(*) FROM v2_listings l
+			JOIN v2_client_flows f ON f.id = l.flow_id
+			WHERE f.client_profile_id = (SELECT client_profile_id FROM v2_client_flows WHERE id = ?)
+			  AND l.state = 'visible' AND l.visible_until > ?`,
+			fv.FlowID, nowUnix,
+		).Scan(&otherVisible) //nolint:errcheck
+		if otherVisible > 0 {
+			tx.Rollback() //nolint:errcheck
+			return ListingView{}, ErrProfileAlreadyVisible
+		}
+
 		// Binding is now active; INSERT listing.
 		res, insErr := tx.Exec(`
 			INSERT INTO v2_listings
@@ -677,6 +693,22 @@ func (ls *ListingService) Reactivate(rawCode, walletAddress string, balanceUSD f
 		return ListingView{}, fmt.Errorf("v2: Reactivate: unexpected destination row count: [internal]")
 	}
 
+	// One-visible-per-profile guard: reject if another flow from the same profile
+	// already has an effectively visible listing (race-safe: inside tx).
+	var otherVisibleReact int
+	tx.QueryRow(`
+		SELECT COUNT(*) FROM v2_listings l
+		JOIN v2_client_flows f ON f.id = l.flow_id
+		WHERE f.client_profile_id = (SELECT client_profile_id FROM v2_client_flows WHERE id = ?)
+		  AND l.state = 'visible' AND l.visible_until > ?
+		  AND l.flow_id != ?`,
+		fv.FlowID, nowUnix, fv.FlowID,
+	).Scan(&otherVisibleReact) //nolint:errcheck
+	if otherVisibleReact > 0 {
+		tx.Rollback() //nolint:errcheck
+		return ListingView{}, ErrProfileAlreadyVisible
+	}
+
 	// CAS UPDATE listing: transition to visible.
 	res, err := tx.Exec(`
 		UPDATE v2_listings
@@ -748,7 +780,7 @@ func (ls *ListingService) classifyReactivateFailure(flowID string, nowUnix int64
 // are returned. Unknown city returns ErrInvalidListingInput.
 func (ls *ListingService) BoardQuery(city string, now time.Time) ([]PublicListingView, error) {
 	city = strings.TrimSpace(strings.ToLower(city))
-	if _, ok := cityCountry[city]; !ok {
+	if _, ok := CityByID(city); !ok {
 		return nil, fmt.Errorf("%w: unknown city for board query", ErrInvalidListingInput)
 	}
 	nowUnix := now.Unix()
@@ -900,6 +932,58 @@ func (ls *ListingService) scanListingView(flowID string) (ListingView, error) {
 		return ListingView{}, fmt.Errorf("v2: scanListingView: parse languages: %w", err)
 	}
 	return lv, nil
+}
+
+// OwnerView is the owner-only summary for a listing, verified via management_code.
+type OwnerView struct {
+	ListingID     string
+	State         string // visible | hidden | finished
+	City          string
+	CountryCode   string
+	DisplayName   string
+	Urgency       string
+	Languages     []string
+	VisibleUntil  *time.Time
+	TelegramReady bool
+	DepType       string
+	HelpType      string
+}
+
+// GetListingOwnerView returns the owner-only summary for a listing.
+// listingID and managementCode are both required.
+// Returns ErrNotFound when the listing does not exist or the code does not match.
+func (ls *ListingService) GetListingOwnerView(listingID, managementCode string) (*OwnerView, error) {
+	codeH := ls.svc.codeHash(managementCode)
+
+	var view OwnerView
+	var visibleUntil sql.NullInt64
+	var telegramReady int
+	var langsJSON string
+	err := ls.svc.db.QueryRow(`
+		SELECT l.id, l.state, l.city, l.country_code, l.display_name, l.urgency, l.languages,
+		       l.visible_until, l.dependency_type, l.help_type,
+		       CASE WHEN b.state = 'ready' THEN 1 ELSE 0 END as tg_ready
+		FROM v2_listings l
+		JOIN v2_client_flows f ON f.id = l.flow_id
+		LEFT JOIN v2_client_notification_bindings b ON b.flow_id = f.id AND b.state = 'ready'
+		WHERE l.id = ? AND f.management_code_hash = ?`, listingID, codeH,
+	).Scan(&view.ListingID, &view.State, &view.City, &view.CountryCode, &view.DisplayName,
+		&view.Urgency, &langsJSON, &visibleUntil, &view.DepType, &view.HelpType, &telegramReady)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("v2: GetListingOwnerView: %w", err)
+	}
+	if visibleUntil.Valid {
+		t := time.Unix(visibleUntil.Int64, 0)
+		view.VisibleUntil = &t
+	}
+	view.TelegramReady = telegramReady == 1
+	if err = json.Unmarshal([]byte(langsJSON), &view.Languages); err != nil {
+		return nil, fmt.Errorf("v2: GetListingOwnerView: parse languages: %w", err)
+	}
+	return &view, nil
 }
 
 // isSQLiteUniqueViolation reports whether err is a SQLite UNIQUE constraint failure.

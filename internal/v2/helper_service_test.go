@@ -484,12 +484,13 @@ func TestHelperCreate_InsufficientBalance(t *testing.T) {
 
 // Test 6B: Balance exactly at and just above HelperPreInvoiceMinUSD floor → 201 accepted.
 // Complements Test 6 (1009.99 → 402). Verifies the exact boundary:
-//   1009.99 → 402 (below), 1010.00 → 201 (at floor), 1010.01 → 201 (above floor).
+//
+//	1009.99 → 402 (below), 1010.00 → 201 (at floor), 1010.01 → 201 (above floor).
 func TestHelperHTTP_BalanceThresholdBoundary(t *testing.T) {
 	cases := []struct {
-		bal     float64
+		bal      float64
 		wantHTTP int
-		name    string
+		name     string
 	}{
 		{1009.99, http.StatusPaymentRequired, "below_floor"},
 		{1010.00, http.StatusCreated, "at_floor"},
@@ -1744,5 +1745,333 @@ func TestHelperReveal_RealCipherBothTypes(t *testing.T) {
 				t.Errorf("contact_type mismatch: want %q, got %q", ctType, result.ContactType)
 			}
 		})
+	}
+}
+
+// TestHelperReveal_EntitlementsOnlyAfterFirstReveal verifies the ACCEPTANCE_REPAIR
+// first-reveal contract at the domain layer: no v2_review_entitlements rows exist
+// for a purchase before its first successful reveal; the CAS-winning first reveal
+// creates exactly two rows (client + helper side) in the same transaction, with
+// available_at = first_revealed_at + 3600 and expires_at = first_revealed_at + 86400.
+func TestHelperReveal_EntitlementsOnlyAfterFirstReveal(t *testing.T) {
+	svc, db := newTestHelperService(t)
+	_, purchaseID, rawToken, walletAddr, currency := mustCreateContactReadyPurchaseForHandoff(t, svc, db)
+
+	var before int
+	db.QueryRow(`SELECT COUNT(*) FROM v2_review_entitlements WHERE purchase_id = ?`, purchaseID).Scan(&before) //nolint:errcheck
+	if before != 0 {
+		t.Fatalf("before first reveal: want 0 entitlements, got %d", before)
+	}
+
+	if _, err := svc.RevealHelperContact(purchaseID, rawToken, walletAddr, currency); err != nil {
+		t.Fatalf("RevealHelperContact: %v", err)
+	}
+
+	var firstRevealedAt int64
+	if err := db.QueryRow(`SELECT first_revealed_at FROM v2_helper_purchases WHERE id = ?`, purchaseID).Scan(&firstRevealedAt); err != nil {
+		t.Fatalf("read first_revealed_at: %v", err)
+	}
+
+	rows, err := db.Query(`SELECT reviewer_side, available_at, expires_at FROM v2_review_entitlements WHERE purchase_id = ?`, purchaseID)
+	if err != nil {
+		t.Fatalf("query entitlements: %v", err)
+	}
+	defer rows.Close()
+	seen := map[string]bool{}
+	count := 0
+	for rows.Next() {
+		var side string
+		var availableAt, expiresAt int64
+		if err := rows.Scan(&side, &availableAt, &expiresAt); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		count++
+		seen[side] = true
+		if availableAt != firstRevealedAt+3600 {
+			t.Errorf("%s: available_at = %d, want first_revealed_at(%d)+3600", side, availableAt, firstRevealedAt)
+		}
+		if expiresAt != firstRevealedAt+86400 {
+			t.Errorf("%s: expires_at = %d, want first_revealed_at(%d)+86400", side, expiresAt, firstRevealedAt)
+		}
+	}
+	if count != 2 {
+		t.Fatalf("after first reveal: want 2 entitlements, got %d", count)
+	}
+	if !seen["client"] || !seen["helper"] {
+		t.Fatalf("want both client and helper entitlements, got %v", seen)
+	}
+}
+
+// ── Task 11F: cross-device handoff tests ─────────────────────────────────────
+
+func mustCreateContactReadyPurchaseForHandoff(t *testing.T, svc *HelperPurchaseService, db *sql.DB) (listingID, purchaseID, rawBrowserToken, walletAddr, currency string) {
+	t.Helper()
+	listingID = mustCreateVisibleListingDB(t, db, "GE")
+	// Use a known valid BTC bech32 address for reliable test execution.
+	addr := testBTCBech32Addr
+	normalized, cur, err := validateAndNormalizeAddress(addr)
+	if err != nil {
+		t.Fatalf("normalize addr: %v", err)
+	}
+	rawToken := newID()
+	draft := HelperInvoiceDraft{PaymentAddress: "payaddr_hf", AmountAtomic: 100000, AmountUSDCents: helperInvoiceUSDCents}
+	_, view, createErr := svc.CreatePurchase(rawToken, listingID, cur, normalized, draft)
+	if createErr != nil {
+		t.Fatalf("CreatePurchase: %v", createErr)
+	}
+	// Advance to contact_ready.
+	svc.RecordHelperDetection(view.PurchaseID, "txid_hf", []string{addr}, 100000, time.Now()) //nolint:errcheck
+	svc.ConfirmHelperPayment(view.PurchaseID, time.Now())                                     //nolint:errcheck
+	svc.RecordHelperPostPaymentBalance(view.PurchaseID, 1200.0)                               //nolint:errcheck
+	return listingID, view.PurchaseID, rawToken, normalized, cur
+}
+
+// TestHandoff_CreateAndRedeem verifies the happy path: create handoff on device A,
+// redeem on device B, revoke device A, and accept only the rotated capability.
+func TestHandoff_CreateAndRedeem(t *testing.T) {
+	svc, db := newTestHelperService(t)
+	_, _, rawToken, walletAddr, currency := mustCreateContactReadyPurchaseForHandoff(t, svc, db)
+
+	// Device A: create handoff.
+	rawHandoff, expiresAt, err := svc.CreateHandoff(rawToken, walletAddr, currency)
+	if err != nil {
+		t.Fatalf("CreateHandoff: %v", err)
+	}
+	if rawHandoff == "" {
+		t.Fatal("CreateHandoff: empty token")
+	}
+	if expiresAt.IsZero() || expiresAt.Unix() < time.Now().Unix() {
+		t.Errorf("CreateHandoff: expires_at=%v should be in the future", expiresAt)
+	}
+
+	// Device B: redeem handoff.
+	newBrowserToken, newPurchaseID, err := svc.RedeemHandoff(rawHandoff, walletAddr, currency)
+	if err != nil {
+		t.Fatalf("RedeemHandoff: %v", err)
+	}
+	if newBrowserToken == "" {
+		t.Fatal("RedeemHandoff: empty new browser token")
+	}
+	if newPurchaseID == "" {
+		t.Fatal("RedeemHandoff: empty purchase ID")
+	}
+
+	// Old browser token must be REVOKED immediately on successful redeem — per the
+	// ACCEPTANCE_REPAIR contract, a successful handoff rotates the purchase capability
+	// and revokes the original device's token so it can no longer be used.
+	_, restoreErr := svc.RestorePurchase(rawToken, walletAddr, currency)
+	if !errors.Is(restoreErr, ErrHelperNotFound) {
+		t.Errorf("old browser token should be revoked after handoff redeem, got err=%v", restoreErr)
+	}
+
+	// New browser token must work.
+	_, newRestoreErr := svc.RestorePurchase(newBrowserToken, walletAddr, currency)
+	if newRestoreErr != nil {
+		t.Errorf("new browser token should work after redeem: %v", newRestoreErr)
+	}
+
+	// A second handoff created after the first redeem must not resurrect the old token,
+	// and creating a new handoff for the same purchase must revoke any still-pending
+	// prior handoff attempt (at most one active attempt per purchase).
+	rawHandoff2, _, err := svc.CreateHandoff(newBrowserToken, walletAddr, currency)
+	if err != nil {
+		t.Fatalf("CreateHandoff (second): %v", err)
+	}
+	if _, _, err := svc.RedeemHandoff(rawHandoff, walletAddr, currency); !errors.Is(err, ErrHelperNotFound) {
+		t.Errorf("stale first handoff token should stay unusable, got err=%v", err)
+	}
+	if rawHandoff2 == rawHandoff {
+		t.Fatal("second handoff token must differ from the first")
+	}
+}
+
+// TestHandoff_NewPendingRevokesPrevious proves there is at most one live
+// handoff capability for a purchase before either capability is redeemed.
+func TestHandoff_NewPendingRevokesPrevious(t *testing.T) {
+	svc, db := newTestHelperService(t)
+	_, _, rawToken, walletAddr, currency := mustCreateContactReadyPurchaseForHandoff(t, svc, db)
+
+	first, _, err := svc.CreateHandoff(rawToken, walletAddr, currency)
+	if err != nil {
+		t.Fatalf("CreateHandoff first: %v", err)
+	}
+	second, _, err := svc.CreateHandoff(rawToken, walletAddr, currency)
+	if err != nil {
+		t.Fatalf("CreateHandoff second: %v", err)
+	}
+
+	if _, _, err := svc.RedeemHandoff(first, walletAddr, currency); !errors.Is(err, ErrHelperNotFound) {
+		t.Fatalf("first pending handoff should be revoked, got %v", err)
+	}
+	if _, _, err := svc.RedeemHandoff(second, walletAddr, currency); err != nil {
+		t.Fatalf("latest pending handoff should redeem: %v", err)
+	}
+
+	var pending int
+	if err := db.QueryRow(`
+		SELECT COUNT(*) FROM v2_helper_purchase_handoffs
+		WHERE state = 'pending'`).Scan(&pending); err != nil {
+		t.Fatalf("count pending handoffs: %v", err)
+	}
+	if pending != 0 {
+		t.Fatalf("pending handoffs after redeem = %d, want 0", pending)
+	}
+}
+
+func TestHandoff_ExpiredRejected(t *testing.T) {
+	svc, db := newTestHelperService(t)
+	_, _, rawToken, walletAddr, currency := mustCreateContactReadyPurchaseForHandoff(t, svc, db)
+
+	rawHandoff, expiresAt, err := svc.CreateHandoff(rawToken, walletAddr, currency)
+	if err != nil {
+		t.Fatalf("CreateHandoff: %v", err)
+	}
+	svc.now = func() time.Time { return expiresAt.Add(time.Second) }
+
+	if _, _, err := svc.RedeemHandoff(rawHandoff, walletAddr, currency); !errors.Is(err, ErrHelperNotFound) {
+		t.Fatalf("expired handoff should return ErrHelperNotFound, got %v", err)
+	}
+}
+
+// TestHandoff_ReplayRejected verifies that redeeming the same handoff token twice fails.
+func TestHandoff_ReplayRejected(t *testing.T) {
+	svc, db := newTestHelperService(t)
+	_, _, rawToken, walletAddr, currency := mustCreateContactReadyPurchaseForHandoff(t, svc, db)
+
+	rawHandoff, _, _ := svc.CreateHandoff(rawToken, walletAddr, currency)
+	svc.RedeemHandoff(rawHandoff, walletAddr, currency) //nolint:errcheck — first redeem
+
+	// Second redeem must fail.
+	_, _, replayErr := svc.RedeemHandoff(rawHandoff, walletAddr, currency)
+	if replayErr == nil {
+		t.Error("replaying consumed handoff token should fail")
+	}
+}
+
+// TestHandoff_WrongWalletRejected verifies redeem with wrong wallet returns not-found.
+func TestHandoff_WrongWalletRejected(t *testing.T) {
+	svc, db := newTestHelperService(t)
+	_, _, rawToken, walletAddr, currency := mustCreateContactReadyPurchaseForHandoff(t, svc, db)
+
+	rawHandoff, _, _ := svc.CreateHandoff(rawToken, walletAddr, currency)
+
+	wrongAddr := "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4" // different BTC address
+	_, _, wrongErr := svc.RedeemHandoff(rawHandoff, wrongAddr, currency)
+	if wrongErr == nil {
+		t.Error("wrong wallet redeem should fail")
+	}
+	if wrongErr != ErrHelperNotFound {
+		t.Logf("wrong wallet: got %v (expected ErrHelperNotFound)", wrongErr)
+	}
+}
+
+// TestHandoff_WrongTokenRejected verifies redeem with fabricated token returns not-found.
+func TestHandoff_WrongTokenRejected(t *testing.T) {
+	svc, _ := newTestHelperService(t)
+	fakeToken := newID() // random 64-char hex — no matching hash
+	_, _, err := svc.RedeemHandoff(fakeToken, testBTCBech32Addr, "BTC")
+	if err == nil {
+		t.Error("fabricated handoff token should fail")
+	}
+}
+
+// ── Section L: Focused unit tests for new Task 11 features ────────────────────
+
+// TestReviewReminderLink_HappyPath verifies that a review reminder link can be
+// created after RevealHelperContact has been called (entitlements exist).
+func TestReviewReminderLink_HappyPath(t *testing.T) {
+	svc, db := newTestHelperService(t)
+	_, purchaseID, rawToken, walletAddr, currency := mustCreateContactReadyPurchaseForHandoff(t, svc, db)
+
+	normalized, _, _ := validateAndNormalizeAddress(walletAddr)
+
+	// Call RevealHelperContact to create entitlements.
+	_, revErr := svc.RevealHelperContact(purchaseID, rawToken, normalized, currency)
+	if revErr != nil {
+		t.Fatalf("RevealHelperContact: %v", revErr)
+	}
+
+	// Zero out available_at so we're not in countdown (entitlement immediately available).
+	db.Exec("UPDATE v2_review_entitlements SET available_at = 0 WHERE purchase_id = ?", purchaseID) //nolint:errcheck
+
+	rawReminderToken, sendAt, expiresAt, err := svc.CreateReviewReminderLink(rawToken, normalized, currency)
+	if err != nil {
+		t.Fatalf("CreateReviewReminderLink: %v", err)
+	}
+	if rawReminderToken == "" {
+		t.Error("CreateReviewReminderLink: empty token")
+	}
+	nowUnix := time.Now().Unix()
+	if expiresAt <= nowUnix {
+		t.Errorf("CreateReviewReminderLink: expiresAt=%d should be in the future", expiresAt)
+	}
+	if sendAt < nowUnix-5 {
+		t.Errorf("CreateReviewReminderLink: sendAt=%d should be >= now", sendAt)
+	}
+
+	// Verify token hash is stored.
+	tHash := svc.HelperReminderTokenHash(rawReminderToken)
+	var storedID string
+	if err := db.QueryRow(`SELECT id FROM v2_helper_review_reminders WHERE token_hash = ?`, tHash).Scan(&storedID); err != nil {
+		t.Fatalf("reminder token not found in db: %v", err)
+	}
+}
+
+// TestReviewReminderLink_NoEntitlement verifies that CreateReviewReminderLink
+// returns ErrHelperNotFound if no entitlement exists (contact not revealed).
+func TestReviewReminderLink_NoEntitlement(t *testing.T) {
+	svc, db := newTestHelperService(t)
+	_, _, rawToken, walletAddr, currency := mustCreateContactReadyPurchaseForHandoff(t, svc, db)
+	normalized, _, _ := validateAndNormalizeAddress(walletAddr)
+	// No RevealHelperContact → no entitlement.
+	_ = db
+	_, _, _, err := svc.CreateReviewReminderLink(rawToken, normalized, currency)
+	if err == nil {
+		t.Error("expected error when no entitlement")
+	}
+}
+
+// TestHasVisibleListing verifies the pre-check used to block duplicate listings.
+func TestHasVisibleListing_HappyPath(t *testing.T) {
+	svc, db := newTestService(t)
+	normalized, currency, err := validateAndNormalizeAddress(testBTCBech32Addr)
+	if err != nil {
+		t.Fatalf("normalize addr: %v", err)
+	}
+
+	// Initially no visible listing.
+	has, err := svc.HasVisibleListing(currency, normalized)
+	if err != nil {
+		t.Fatalf("HasVisibleListing: %v", err)
+	}
+	if has {
+		t.Error("expected false before any listing")
+	}
+
+	// Create a visible listing by injecting rows directly.
+	fp := svc.walletFingerprint(currency, normalized)
+	nowUnix := time.Now().Unix()
+	clientProfileID := mustInsertClientProfileForFlow(t, db, nowUnix)
+	// Override the wallet_fingerprint with the real one derived from the address.
+	db.Exec(`UPDATE v2_client_profiles SET wallet_fingerprint = ? WHERE id = ?`, fp, clientProfileID) //nolint:errcheck
+	flowID := newID()
+	db.Exec(`INSERT INTO v2_client_flows (id, wallet_fingerprint, currency, management_code_hash, state, client_profile_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'form_ready', ?, ?, ?)`,
+		flowID, fp, currency, newID(), clientProfileID, nowUnix, nowUnix,
+	) //nolint:errcheck
+	listingID := newID()
+	cipher, _ := NewAESGCMContactCipher(testAESKey, "v1")
+	ct, nh, kv, _ := cipher.Encrypt("@x", listingID, flowID, "telegram")
+	db.Exec(`INSERT INTO v2_listings (id, flow_id, city, country_code, dependency_type, help_type, urgency, languages, display_name, contact_type, contact_ciphertext, contact_nonce, contact_key_version, state, visible_until, first_published_at, last_activated_at, entitlement_expires_at, activation_count, created_at, updated_at)
+		VALUES (?, ?, 'tbilisi', 'GE', 'd', 'h', 'u', '["en"]', 'dn', 'telegram', ?, ?, ?, 'visible', ?, ?, ?, ?, 1, ?, ?)`,
+		listingID, flowID, ct, nh, kv, nowUnix+3600, nowUnix, nowUnix, nowUnix+86400, nowUnix, nowUnix,
+	) //nolint:errcheck
+
+	has, err = svc.HasVisibleListing(currency, normalized)
+	if err != nil {
+		t.Fatalf("HasVisibleListing after insert: %v", err)
+	}
+	if !has {
+		t.Error("expected true after inserting visible listing")
 	}
 }

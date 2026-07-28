@@ -91,6 +91,9 @@ type recordingBotSender struct {
 }
 
 func (s *recordingBotSender) SendMessage(_ context.Context, _ int64, _ string) error { return nil }
+func (s *recordingBotSender) SendPlainMessage(_ context.Context, _ int64, _ string) error {
+	return nil
+}
 
 func (s *recordingBotSender) SendReviewPrompt(_ context.Context, chatID int64, text, posData, negData string) error {
 	s.mu.Lock()

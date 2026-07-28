@@ -10,21 +10,36 @@ package v2
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"time"
 )
 
 // Helper domain-separation HMAC prefixes — distinct from Client prefixes.
 const (
-	helperWalletDomain = "naroom:v2:helper-wallet:"
-	helperTokenDomain  = "naroom:v2:helper-browser-token:"
-	helperTxidDomain   = "naroom:v2:helper-txid:"
+	helperWalletDomain        = "naroom:v2:helper-wallet:"
+	helperTokenDomain         = "naroom:v2:helper-browser-token:"
+	helperTxidDomain          = "naroom:v2:helper-txid:"
+	helperHandoffDomain       = "naroom:v2:helper-handoff-token:"
+	helperReminderTokenDomain = "naroom:v2:helper-review-reminder:"
+
+	// clientWalletDomainCrossCheck is the domain used by service.go's walletFingerprint.
+	// Duplicated here so HelperPurchaseService can check self-purchase without coupling to Service.
+	// Must stay in sync with service.go const walletDomain.
+	clientWalletDomainCrossCheck = "naroom:v2:wallet:"
 )
+
+// handoffTTL is the lifetime for a handoff token.
+const handoffTTL = 15 * 60 // 900 seconds
+
+// reviewReminderTokenTTL is the lifetime for a Helper Telegram review reminder token.
+const reviewReminderTokenTTL = 15 * 60 // 900 seconds
 
 // helperInvoiceUSDCents is the fixed $10 invoice fee — not a balance threshold.
 const helperInvoiceUSDCents = 1000
@@ -69,6 +84,14 @@ var (
 	// ErrHelperDuplicateActivePurchase: a non-terminal purchase already exists
 	// for this profile+listing and the new token is different.
 	ErrHelperDuplicateActivePurchase = errors.New("v2: an active helper purchase already exists for this listing")
+
+	// ErrHelperSelfPurchase: Helper wallet matches the listing owner's wallet.
+	// No invoice, no external calls are created.
+	ErrHelperSelfPurchase = errors.New("v2: helper wallet matches listing owner — self-purchase not allowed")
+
+	// ErrReviewNotYetAvailable is the sentinel; use ErrReviewGated for the HTTP layer
+	// (which also carries the available_at timestamp for the countdown).
+	ErrReviewNotYetAvailable = errors.New("v2: review not yet available")
 )
 
 // HelperInvoiceDraft carries the $10 invoice snapshot prepared by the issuer.
@@ -110,6 +133,14 @@ type HelperPurchaseView struct {
 	ContactReadyAt   *time.Time
 	FirstRevealedAt  *time.Time
 	ReceiptExpiresAt *time.Time
+
+	// Payment observability fields (Task 11C).
+	LastCheckAttemptAt         *time.Time
+	LastSuccessfulChainCheckAt *time.Time
+
+	// Review entitlement fields (Task 11G).
+	ReviewAvailableAt *time.Time
+	ReviewExpiresAt   *time.Time
 
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -209,11 +240,74 @@ func (hs *HelperPurchaseService) helperWalletFingerprint(currency, normalizedAdd
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
+// clientWalletFingerprintForCrossCheck computes the fingerprint using the Client domain
+// so it can be compared with v2_client_flows.wallet_fingerprint for self-purchase detection.
+func (hs *HelperPurchaseService) clientWalletFingerprintForCrossCheck(currency, normalizedAddr string) string {
+	mac := hmac.New(sha256.New, hs.hmacKey)
+	mac.Write([]byte(clientWalletDomainCrossCheck))
+	mac.Write([]byte(currency))
+	mac.Write([]byte(":"))
+	mac.Write([]byte(normalizedAddr))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
 func (hs *HelperPurchaseService) helperBrowserTokenHash(rawToken string) string {
 	mac := hmac.New(sha256.New, hs.hmacKey)
 	mac.Write([]byte(helperTokenDomain))
 	mac.Write([]byte(rawToken))
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func (hs *HelperPurchaseService) helperHandoffTokenHash(rawToken string) string {
+	mac := hmac.New(sha256.New, hs.hmacKey)
+	mac.Write([]byte(helperHandoffDomain))
+	mac.Write([]byte(rawToken))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// clientWalletFingerprintCrossCheck computes the Client-domain HMAC fingerprint for a wallet.
+// Uses clientWalletDomainCrossCheck ("naroom:v2:wallet:") to match service.go's walletFingerprint.
+// Currency is included so BTC and LTC fingerprints differ.
+func (hs *HelperPurchaseService) clientWalletFingerprintCrossCheck(currency, normalizedAddr string) string {
+	mac := hmac.New(sha256.New, hs.hmacKey)
+	mac.Write([]byte(clientWalletDomainCrossCheck))
+	mac.Write([]byte(currency))
+	mac.Write([]byte(":"))
+	mac.Write([]byte(normalizedAddr))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// IsListingOwner returns true if the given wallet+currency is the owner of listingID.
+// Performs a constant-time comparison of HMAC fingerprints; does not expose wallet data.
+// Returns (false, nil) if the listing is not found (caller should 404 on missing listing).
+func (hs *HelperPurchaseService) IsListingOwner(listingID, currency, normalizedAddr string) (bool, error) {
+	clientFP := hs.clientWalletFingerprintCrossCheck(currency, normalizedAddr)
+	var ownerFP string
+	err := hs.db.QueryRow(`
+		SELECT f.wallet_fingerprint
+		FROM v2_listings l
+		JOIN v2_client_flows f ON f.id = l.flow_id
+		WHERE l.id = ?`, listingID,
+	).Scan(&ownerFP)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("v2: IsListingOwner: %w", err)
+	}
+	return hmac.Equal([]byte(clientFP), []byte(ownerFP)), nil
+}
+
+func (hs *HelperPurchaseService) helperReminderTokenHash(rawToken string) string {
+	mac := hmac.New(sha256.New, hs.hmacKey)
+	mac.Write([]byte(helperReminderTokenDomain))
+	mac.Write([]byte(rawToken))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// HelperReminderTokenHash is the exported form used by TelegramTransport.
+func (hs *HelperPurchaseService) HelperReminderTokenHash(rawToken string) string {
+	return hs.helperReminderTokenHash(rawToken)
 }
 
 // HelperTxidHash returns HMAC-SHA256(key, "naroom:v2:helper-txid:"+txid).
@@ -428,7 +522,7 @@ func (hs *HelperPurchaseService) LookupPurchaseByToken(
 		SELECT p.id, hp.wallet_fingerprint, p.listing_id
 		FROM v2_helper_purchases p
 		JOIN v2_helper_profiles hp ON hp.id = p.helper_profile_id
-		WHERE p.browser_token_hash = ?`, tokenHash,
+		WHERE p.browser_token_hash = ? OR p.alt_browser_token_hash = ?`, tokenHash, tokenHash,
 	).Scan(&existingID, &storedFP, &storedListingID)
 
 	if errors.Is(err, sql.ErrNoRows) {
@@ -479,7 +573,7 @@ func (hs *HelperPurchaseService) CreatePurchase(
 		SELECT p.id, hp.wallet_fingerprint, p.listing_id
 		FROM v2_helper_purchases p
 		JOIN v2_helper_profiles hp ON hp.id = p.helper_profile_id
-		WHERE p.browser_token_hash = ?`, tokenHash,
+		WHERE p.browser_token_hash = ? OR p.alt_browser_token_hash = ?`, tokenHash, tokenHash,
 	).Scan(&existingPurchaseID, &storedFP, &storedListingID)
 	if idErr == nil {
 		// Token exists: verify ownership.
@@ -509,14 +603,19 @@ func (hs *HelperPurchaseService) CreatePurchase(
 	defer tx.Rollback() //nolint:errcheck
 
 	// Re-verify listing is effectively visible inside transaction.
+	// Also read the Client's wallet fingerprint and currency to guard against self-purchase.
 	var state string
 	var visibleUntil sql.NullInt64
 	var entitlementExpiresAt int64
 	var countryCode string
+	var clientWalletFP, clientCurrency string
 	err = tx.QueryRow(`
-		SELECT state, visible_until, entitlement_expires_at, country_code
-		FROM v2_listings WHERE id = ?`, listingID,
-	).Scan(&state, &visibleUntil, &entitlementExpiresAt, &countryCode)
+		SELECT l.state, l.visible_until, l.entitlement_expires_at, l.country_code,
+		       f.wallet_fingerprint, f.currency
+		FROM v2_listings l
+		JOIN v2_client_flows f ON f.id = l.flow_id
+		WHERE l.id = ?`, listingID,
+	).Scan(&state, &visibleUntil, &entitlementExpiresAt, &countryCode, &clientWalletFP, &clientCurrency)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, HelperPurchaseView{}, ErrNotFound
 	}
@@ -525,6 +624,14 @@ func (hs *HelperPurchaseService) CreatePurchase(
 	}
 	if state != "visible" || !visibleUntil.Valid || visibleUntil.Int64 <= now || entitlementExpiresAt <= now {
 		return false, HelperPurchaseView{}, ErrNotFound
+	}
+
+	// Self-purchase guard: reject before any invoice allocation or external call.
+	// Computes the helper's address using the client domain so the fingerprint
+	// can be compared directly with v2_client_flows.wallet_fingerprint.
+	helperAsFP := hs.clientWalletFingerprintForCrossCheck(clientCurrency, normalizedAddr)
+	if hmac.Equal([]byte(helperAsFP), []byte(clientWalletFP)) {
+		return false, HelperPurchaseView{}, ErrHelperSelfPurchase
 	}
 
 	// Get-or-create profile inside the tx.
@@ -650,11 +757,13 @@ func (hs *HelperPurchaseService) snapshotClientDestinationTx(
 	).Scan(&bindingRef, &chatIDCiphertext, &chatIDNonce, &keyVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		// No active, consistent binding+destination: abort purchase.
+		slog.Warn("v2: snapshotClientDestinationTx: no active binding found", "flowID", flowID, "nowUnix", nowUnix)
 		return ErrReviewNoBinding
 	}
 	if err != nil {
 		return fmt.Errorf("v2: snapshotClientDestinationTx: read binding: %w", err)
 	}
+	slog.Info("v2: snapshotClientDestinationTx: found binding", "bindingRef_len", len(bindingRef), "cipher_len", len(chatIDCiphertext), "nonce_len", len(chatIDNonce))
 
 	snapID := newID()
 	_, insErr := tx.Exec(`
@@ -668,6 +777,10 @@ func (hs *HelperPurchaseService) snapshotClientDestinationTx(
 		snapshotExpiresAt, nowUnix, nowUnix,
 	)
 	if insErr != nil {
+		slog.Error("v2: snapshotClientDestinationTx: insert snapshot failed", "err", insErr,
+			"bindingRef_len", len(bindingRef), "cipher_len", len(chatIDCiphertext),
+			"nonce_len", len(chatIDNonce), "kv_len", len(keyVersion),
+			"expires_at", snapshotExpiresAt, "created_at", nowUnix)
 		return fmt.Errorf("v2: snapshotClientDestinationTx: insert snapshot: [internal]")
 	}
 	return nil
@@ -689,7 +802,7 @@ func (hs *HelperPurchaseService) RestorePurchase(rawToken, normalizedAddr string
 		SELECT p.id, hp.wallet_fingerprint
 		FROM v2_helper_purchases p
 		JOIN v2_helper_profiles hp ON hp.id = p.helper_profile_id
-		WHERE p.browser_token_hash = ?`, tokenHash,
+		WHERE p.browser_token_hash = ? OR p.alt_browser_token_hash = ?`, tokenHash, tokenHash,
 	).Scan(&purchaseID, &storedFP)
 	if errors.Is(err, sql.ErrNoRows) {
 		return HelperPurchaseView{}, ErrHelperNotFound
@@ -1138,49 +1251,31 @@ func (hs *HelperPurchaseService) setHelperContactReady(purchaseID string, balanc
 		return HelperPurchaseView{}, fmt.Errorf("v2: setHelperContactReady: update invoice ts: %w", err)
 	}
 
-	// Atomically create both review entitlements and activate delivery snapshot.
-	// Read the Client profile ID from the listing's flow.
-	var listingID string
-	err = tx.QueryRow(`SELECT listing_id FROM v2_helper_purchases WHERE id = ?`, purchaseID).Scan(&listingID)
-	if err != nil {
-		return HelperPurchaseView{}, fmt.Errorf("v2: setHelperContactReady: read listing id: %w", err)
-	}
-	var clientProfileID sql.NullString
+	// Create an immediate notice row from the existing snapshot's encrypted data.
+	// The snapshot stays in 'awaiting_contact_ready' until first reveal.
+	// The notice is sent immediately (no review buttons); see SendPendingImmediateNotices.
+	var snapBindingRef, snapCiphertext, snapNonce, snapKeyVersion string
 	err = tx.QueryRow(`
-		SELECT f.client_profile_id
-		FROM v2_listings l
-		JOIN v2_client_flows f ON f.id = l.flow_id
-		WHERE l.id = ?`, listingID,
-	).Scan(&clientProfileID)
+		SELECT binding_ref_snapshot, chat_id_ciphertext, chat_id_nonce, key_version
+		FROM v2_review_delivery_snapshots
+		WHERE purchase_id = ? AND state = 'awaiting_contact_ready'`, purchaseID,
+	).Scan(&snapBindingRef, &snapCiphertext, &snapNonce, &snapKeyVersion)
 	if err != nil {
-		return HelperPurchaseView{}, fmt.Errorf("v2: setHelperContactReady: read client profile: %w", err)
+		return HelperPurchaseView{}, fmt.Errorf("v2: setHelperContactReady: read snapshot: %w", err)
 	}
-	if !clientProfileID.Valid {
-		return HelperPurchaseView{}, fmt.Errorf("v2: setHelperContactReady: client profile not set: [internal]")
-	}
-
-	if entErr := createReviewEntitlementsTx(tx, purchaseID, profileID, clientProfileID.String, contactReadyAt, nowUnix); entErr != nil {
-		return HelperPurchaseView{}, fmt.Errorf("v2: setHelperContactReady: create entitlements: %w", entErr)
-	}
-
-	// Activate the delivery snapshot: awaiting_contact_ready → pending_send.
-	// Phase-2 lifetime: set delivery expires_at = contactReadyAt + 86400 to match
-	// the review entitlement window. CAS must touch exactly one row.
-	snapRes, err := tx.Exec(`
-		UPDATE v2_review_delivery_snapshots
-		SET state = 'pending_send', expires_at = ?, updated_at = ?
-		WHERE purchase_id = ? AND state = 'awaiting_contact_ready'`,
-		contactReadyAt+86400, nowUnix, purchaseID,
+	// Immediate notice expires when the delivery window would have expired anyway.
+	noticeExpiresAt := contactReadyAt + 86400
+	noticeID := newID()
+	_, err = tx.Exec(`
+		INSERT OR IGNORE INTO v2_review_immediate_notices
+		  (id, purchase_id, binding_ref_snapshot, chat_id_ciphertext, chat_id_nonce,
+		   key_version, helper_profile_id, state, expires_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+		noticeID, purchaseID, snapBindingRef, snapCiphertext, snapNonce,
+		snapKeyVersion, profileID, noticeExpiresAt, nowUnix, nowUnix,
 	)
 	if err != nil {
-		return HelperPurchaseView{}, fmt.Errorf("v2: setHelperContactReady: activate snapshot: %w", err)
-	}
-	snapN, snapRAErr := snapRes.RowsAffected()
-	if snapRAErr != nil {
-		return HelperPurchaseView{}, fmt.Errorf("v2: setHelperContactReady: activate snapshot rows: %w", snapRAErr)
-	}
-	if snapN != 1 {
-		return HelperPurchaseView{}, fmt.Errorf("v2: setHelperContactReady: snapshot CAS affected %d rows, expected 1: [internal]", snapN)
+		return HelperPurchaseView{}, fmt.Errorf("v2: setHelperContactReady: create immediate notice: [internal]")
 	}
 
 	if err = tx.Commit(); err != nil {
@@ -1394,6 +1489,43 @@ func (hs *HelperPurchaseService) RevealHelperContact(purchaseID, rawToken, norma
 			receiptExpiresAt = winnerExp
 		} else {
 			receiptExpiresAt = sql.NullInt64{Valid: true, Int64: receiptExp}
+
+			// CAS winner: on first reveal, create review entitlements with
+			// available_at = first_revealed_at + 3600 and expires_at = first_revealed_at + 86400.
+			// Also read Client profile from listing flow.
+			var listingIDForEnt string
+			_ = tx.QueryRow(`SELECT listing_id FROM v2_helper_purchases WHERE id = ?`,
+				purchaseID).Scan(&listingIDForEnt)
+			var clientProfileID sql.NullString
+			if listingIDForEnt != "" {
+				_ = tx.QueryRow(`
+					SELECT f.client_profile_id FROM v2_listings l
+					JOIN v2_client_flows f ON f.id = l.flow_id
+					WHERE l.id = ?`, listingIDForEnt,
+				).Scan(&clientProfileID)
+			}
+			if clientProfileID.Valid {
+				entErr := createReviewEntitlementsTxWithAvailableAt(
+					tx, purchaseID, profileID, clientProfileID.String,
+					nowUnix, nowUnix+3600, nowUnix,
+				)
+				if entErr != nil {
+					return HelperRevealResult{}, fmt.Errorf("v2: RevealHelperContact: create entitlements: %w", entErr)
+				}
+			}
+
+			// Activate the delivery snapshot for the delayed prompt:
+			// awaiting_contact_ready → pending_send.
+			// expires_at = first_revealed_at + 86400 (the review window).
+			_, snapErr := tx.Exec(`
+				UPDATE v2_review_delivery_snapshots
+				SET state = 'pending_send', expires_at = ?, updated_at = ?
+				WHERE purchase_id = ? AND state = 'awaiting_contact_ready'`,
+				nowUnix+86400, nowUnix, purchaseID,
+			)
+			if snapErr != nil {
+				return HelperRevealResult{}, fmt.Errorf("v2: RevealHelperContact: activate snapshot: %w", snapErr)
+			}
 		}
 	}
 
@@ -1599,7 +1731,9 @@ func (hs *HelperPurchaseService) readPurchaseView(purchaseID string) (HelperPurc
 		       i.detection_deadline_at,
 		       i.detected_txid_hash,
 		       i.payment_detected_at, i.confirmation_deadline_at, i.confirmed_at,
-		       COALESCE(l.display_name, '')
+		       COALESCE(l.display_name, ''),
+		       p.last_check_attempt_at,
+		       p.last_successful_chain_check_at
 		FROM v2_helper_purchases p
 		JOIN v2_helper_profiles hp ON hp.id = p.helper_profile_id
 		JOIN v2_helper_invoices i ON i.purchase_id = p.id
@@ -1607,20 +1741,22 @@ func (hs *HelperPurchaseService) readPurchaseView(purchaseID string) (HelperPurc
 		WHERE p.id = ?`
 
 	var (
-		v                    HelperPurchaseView
-		createdAt, updatedAt int64
-		detDeadline          int64
-		contactReadyAt       sql.NullInt64
-		firstRevealedAt      sql.NullInt64
-		receiptExpiresAt     sql.NullInt64
-		retryDeadline        sql.NullInt64
-		lastBalUSD           sql.NullFloat64
-		lastBalAt            sql.NullInt64
-		txidHash             sql.NullString
-		payDetectedAt        sql.NullInt64
-		confirmDeadline      sql.NullInt64
-		confirmedAt          sql.NullInt64
-		invoiceID            string
+		v                          HelperPurchaseView
+		createdAt, updatedAt       int64
+		detDeadline                int64
+		contactReadyAt             sql.NullInt64
+		firstRevealedAt            sql.NullInt64
+		receiptExpiresAt           sql.NullInt64
+		retryDeadline              sql.NullInt64
+		lastBalUSD                 sql.NullFloat64
+		lastBalAt                  sql.NullInt64
+		txidHash                   sql.NullString
+		payDetectedAt              sql.NullInt64
+		confirmDeadline            sql.NullInt64
+		confirmedAt                sql.NullInt64
+		invoiceID                  string
+		lastCheckAttemptAt         sql.NullInt64
+		lastSuccessfulChainCheckAt sql.NullInt64
 	)
 	err := hs.db.QueryRow(q, purchaseID).Scan(
 		&v.PurchaseID, &v.ProfileID, &v.ListingID, &v.State,
@@ -1636,6 +1772,8 @@ func (hs *HelperPurchaseService) readPurchaseView(purchaseID string) (HelperPurc
 		&txidHash,
 		&payDetectedAt, &confirmDeadline, &confirmedAt,
 		&v.ListingDisplayName,
+		&lastCheckAttemptAt,
+		&lastSuccessfulChainCheckAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return HelperPurchaseView{}, ErrHelperNotFound
@@ -1657,6 +1795,274 @@ func (hs *HelperPurchaseService) readPurchaseView(purchaseID string) (HelperPurc
 	v.PaymentDetectedAt = fromUnixPtr(payDetectedAt)
 	v.ConfirmationDeadlineAt = fromUnixPtr(confirmDeadline)
 	v.ConfirmedAt = fromUnixPtr(confirmedAt)
+	v.LastCheckAttemptAt = fromUnixPtr(lastCheckAttemptAt)
+	v.LastSuccessfulChainCheckAt = fromUnixPtr(lastSuccessfulChainCheckAt)
+
+	// Populate review entitlement fields if available (Task 11G).
+	// These are optional: the entitlements are created on first reveal, so they may not exist yet.
+	var reviewAvailableAt, reviewExpiresAt sql.NullInt64
+	_ = hs.db.QueryRow(`
+		SELECT available_at, expires_at FROM v2_review_entitlements
+		WHERE purchase_id = ? AND reviewer_side = 'helper'`, purchaseID,
+	).Scan(&reviewAvailableAt, &reviewExpiresAt)
+	v.ReviewAvailableAt = fromUnixPtr(reviewAvailableAt)
+	v.ReviewExpiresAt = fromUnixPtr(reviewExpiresAt)
 
 	return v, nil
+}
+
+// ── CreateHandoff ─────────────────────────────────────────────────────────────
+
+// CreateHandoff generates a one-time handoff token for transferring a purchase to another device.
+// Returns raw token (must be shown once and never stored) and expires_at.
+// Only allowed for purchases in non-terminal states.
+func (hs *HelperPurchaseService) CreateHandoff(browserToken, walletAddr, currency string) (rawToken string, expiresAt time.Time, err error) {
+	if browserToken == "" || walletAddr == "" {
+		return "", time.Time{}, ErrHelperNotFound
+	}
+	tokenHash := hs.helperBrowserTokenHash(browserToken)
+	expectedFP := hs.helperWalletFingerprint(currency, walletAddr)
+
+	// Verify purchase ownership.
+	var purchaseID, storedFP, profileID, state string
+	qErr := hs.db.QueryRow(`
+		SELECT p.id, hp.wallet_fingerprint, p.helper_profile_id, p.state
+		FROM v2_helper_purchases p
+		JOIN v2_helper_profiles hp ON hp.id = p.helper_profile_id
+		WHERE p.browser_token_hash = ? OR p.alt_browser_token_hash = ?`, tokenHash, tokenHash,
+	).Scan(&purchaseID, &storedFP, &profileID, &state)
+	if errors.Is(qErr, sql.ErrNoRows) {
+		return "", time.Time{}, ErrHelperNotFound
+	}
+	if qErr != nil {
+		return "", time.Time{}, fmt.Errorf("v2: CreateHandoff: lookup: %w", qErr)
+	}
+	if !hmac.Equal([]byte(expectedFP), []byte(storedFP)) {
+		return "", time.Time{}, ErrHelperNotFound
+	}
+
+	// Only allow handoff for non-terminal states.
+	switch state {
+	case HPStateInvoiceExpired, HPStateFailed, HPStateReceiptExpired:
+		return "", time.Time{}, ErrHelperNotFound
+	}
+
+	// Generate 32 random bytes as the raw handoff token (hex-encoded = 64 chars).
+	rawBytes := make([]byte, 32)
+	if _, randErr := rand.Read(rawBytes); randErr != nil {
+		return "", time.Time{}, fmt.Errorf("v2: CreateHandoff: rand: %w", randErr)
+	}
+	raw := hex.EncodeToString(rawBytes)
+	handoffHash := hs.helperHandoffTokenHash(raw)
+
+	now := hs.now()
+	nowUnix := now.Unix()
+	exp := nowUnix + handoffTTL
+	handoffID := newID()
+
+	tx, txErr := hs.db.Begin()
+	if txErr != nil {
+		return "", time.Time{}, fmt.Errorf("v2: CreateHandoff: begin: %w", txErr)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// At most one active (pending) handoff attempt per purchase: revoke any
+	// prior pending token for this purchase before issuing a new one.
+	if _, err := tx.Exec(`
+		UPDATE v2_helper_purchase_handoffs
+		SET state = 'expired', updated_at = ?
+		WHERE purchase_id = ? AND state = 'pending'`,
+		nowUnix, purchaseID,
+	); err != nil {
+		return "", time.Time{}, fmt.Errorf("v2: CreateHandoff: revoke prior: %w", err)
+	}
+
+	if _, err := tx.Exec(`
+		INSERT INTO v2_helper_purchase_handoffs
+		  (id, purchase_id, helper_profile_id, token_hash, state, expires_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)`,
+		handoffID, purchaseID, profileID, handoffHash, exp, nowUnix, nowUnix,
+	); err != nil {
+		return "", time.Time{}, fmt.Errorf("v2: CreateHandoff: insert: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", time.Time{}, fmt.Errorf("v2: CreateHandoff: commit: %w", err)
+	}
+	return raw, time.Unix(exp, 0), nil
+}
+
+// ── RedeemHandoff ─────────────────────────────────────────────────────────────
+
+// RedeemHandoff validates and redeems a handoff token.
+// Atomically: marks handoff consumed, rotates browser_token_hash, returns new raw browser token.
+// Wrong token/wallet/expired/concurrent → ErrHelperNotFound (no enumeration).
+func (hs *HelperPurchaseService) RedeemHandoff(rawHandoffToken, walletAddr, currency string) (newBrowserToken string, purchaseID string, err error) {
+	if rawHandoffToken == "" || walletAddr == "" {
+		return "", "", ErrHelperNotFound
+	}
+
+	handoffHash := hs.helperHandoffTokenHash(rawHandoffToken)
+	expectedFP := hs.helperWalletFingerprint(currency, walletAddr)
+
+	tx, txErr := hs.db.Begin()
+	if txErr != nil {
+		return "", "", fmt.Errorf("v2: RedeemHandoff: begin: %w", txErr)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// Look up the handoff.
+	var handoffID, storedHash, hPurchaseID, profileID, state string
+	var expiresAt int64
+	qErr := tx.QueryRow(`
+		SELECT h.id, h.token_hash, h.purchase_id, h.helper_profile_id, h.state, h.expires_at
+		FROM v2_helper_purchase_handoffs h
+		WHERE h.token_hash = ?`, handoffHash,
+	).Scan(&handoffID, &storedHash, &hPurchaseID, &profileID, &state, &expiresAt)
+	if errors.Is(qErr, sql.ErrNoRows) {
+		return "", "", ErrHelperNotFound
+	}
+	if qErr != nil {
+		return "", "", fmt.Errorf("v2: RedeemHandoff: lookup: %w", qErr)
+	}
+
+	// Verify token hash (constant-time).
+	if !hmac.Equal([]byte(handoffHash), []byte(storedHash)) {
+		return "", "", ErrHelperNotFound
+	}
+
+	now := hs.now()
+	nowUnix := now.Unix()
+
+	// Check expiry and state.
+	if state != "pending" || nowUnix > expiresAt {
+		return "", "", ErrHelperNotFound
+	}
+
+	// Verify wallet fingerprint matches the purchase's profile.
+	var storedFP string
+	fpErr := tx.QueryRow(`
+		SELECT hp.wallet_fingerprint
+		FROM v2_helper_profiles hp
+		WHERE hp.id = ?`, profileID,
+	).Scan(&storedFP)
+	if fpErr != nil {
+		return "", "", ErrHelperNotFound
+	}
+	if !hmac.Equal([]byte(expectedFP), []byte(storedFP)) {
+		return "", "", ErrHelperNotFound
+	}
+
+	// Generate new browser token.
+	rawBytes := make([]byte, 32)
+	if _, randErr := rand.Read(rawBytes); randErr != nil {
+		return "", "", fmt.Errorf("v2: RedeemHandoff: rand: %w", randErr)
+	}
+	newRaw := hex.EncodeToString(rawBytes)
+	newTokenHash := hs.helperBrowserTokenHash(newRaw)
+
+	// CAS: mark handoff consumed.
+	casRes, casErr := tx.Exec(`
+		UPDATE v2_helper_purchase_handoffs
+		SET state = 'consumed', consumed_at = ?, updated_at = ?
+		WHERE id = ? AND state = 'pending'`,
+		nowUnix, nowUnix, handoffID,
+	)
+	if casErr != nil {
+		return "", "", fmt.Errorf("v2: RedeemHandoff: consume handoff: %w", casErr)
+	}
+	casN, _ := casRes.RowsAffected()
+	if casN == 0 {
+		return "", "", ErrHelperNotFound // concurrent redeem
+	}
+
+	// Rotate capability: the new device's token becomes the sole valid browser_token,
+	// and any previous alt_browser_token_hash is cleared. This revokes the original
+	// device's token immediately — only one browser token is valid after a handoff.
+	_, rotErr := tx.Exec(`
+		UPDATE v2_helper_purchases SET browser_token_hash = ?, alt_browser_token_hash = NULL, updated_at = ? WHERE id = ?`,
+		newTokenHash, nowUnix, hPurchaseID,
+	)
+	if rotErr != nil {
+		return "", "", fmt.Errorf("v2: RedeemHandoff: rotate token: %w", rotErr)
+	}
+
+	if err = tx.Commit(); err != nil {
+		return "", "", fmt.Errorf("v2: RedeemHandoff: commit: %w", err)
+	}
+	return newRaw, hPurchaseID, nil
+}
+
+// CreateReviewReminderLink creates a one-time Telegram deep-link token for the Helper
+// to receive a review-available reminder. The token is valid for reviewReminderTokenTTL
+// seconds. The caller must pass botUsername to construct the full deep-link URL.
+// Returns (rawToken, sendAt, expiresAt, error).
+// sendAt is the unix timestamp when the review becomes available (available_at).
+// If available_at is already past, sendAt = now (immediate).
+func (hs *HelperPurchaseService) CreateReviewReminderLink(purchaseToken, normalizedAddr, currency string) (rawToken string, sendAt int64, expiresAt int64, err error) {
+	// Validate purchase ownership.
+	fp := hs.helperWalletFingerprint(currency, normalizedAddr)
+	tokenHash := hs.helperBrowserTokenHash(purchaseToken)
+	now := hs.now()
+	nowUnix := now.Unix()
+
+	var purchaseID, storedFP string
+	lookupErr := hs.db.QueryRow(`
+		SELECT p.id, hp.wallet_fingerprint
+		FROM v2_helper_purchases p
+		JOIN v2_helper_profiles hp ON hp.id = p.helper_profile_id
+		WHERE (p.browser_token_hash = ? OR p.alt_browser_token_hash = ?)
+		  AND p.state NOT IN ('failed', 'invoice_expired', 'receipt_expired')`,
+		tokenHash, tokenHash,
+	).Scan(&purchaseID, &storedFP)
+	if errors.Is(lookupErr, sql.ErrNoRows) {
+		return "", 0, 0, ErrHelperNotFound
+	}
+	if lookupErr != nil {
+		return "", 0, 0, fmt.Errorf("v2: CreateReviewReminderLink: lookup: %w", lookupErr)
+	}
+	if !hmac.Equal([]byte(fp), []byte(storedFP)) {
+		return "", 0, 0, ErrHelperNotFound
+	}
+
+	// Get available_at from the 'helper' reviewer_side entitlement.
+	var availableAt int64
+	avErr := hs.db.QueryRow(`
+		SELECT available_at FROM v2_review_entitlements
+		WHERE purchase_id = ? AND reviewer_side = 'helper' AND consumed_at IS NULL`,
+		purchaseID,
+	).Scan(&availableAt)
+	if errors.Is(avErr, sql.ErrNoRows) {
+		// No entitlement yet — contact not yet revealed. Return ErrHelperNotFound.
+		return "", 0, 0, ErrHelperNotFound
+	}
+	if avErr != nil {
+		return "", 0, 0, fmt.Errorf("v2: CreateReviewReminderLink: entitlement: %w", avErr)
+	}
+
+	sendAt = availableAt
+	if sendAt == 0 || sendAt <= nowUnix {
+		sendAt = nowUnix // review already available; send immediately
+	}
+
+	// Generate raw token.
+	rawBytes := make([]byte, 32)
+	if _, randErr := rand.Read(rawBytes); randErr != nil {
+		return "", 0, 0, fmt.Errorf("v2: CreateReviewReminderLink: rand: %w", randErr)
+	}
+	rawToken = hex.EncodeToString(rawBytes)
+	tHash := hs.helperReminderTokenHash(rawToken)
+	exp := nowUnix + reviewReminderTokenTTL
+	id := newID()
+
+	_, insErr := hs.db.Exec(`
+		INSERT INTO v2_helper_review_reminders
+		(id, purchase_id, token_hash, expires_at, send_at, state, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, 'pending_start', ?, ?)`,
+		id, purchaseID, tHash, exp, sendAt, nowUnix, nowUnix,
+	)
+	if insErr != nil {
+		return "", 0, 0, fmt.Errorf("v2: CreateReviewReminderLink: insert: %w", insErr)
+	}
+	return rawToken, sendAt, exp, nil
 }

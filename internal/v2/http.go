@@ -302,9 +302,12 @@ func NewClientHandler(
 		balance:      balance,
 		rateLimitKey: keyCopy,
 		createLim:    newFixedWindowLimiter(5, time.Minute, maxEntries, now),
-		restoreLim:   newFixedWindowLimiter(10, time.Minute, maxEntries, now),
-		recheckLim:   newFixedWindowLimiter(5, time.Minute, maxEntries, now),
-		policy:       DefaultV2BalancePolicy(),
+		// The invoice UI polls restore every five seconds (12/minute). Keep
+		// enough headroom for reloads and a second device while retaining a
+		// bounded, IP-keyed limit on this authenticated read.
+		restoreLim: newFixedWindowLimiter(60, time.Minute, maxEntries, now),
+		recheckLim: newFixedWindowLimiter(5, time.Minute, maxEntries, now),
+		policy:     DefaultV2BalancePolicy(),
 	}, nil
 }
 
@@ -452,6 +455,12 @@ func (h *ClientHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	normalized, currency, err := validateAndNormalizeAddress(req.WalletAddress)
 	if err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid or unsupported wallet address")
+		return
+	}
+
+	// Pre-check: if wallet already has a visible listing, reject before any external call or DB write.
+	if hasVisible, checkErr := h.svc.HasVisibleListing(currency, normalized); checkErr == nil && hasVisible {
+		jsonErrCode(w, http.StatusConflict, "this wallet already has a visible listing", "wallet_already_visible")
 		return
 	}
 

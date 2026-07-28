@@ -334,6 +334,10 @@ type TelegramTransport struct {
 	// Review components (optional; nil until SetReviewService is called).
 	reviewSvc    *ReviewService
 	reviewSender ReviewNotificationSender
+
+	// Helper purchase service (optional; nil until SetHelperService is called).
+	// Used for the optional Telegram review reminder deep-link feature.
+	helperSvc *HelperPurchaseService
 }
 
 // SetReviewService wires the review service and notification sender into the transport.
@@ -341,6 +345,12 @@ type TelegramTransport struct {
 func (t *TelegramTransport) SetReviewService(rs *ReviewService, sender ReviewNotificationSender) {
 	t.reviewSvc = rs
 	t.reviewSender = sender
+}
+
+// SetHelperService wires the helper purchase service into the transport.
+// Required for the optional Helper Telegram review reminder feature.
+func (t *TelegramTransport) SetHelperService(svc *HelperPurchaseService) {
+	t.helperSvc = svc
 }
 
 // botUsernameRe validates bot username length/charset: 5-32 chars, letters/digits/underscores.
@@ -773,7 +783,11 @@ func (t *TelegramTransport) HandleWebhook(w http.ResponseWriter, r *http.Request
 	}
 	affected, err := res.RowsAffected()
 	if err != nil || affected == 0 {
-		// 0 rows = 200 neutral (expired, already consumed, or unknown token).
+		// Not a client binding token. Try helper review reminder.
+		if t.helperSvc != nil && t.tryHandleReminderStart(w, r, rawToken, tokenHash, chatID) {
+			return
+		}
+		// Unknown/expired/consumed token — 200 neutral.
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -1278,9 +1292,66 @@ func (t *TelegramTransport) handleCallbackQuery(
 
 // ── Review notification sending ───────────────────────────────────────────────
 
+// SendPendingImmediateNotices loads pending immediate notices and sends them
+// to Clients via Telegram. These are purchase notices WITHOUT review buttons,
+// sent at contact_ready. Called by a worker at regular intervals.
+func (t *TelegramTransport) SendPendingImmediateNotices() error {
+	if t.reviewSvc == nil || t.reviewSender == nil {
+		return nil
+	}
+	notices, err := t.reviewSvc.LoadPendingImmediateNotices(t.now())
+	if err != nil {
+		return fmt.Errorf("v2: SendPendingImmediateNotices: load: %w", err)
+	}
+	for _, n := range notices {
+		if err := t.sendOneImmediateNotice(n); err != nil {
+			_ = err // continue with others
+		}
+	}
+	return nil
+}
+
+func (t *TelegramTransport) sendOneImmediateNotice(n PendingImmediateNotice) error {
+	chatID, err := t.destCipher.DecryptChatID(
+		n.ChatIDCiphertext, n.ChatIDNonce, n.KeyVersion, n.BindingRefSnapshot,
+	)
+	if err != nil {
+		return t.reviewSvc.MarkNoticePermanentFailure(n.NoticeID)
+	}
+
+	helperRep, err := t.reviewSvc.GetHelperReputationForReview(n.HelperProfileID)
+	if err != nil {
+		return fmt.Errorf("v2: sendOneImmediateNotice: helper rep: %w", err)
+	}
+
+	// Immediate notice: informational only, no review buttons.
+	text := fmt.Sprintf(
+		"A Helper purchased your contact.\n\nHelper: %s\nMember since: %s\nPurchases: %d\n👍 %d  👎 %d",
+		helperRep.PublicName,
+		helperRep.MemberSince.Format("2006-01-02"),
+		helperRep.PurchaseCount,
+		helperRep.PositiveCount,
+		helperRep.NegativeCount,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Use SendPlainMessage (text only, no inline keyboard).
+	sendErr := t.reviewSender.SendPlainMessage(ctx, chatID, text)
+	if sendErr != nil {
+		if errors.Is(sendErr, ErrPermanentDelivery) {
+			return t.reviewSvc.MarkNoticePermanentFailure(n.NoticeID)
+		}
+		return nil // retryable
+	}
+	return t.reviewSvc.MarkNoticeSent(n.NoticeID)
+}
+
 // SendPendingReviewNotifications loads pending delivery snapshots and sends Telegram
-// review prompts to Clients. Should be called by a worker at regular intervals.
-// Uses injected ReviewNotificationSender; no real Telegram in tests.
+// review prompts (WITH review buttons) to Clients after available_at has been reached.
+// These are delayed prompts sent 1 hour after first_revealed_at.
+// Should be called by a worker at regular intervals.
 func (t *TelegramTransport) SendPendingReviewNotifications() error {
 	if t.reviewSvc == nil || t.reviewSender == nil {
 		return nil
@@ -1310,14 +1381,14 @@ func (t *TelegramTransport) sendOneReviewNotification(snap PendingDeliverySnapsh
 		return t.reviewSvc.MarkSnapshotPermanentFailure(snap.SnapshotID)
 	}
 
-	// Build the review notification text with Helper reputation.
+	// Build the delayed review prompt with Helper reputation and review buttons.
 	helperRep, err := t.reviewSvc.GetHelperReputationForReview(snap.HelperProfileID)
 	if err != nil {
 		return fmt.Errorf("v2: sendOneReviewNotification: helper rep: %w", err)
 	}
 
 	text := fmt.Sprintf(
-		"A Helper purchased your contact.\n\nHelper: %s\nMember since: %s\nPurchases: %d\n👍 %d  👎 %d\n\nDid this Helper help you?",
+		"Did the Helper help you?\n\nHelper: %s\nMember since: %s\nPurchases: %d\n👍 %d  👎 %d",
 		helperRep.PublicName,
 		helperRep.MemberSince.Format("2006-01-02"),
 		helperRep.PurchaseCount,
@@ -1354,6 +1425,23 @@ func (t *TelegramTransport) sendOneReviewNotification(snap PendingDeliverySnapsh
 }
 
 // ── HTTPBotAPISender review methods ──────────────────────────────────────────
+
+// sendPlainBody is the JSON payload for sendMessage without inline keyboard.
+type sendPlainBody struct {
+	ChatID int64  `json:"chat_id"`
+	Text   string `json:"text"`
+}
+
+// SendPlainMessage implements ReviewNotificationSender.
+// Sends a plain text message with no inline keyboard (used for immediate notices).
+func (s *HTTPBotAPISender) SendPlainMessage(ctx context.Context, chatID int64, text string) error {
+	apiURL := s.baseURL + "/bot" + s.botToken + "/sendMessage"
+	body, err := json.Marshal(sendPlainBody{ChatID: chatID, Text: text})
+	if err != nil {
+		return fmt.Errorf("v2: SendPlainMessage: marshal: [internal]")
+	}
+	return s.postBotAPI(ctx, apiURL, body)
+}
 
 // SendReviewPrompt implements ReviewNotificationSender.
 // Sends a message with thumb up/down inline keyboard buttons.
@@ -1454,6 +1542,143 @@ func (t *TelegramTransport) NormalizeExpiredAttempts(now time.Time) error {
 		DELETE FROM v2_telegram_link_attempts WHERE expires_at <= ?`, nowUnix)
 	if err != nil {
 		return fmt.Errorf("v2: NormalizeExpiredAttempts: %w", err)
+	}
+	return nil
+}
+
+// tryHandleReminderStart attempts to handle a /start command as a Helper review
+// reminder deep-link. Returns true if the token was recognized and handled (either
+// successfully or fatally), false if the token is not a reminder token.
+func (t *TelegramTransport) tryHandleReminderStart(w http.ResponseWriter, r *http.Request, rawToken, _ string, chatID int64) bool {
+	reminderHash := t.helperSvc.HelperReminderTokenHash(rawToken)
+	now := t.now()
+	nowUnix := now.Unix()
+
+	// CAS: pending_start → chat_registered (only if not expired).
+	res, err := t.helperSvc.db.Exec(`
+		UPDATE v2_helper_review_reminders
+		SET state = 'chat_registered', updated_at = ?
+		WHERE token_hash = ? AND state = 'pending_start' AND ? < expires_at`,
+		nowUnix, reminderHash, nowUnix,
+	)
+	if err != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return true
+	}
+	affected, err := res.RowsAffected()
+	if err != nil || affected == 0 {
+		// Not found, expired, or already consumed — not a reminder token we own.
+		return false
+	}
+
+	// Read id to use as AAD for encryption.
+	var reminderID string
+	if qErr := t.helperSvc.db.QueryRow(
+		`SELECT id FROM v2_helper_review_reminders WHERE token_hash = ?`, reminderHash,
+	).Scan(&reminderID); qErr != nil {
+		t.helperSvc.db.Exec( //nolint:errcheck
+			`UPDATE v2_helper_review_reminders SET state='pending_start' WHERE token_hash=?`, reminderHash)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return true
+	}
+
+	// Encrypt chat_id (EncryptChatID returns hex strings).
+	ciphertextHex, nonceHex, encErr := t.destCipher.EncryptChatID(chatID, reminderID)
+	if encErr != nil {
+		t.helperSvc.db.Exec( //nolint:errcheck
+			`UPDATE v2_helper_review_reminders SET state='pending_start' WHERE token_hash=?`, reminderHash)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return true
+	}
+
+	// Store encrypted chat_id. keyVersion is a string field on DestinationCipher.
+	_, storeErr := t.helperSvc.db.Exec(`
+		UPDATE v2_helper_review_reminders
+		SET chat_id_ciphertext = ?, chat_id_nonce = ?, key_version = ?, binding_ref = ?, updated_at = ?
+		WHERE token_hash = ?`,
+		ciphertextHex, nonceHex, t.destCipher.keyVersion, reminderID, nowUnix, reminderHash,
+	)
+	if storeErr != nil {
+		t.helperSvc.db.Exec( //nolint:errcheck
+			`UPDATE v2_helper_review_reminders SET state='pending_start' WHERE token_hash=?`, reminderHash)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return true
+	}
+
+	// Send confirmation.
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	_ = t.sender.SendMessage(ctx, chatID, "Напоминание зарегистрировано. Мы уведомим вас, когда появится возможность оставить отзыв.")
+
+	w.WriteHeader(http.StatusOK)
+	return true
+}
+
+// SendPendingReminderNotifications delivers queued Helper review reminder messages.
+// Should be called by the lifecycle worker at regular intervals.
+func (t *TelegramTransport) SendPendingReminderNotifications() error {
+	if t.helperSvc == nil || t.sender == nil {
+		return nil
+	}
+	now := t.now()
+	nowUnix := now.Unix()
+
+	type reminderRow struct {
+		id         string
+		ciphertext string
+		nonce      string
+		keyVersion string
+		bindingRef string
+	}
+
+	rows, err := t.helperSvc.db.Query(`
+		SELECT id, chat_id_ciphertext, chat_id_nonce, key_version, binding_ref
+		FROM v2_helper_review_reminders
+		WHERE state = 'chat_registered' AND send_at <= ?
+		LIMIT 50`, nowUnix)
+	if err != nil {
+		return fmt.Errorf("v2: SendPendingReminderNotifications: query: %w", err)
+	}
+	defer rows.Close()
+
+	var pending []reminderRow
+	for rows.Next() {
+		var r reminderRow
+		if scanErr := rows.Scan(&r.id, &r.ciphertext, &r.nonce, &r.keyVersion, &r.bindingRef); scanErr != nil {
+			continue
+		}
+		if r.ciphertext == "" || r.nonce == "" {
+			continue
+		}
+		pending = append(pending, r)
+	}
+	rows.Close()
+
+	for _, rem := range pending {
+		chatID, decErr := t.destCipher.DecryptChatID(rem.ciphertext, rem.nonce, rem.keyVersion, rem.bindingRef)
+		if decErr != nil {
+			t.helperSvc.db.Exec( //nolint:errcheck
+				`UPDATE v2_helper_review_reminders SET state='permanent_failure', updated_at=? WHERE id=?`,
+				nowUnix, rem.id)
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		sendErr := t.sender.SendMessage(ctx, chatID, "Вы можете оставить отзыв о клиенте. Вернитесь в NA Room на страницу покупки.")
+		cancel()
+		if sendErr != nil {
+			if errors.Is(sendErr, ErrPermanentDelivery) {
+				t.helperSvc.db.Exec( //nolint:errcheck
+					`UPDATE v2_helper_review_reminders SET state='permanent_failure', updated_at=? WHERE id=?`,
+					nowUnix, rem.id)
+			}
+			// Retryable: leave in chat_registered.
+			continue
+		}
+
+		t.helperSvc.db.Exec( //nolint:errcheck
+			`UPDATE v2_helper_review_reminders SET state='sent', updated_at=? WHERE id=?`,
+			nowUnix, rem.id)
 	}
 	return nil
 }

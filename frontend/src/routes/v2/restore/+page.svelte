@@ -23,21 +23,38 @@
 			});
 			const data = await res.json();
 			if (!res.ok) {
-				error = data.error || `HTTP ${res.status}`;
+				// Wrong wallet, wrong code, mixed pair, and unknown listing all
+				// collapse to the same server code (errCodeNotFound) — show one
+				// byte-identical localized message regardless of the reason,
+				// so no enumeration is possible from the frontend either.
+				error = data.code === 'not_found' ? t('v2.restore.not_found') : (data.error || `HTTP ${res.status}`);
 				return;
 			}
 
-			// Save to sessionStorage so /v2/new can auto-restore
+			const listingId = data.listing?.id || '';
+			if (!listingId) {
+				// Valid code+wallet, but no listing exists yet (payment/listing
+				// creation never completed). This is out of scope for /v2/restore
+				// — it owns the OWNER/reactivation journey only, never a $5
+				// invoice or the create flow. No auto-navigation, no shared
+				// storage key with /v2/new: just an honest message.
+				error = t('v2.restore.no_listing_yet');
+				return;
+			}
+
+			// Save the management code locally, keyed by listing ID, so the
+			// listing page can offer server-authenticated owner mode. The
+			// listing page independently re-verifies the code server-side.
 			try {
-				sessionStorage.setItem('v2_client_state', JSON.stringify({
-					managementCode: managementCode.trim(),
-					walletAddress: walletAddress.trim(),
-					flowId: data.listing?.flow_id || '',
+				localStorage.setItem(`v2_mgmt_${listingId}`, JSON.stringify({
+					code: managementCode.trim(),
+					wallet: walletAddress.trim(),
 				}));
 			} catch {}
 
-			// Navigate to /v2/new which reads session and routes by phase
-			window.location.href = '/v2/new';
+			// /v2/restore never touches /v2/new — the owner/reactivation journey
+			// lives entirely on the listing page (owner mode).
+			window.location.href = `/v2/listing/${listingId}`;
 		} catch (e) {
 			error = e.message;
 		} finally {

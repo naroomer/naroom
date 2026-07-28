@@ -28,6 +28,7 @@
 	let purchaseId = $state('');
 	let walletAddress = $state('');
 	let listingId = $state('');
+	let city = $state('');
 	let currency = $state('BTC');
 	let helperPublicName = $state('');
 	let clientPublicName = $state('');
@@ -39,11 +40,43 @@
 	let receiptExpiresAt = $state(0);
 	let lastBalanceUSD = $state(null);
 
+	// Provider observability (Section D)
+	let providerStatus = $state(''); // 'checking' | 'healthy' | 'degraded'
+	let lastSuccessfulCheckAt = $state(null);
+
 	// Review
 	let reviewToken = $state('');
 	let reviewClientReputation = $state(null);
 	let reviewClientName = $state('');
 	let reviewSubmitted = $state(false);
+
+	// Telegram review reminder (Section C)
+	let reminderBotUrl = $state('');
+	let reminderLoading = $state(false);
+	let reminderError = $state('');
+	let reminderRegistered = $state(false);
+
+	// Cross-device handoff (Section G) — the QR/link carries ONLY an opaque,
+	// one-time token in the URL fragment. It never carries the wallet address.
+	// Fragments are never sent to the server (unlike query params), so the
+	// token cannot leak via access logs, Referer headers, or proxy logs.
+	let handoffQRUrl = $state('');
+	let handoffExpiresAt = $state(0);
+	let handoffLoading = $state(false);
+	let handoffError = $state('');
+
+	// Second-device redeem: a dedicated wallet-entry form. The redeeming device
+	// never receives the first device's wallet — it must independently supply
+	// its own wallet address, which the server verifies against the purchase.
+	let handoffRedeemToken = $state('');
+	let handoffRedeemWallet = $state('');
+	let handoffRedeemLoading = $state(false);
+	let handoffRedeemError = $state('');
+
+	// Review countdown (Section G)
+	let reviewAvailableAt = $state(0); // unix timestamp
+	let reviewCountdownSec = $state(0);
+	let reviewCountdownTimer = null;
 
 	// Active progress step derived from current step/phase
 	let activeStep = $derived(
@@ -53,6 +86,14 @@
 		step === 'contact' ? 5 :
 		2
 	);
+
+	function detectCurrency(addr) {
+		const a = (addr || '').trim();
+		if (!a) return null;
+		if (/^ltc1/i.test(a) || /^[LM]/.test(a)) return 'LTC';
+		if (/^bc1/i.test(a) || /^[13]/.test(a)) return 'BTC';
+		return null;
+	}
 
 	function paymentURI(inv, curr) {
 		if (!inv?.payment_address) return '';
@@ -65,21 +106,44 @@
 
 	onMount(async () => {
 		fetchPubConfig();
+
+		// Cross-device handoff: the token travels ONLY in the URL fragment
+		// (#handoff=...), never as a query param, and never with the wallet.
+		// Fragments are not sent to the server, so this never appears in access
+		// logs or Referer headers. Strip it from the visible URL immediately;
+		// the second device must type its OWN wallet in the form below —
+		// nothing is auto-submitted.
+		const hash = window.location.hash || '';
+		const hashMatch = hash.match(/[#&]handoff=([^&]+)/);
+		if (hashMatch) {
+			const token = decodeURIComponent(hashMatch[1]);
+			history.replaceState({}, '', window.location.pathname + window.location.search);
+			handoffRedeemToken = token;
+			step = 'handoff_wallet';
+			loading = false;
+			return;
+		}
+
 		// Load token from sessionStorage only (never from URL)
 		try { purchaseToken = sessionStorage.getItem('v2_active_purchase_token') || ''; } catch {}
 
-		// Fall back to localStorage if sessionStorage is empty
-		if (!purchaseToken) {
-			try {
-				const lhpt = JSON.parse(localStorage.getItem('v2_active_hpt') || 'null');
-				if (lhpt?.token && lhpt?.wallet) {
+		// localStorage holds the matching wallet and listing continuity record.
+		// Hydrate missing fields even when sessionStorage already has the token:
+		// a successful cross-device redeem creates exactly that combination.
+		try {
+			const lhpt = JSON.parse(localStorage.getItem('v2_active_hpt') || 'null');
+			if (lhpt?.token && lhpt?.wallet) {
+				if (!purchaseToken) {
 					purchaseToken = lhpt.token;
-					walletAddress = lhpt.wallet;
-					listingId = lhpt.listingId || '';
 					try { sessionStorage.setItem('v2_active_purchase_token', lhpt.token); } catch {}
 				}
-			} catch {}
-		}
+				if (lhpt.token === purchaseToken) {
+					walletAddress = lhpt.wallet;
+					listingId = lhpt.listingId || '';
+					city = lhpt.city || '';
+				}
+			}
+		} catch {}
 
 		if (!purchaseToken) { error = t('v2.helper.no_token'); loading = false; return; }
 
@@ -92,6 +156,15 @@
 			purchaseId = saved.purchaseId || '';
 			listingId = saved.listingId || '';
 			walletAddress = walletAddress || saved.walletAddress || '';
+			if (!city) city = saved.city || '';
+		}
+
+		// Try to load city from localStorage hpt entry
+		if (listingId && !city) {
+			try {
+				const lhpt = JSON.parse(localStorage.getItem(`v2_hpt_${listingId}`) || 'null');
+				if (lhpt?.city) city = lhpt.city;
+			} catch {}
 		}
 
 		if (purchaseToken && walletAddress) {
@@ -106,6 +179,8 @@
 		loading = true;
 		error = '';
 		try {
+			const ctrl = new AbortController();
+			const tid = setTimeout(() => ctrl.abort(), 10000);
 			const res = await fetch('/api/v2/helper/contact-purchases/restore', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
@@ -113,30 +188,41 @@
 					purchase_token: purchaseToken,
 					wallet_address: walletAddress,
 				}),
+				signal: ctrl.signal,
 			});
+			clearTimeout(tid);
 			const data = await res.json();
 			if (!res.ok) { error = data.error || `HTTP ${res.status}`; loading = false; return; }
 
-			phase = data.phase;
-			purchaseId = data.purchase_id || purchaseId;
-			currency = data.currency || 'BTC';
-			helperPublicName = data.helper_public_name || '';
-			clientPublicName = data.client_public_name || '';
-			invoice = data.invoice || null;
-			balanceRetryDeadline = data.balance_retry_deadline_at || 0;
-			lastBalanceUSD = data.last_balance_usd ?? null;
-			receiptExpiresAt = data.receipt_expires_at || 0;
-
+			applyRestoreData(data);
 			routeByPhase(data);
 		} catch (e) {
-			error = e.message;
+			if (e.name !== 'AbortError') error = e.message;
+			providerStatus = 'degraded';
 		} finally {
 			loading = false;
 		}
 	}
 
+	function applyRestoreData(data) {
+		phase = data.phase;
+		purchaseId = data.purchase_id || purchaseId;
+		currency = data.currency || 'BTC';
+		helperPublicName = data.helper_public_name || '';
+		clientPublicName = data.client_public_name || '';
+		invoice = data.invoice || null;
+		balanceRetryDeadline = data.balance_retry_deadline_at || 0;
+		lastBalanceUSD = data.last_balance_usd ?? null;
+		receiptExpiresAt = data.receipt_expires_at || 0;
+
+		// Observability fields
+		providerStatus = data.provider_status || '';
+		if (data.last_successful_chain_check_at) {
+			lastSuccessfulCheckAt = data.last_successful_chain_check_at;
+		}
+	}
+
 	// Clears all storage keys associated with a helper purchase.
-	// Call before showing terminal screen so navigation away is clean.
 	function clearHelperPurchaseState(lid, pt) {
 		try {
 			if (lid) localStorage.removeItem(`v2_hpt_${lid}`);
@@ -156,7 +242,6 @@
 			step = 'balance';
 		} else if (ph === 'contact_ready') {
 			step = 'contact';
-			// Try to load contact
 			loadContact();
 		} else if (ph === 'payment_confirmed') {
 			// Waiting for contact to be ready — rare transient state
@@ -188,6 +273,8 @@
 
 	async function pollPhase() {
 		try {
+			const ctrl = new AbortController();
+			const tid = setTimeout(() => ctrl.abort(), 10000);
 			const res = await fetch('/api/v2/helper/contact-purchases/restore', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
@@ -195,16 +282,26 @@
 					purchase_token: purchaseToken,
 					wallet_address: walletAddress,
 				}),
+				signal: ctrl.signal,
 			});
-			if (!res.ok) return;
+			clearTimeout(tid);
+
+			if (!res.ok) {
+				providerStatus = 'degraded';
+				return;
+			}
 			const data = await res.json();
-			phase = data.phase;
-			invoice = data.invoice || invoice;
+			applyRestoreData(data);
+
 			if (data.phase !== 'awaiting_payment' && data.phase !== 'payment_detected') {
 				stopPoll();
 				routeByPhase(data);
 			}
-		} catch {}
+		} catch (e) {
+			if (e.name !== 'AbortError') {
+				providerStatus = 'degraded';
+			}
+		}
 	}
 
 	$effect(() => {
@@ -214,6 +311,8 @@
 	// ── Load contact (reveal) ────────────────────────────────────────────────────
 	async function loadContact() {
 		try {
+			const ctrl = new AbortController();
+			const tid = setTimeout(() => ctrl.abort(), 10000);
 			const res = await fetch('/api/v2/helper/contact-purchases/reveal', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
@@ -221,7 +320,9 @@
 					purchase_token: purchaseToken,
 					wallet_address: walletAddress,
 				}),
+				signal: ctrl.signal,
 			});
+			clearTimeout(tid);
 			const data = await res.json();
 			if (!res.ok) { error = data.error || `HTTP ${res.status}`; return; }
 			contactType = data.contact_type;
@@ -230,13 +331,15 @@
 			// Try to load review capability
 			await loadReviewCapability();
 		} catch (e) {
-			error = e.message;
+			if (e.name !== 'AbortError') error = e.message;
 		}
 	}
 
 	// ── Review ───────────────────────────────────────────────────────────────────
 	async function loadReviewCapability() {
 		try {
+			const ctrl = new AbortController();
+			const tid = setTimeout(() => ctrl.abort(), 10000);
 			const res = await fetch('/api/v2/helper/reviews/capability', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
@@ -245,14 +348,62 @@
 					purchase_token: purchaseToken,
 					wallet_address: walletAddress,
 				}),
+				signal: ctrl.signal,
 			});
-			if (!res.ok) return; // Review not available — silently skip
+			clearTimeout(tid);
+			if (res.status === 403) {
+				const data = await res.json();
+				if (data.available_at) {
+					reviewAvailableAt = data.available_at;
+					startReviewCountdown();
+				}
+				return;
+			}
+			if (!res.ok) return;
 			const data = await res.json();
 			reviewToken = data.review_token || '';
 			reviewClientReputation = data.client_reputation || null;
 			reviewClientName = data.client_display_name || '';
+			reviewAvailableAt = 0;
+			stopReviewCountdown();
 		} catch {}
 	}
+
+	function startReviewCountdown() {
+		stopReviewCountdown();
+		updateCountdown();
+		reviewCountdownTimer = setInterval(() => {
+			updateCountdown();
+		}, 1000);
+	}
+
+	function stopReviewCountdown() {
+		if (reviewCountdownTimer) { clearInterval(reviewCountdownTimer); reviewCountdownTimer = null; }
+	}
+
+	function updateCountdown() {
+		const now = Math.floor(Date.now() / 1000);
+		const remaining = reviewAvailableAt - now;
+		if (remaining <= 0) {
+			reviewCountdownSec = 0;
+			stopReviewCountdown();
+			// Re-check capability
+			loadReviewCapability();
+		} else {
+			reviewCountdownSec = remaining;
+		}
+	}
+
+	function formatCountdown(sec) {
+		const h = Math.floor(sec / 3600);
+		const m = Math.floor((sec % 3600) / 60);
+		const s = sec % 60;
+		return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+	}
+
+	$effect(() => {
+		return () => stopReviewCountdown();
+	});
 
 	async function submitReview(rating) {
 		if (!reviewToken || reviewSubmitted) return;
@@ -266,6 +417,111 @@
 				reviewSubmitted = true;
 			}
 		} catch {}
+	}
+
+	// ── Telegram review reminder (Section C) ─────────────────────────────────────
+	async function requestReminderLink() {
+		reminderLoading = true;
+		reminderError = '';
+		reminderBotUrl = '';
+		try {
+			const res = await fetch('/api/v2/helper/reviews/reminder-link', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ purchase_token: purchaseToken, wallet_address: walletAddress }),
+			});
+			const data = await res.json();
+			if (!res.ok) {
+				if (res.status === 503) {
+					// Reminder not configured on this server
+					reminderError = '';
+					return;
+				}
+				reminderError = data.error || `HTTP ${res.status}`;
+				return;
+			}
+			reminderBotUrl = data.bot_url;
+		} catch (e) {
+			reminderError = e.message;
+		} finally {
+			reminderLoading = false;
+		}
+	}
+
+	// ── Cross-device handoff (Section G) ────────────────────────────────────────
+	async function createHandoff() {
+		handoffLoading = true;
+		handoffError = '';
+		handoffQRUrl = '';
+		try {
+			const res = await fetch('/api/v2/helper/handoff/create', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ purchase_token: purchaseToken, wallet_address: walletAddress }),
+			});
+			const data = await res.json();
+			if (!res.ok) { handoffError = data.error || `HTTP ${res.status}`; return; }
+			// Token only, in the URL fragment. Never the wallet address, never a
+			// query param (query params — unlike fragments — are sent to the
+			// server and land in access logs / Referer headers).
+			const url = `${window.location.origin}/v2/helper/purchase#handoff=${encodeURIComponent(data.token)}`;
+			handoffQRUrl = url;
+			handoffExpiresAt = data.expires_at;
+		} catch (e) {
+			handoffError = e.message;
+		} finally {
+			handoffLoading = false;
+		}
+	}
+
+	async function redeemHandoff(token, wallet, curr) {
+		loading = true;
+		step = 'loading';
+		error = '';
+		try {
+			const res = await fetch('/api/v2/helper/handoff/redeem', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ token, wallet_address: wallet }),
+			});
+			const data = await res.json();
+			if (!res.ok) {
+				// Wrong wallet, wrong/expired/replayed token, and concurrent-redeem
+				// loss are all indistinguishable to the caller (safe generic message).
+				error = t('v2.helper.handoff_invalid');
+				loading = false;
+				step = 'done';
+				return;
+			}
+			purchaseToken = data.browser_token;
+			walletAddress = wallet;
+			currency = curr;
+			try { sessionStorage.setItem('v2_active_purchase_token', purchaseToken); } catch {}
+			try {
+				localStorage.setItem('v2_active_hpt', JSON.stringify({
+					token: purchaseToken,
+					wallet: walletAddress,
+					listingId,
+					city,
+				}));
+			} catch {}
+			await restorePurchase();
+		} catch (e) {
+			error = e.message;
+			loading = false;
+			step = 'done';
+		}
+	}
+
+	// Second-device form submit: the user enters THEIR OWN wallet address (never
+	// pre-filled, never received from the first device) to redeem the handoff.
+	async function submitHandoffRedeem() {
+		if (!handoffRedeemWallet.trim() || handoffRedeemLoading) return;
+		handoffRedeemLoading = true;
+		handoffRedeemError = '';
+		const curr = detectCurrency(handoffRedeemWallet) || 'BTC';
+		await redeemHandoff(handoffRedeemToken, handoffRedeemWallet.trim(), curr);
+		handoffRedeemLoading = false;
 	}
 
 	// ── Copy ──────────────────────────────────────────────────────────────────────
@@ -283,6 +539,12 @@
 		return d.toLocaleString();
 	}
 
+	function formatCheckTime(unix) {
+		if (!unix) return '';
+		const d = new Date(unix * 1000);
+		return d.toLocaleTimeString();
+	}
+
 	function openContact() {
 		if (!contactValue) return;
 		if (contactType === 'telegram') {
@@ -292,12 +554,23 @@
 			window.open(`https://signal.me/#p/${contactValue}`, '_blank', 'noopener,noreferrer');
 		}
 	}
+
+	// Back nav hrefs
+	let backToListingHref = $derived(listingId ? `/v2/listing/${listingId}` : '');
+	let backToBoardHref   = $derived(city ? `/v2/board/${city}` : '/v2/board/tbilisi');
 </script>
 
 <div class="layout">
 	<!-- ── Topbar ── -->
 	<div class="topbar">
 		<div class="logo">NA Room <span class="v2-badge">V2</span></div>
+		<!-- Back navigation (Section E) -->
+		<div class="topbar-nav">
+			{#if backToListingHref}
+				<a href={backToListingHref} class="back-link">{t('v2.helper.back_to_listing')}</a>
+			{/if}
+			<a href={backToBoardHref} class="back-link">{t('v2.helper.back_to_board')}</a>
+		</div>
 		{#if step !== 'loading' && step !== 'done'}
 			<div class="progress">
 				{#each [1,2,3,4,5] as n}
@@ -318,10 +591,37 @@
 		{#if loading && step === 'loading'}
 			<div class="center-msg">{t('v2.loading')}</div>
 
+		{:else if step === 'handoff_wallet'}
+			<div class="step-center" data-testid="handoff-redeem-form">
+				<div class="step-inner">
+					<h2>{t('v2.helper.handoff_redeem_title')}</h2>
+					<p class="sub">{t('v2.helper.handoff_redeem_sub')}</p>
+					<div class="field">
+						<input
+							bind:value={handoffRedeemWallet}
+							placeholder={t('v2.listing.helper_wallet_ph')}
+							type="text"
+							autocomplete="off"
+							spellcheck="false"
+							data-testid="handoff-redeem-wallet-input"
+						/>
+					</div>
+					{#if handoffRedeemError}<div class="err">{handoffRedeemError}</div>{/if}
+					<button
+						class="btn-primary"
+						data-testid="handoff-redeem-submit-btn"
+						onclick={submitHandoffRedeem}
+						disabled={handoffRedeemLoading || !handoffRedeemWallet.trim()}
+					>
+						{handoffRedeemLoading ? t('v2.loading') : t('v2.helper.handoff_redeem_btn')}
+					</button>
+				</div>
+			</div>
+
 		{:else if step === 'invoice'}
 			<div class="invoice-wrap">
 
-				<!-- Meta panel: aliases + instructions -->
+				<!-- Meta panel: aliases + instructions + observability -->
 				<div class="meta-panel">
 					<div class="meta-inner">
 						{#if helperPublicName || clientPublicName}
@@ -341,11 +641,54 @@
 								<div class="alias-hint">{t('v2.helper.nickname_permanent')}</div>
 							</div>
 						{/if}
+
+						<!-- Observability info (Section D): reflects the real domain state
+						     (helper_http.go derives provider_status from actual
+						     last_check_attempt_at / last_successful_chain_check_at
+						     timestamps) — never a synthetic/fabricated value. -->
+						{#if providerStatus === 'degraded'}
+							<div class="provider-degraded">
+								{t('v2.helper.provider_degraded')}
+							</div>
+						{:else if providerStatus === 'healthy'}
+							<div class="provider-healthy">
+								{t('v2.helper.provider_healthy')}
+							</div>
+						{:else}
+							<div class="provider-checking">
+								{t('v2.helper.provider_checking')}
+							</div>
+						{/if}
+
+						{#if lastSuccessfulCheckAt}
+							<div class="last-check-info">
+								{t('v2.helper.last_check', { time: formatCheckTime(lastSuccessfulCheckAt) })}
+							</div>
+						{/if}
+
 						{#if phase === 'awaiting_payment' || phase === 'payment_detected'}
 							<div class="instr-block">
 								<p class="instr">{t('v2.helper.instr1')}</p>
 								<p class="instr">{t('v2.helper.instr2')}</p>
 								<p class="instr">{t('v2.helper.instr3')}</p>
+							</div>
+						{/if}
+
+						<!-- Cross-device handoff -->
+						{#if !handoffQRUrl}
+							<button class="btn-handoff" onclick={createHandoff} disabled={handoffLoading}>
+								{handoffLoading ? t('v2.loading') : t('v2.helper.handoff_btn')}
+							</button>
+							{#if handoffError}<div class="err">{handoffError}</div>{/if}
+						{:else}
+							<div class="handoff-box">
+								<p class="handoff-title">{t('v2.helper.handoff_title')}</p>
+								<p class="handoff-scan">{t('v2.helper.handoff_scan')}</p>
+								<div class="handoff-qr"><V2QR data={handoffQRUrl} /></div>
+								<p class="handoff-expires">{t('v2.helper.handoff_expires', { time: formatExpiry(handoffExpiresAt) })}</p>
+								<button class="btn-text" onclick={() => { handoffQRUrl = ''; handoffExpiresAt = 0; }}>
+									{t('v2.helper.handoff_close')}
+								</button>
 							</div>
 						{/if}
 					</div>
@@ -366,6 +709,11 @@
 									{t('v2.invoice.confirmed')}
 								{/if}
 							</div>
+
+							<!-- Pulse dot for current progress (Section D) -->
+							{#if phase === 'awaiting_payment'}
+								<div class="pulse-dot" aria-hidden="true"></div>
+							{/if}
 
 							<div class="inv-row">
 								<span class="inv-label">{t('v2.invoice.amount')}</span>
@@ -411,6 +759,22 @@
 					<button class="btn-secondary" onclick={restorePurchase} disabled={loading}>
 						{loading ? t('v2.loading') : t('v2.balance.recheck')}
 					</button>
+					{#if !handoffQRUrl}
+						<button class="btn-handoff" onclick={createHandoff} disabled={handoffLoading}>
+							{handoffLoading ? t('v2.loading') : t('v2.helper.handoff_btn')}
+						</button>
+						{#if handoffError}<div class="err">{handoffError}</div>{/if}
+					{:else}
+						<div class="handoff-box">
+							<p class="handoff-title">{t('v2.helper.handoff_title')}</p>
+							<p class="handoff-scan">{t('v2.helper.handoff_scan')}</p>
+							<div class="handoff-qr"><V2QR data={handoffQRUrl} /></div>
+							<p class="handoff-expires">{t('v2.helper.handoff_expires', { time: formatExpiry(handoffExpiresAt) })}</p>
+							<button class="btn-text" onclick={() => { handoffQRUrl = ''; handoffExpiresAt = 0; }}>
+								{t('v2.helper.handoff_close')}
+							</button>
+						</div>
+					{/if}
 					{#if error}<div class="err">{error}</div>{/if}
 				</div>
 			</div>
@@ -439,7 +803,30 @@
 						</div>
 					{/if}
 
-					{#if reviewToken && !reviewSubmitted}
+					<!-- Review section with countdown (Section G) -->
+					{#if reviewAvailableAt > 0 && reviewCountdownSec > 0}
+						<div class="review-countdown-box">
+							<p class="review-not-yet">{t('v2.review.not_yet')}</p>
+							<div class="review-countdown">
+								{t('v2.review.countdown', { time: formatCountdown(reviewCountdownSec) })}
+							</div>
+							<!-- Optional Telegram reminder (Section C) -->
+							{#if reminderRegistered}
+								<p class="reminder-sent">{t('v2.helper.reminder_sent')}</p>
+							{:else if reminderBotUrl}
+								<a href={reminderBotUrl} target="_blank" rel="noopener noreferrer"
+								   class="btn-reminder-link"
+								   onclick={() => { reminderRegistered = true; }}>
+									{t('v2.helper.reminder_open')}
+								</a>
+							{:else if !reminderLoading}
+								<button class="btn-reminder" onclick={requestReminderLink} disabled={reminderLoading}>
+									{t('v2.helper.reminder_btn')}
+								</button>
+								{#if reminderError}<p class="err">{reminderError}</p>{/if}
+							{/if}
+						</div>
+					{:else if reviewToken && !reviewSubmitted}
 						<div class="review-section">
 							<h3>{t('v2.review.title')}</h3>
 							{#if reviewClientName}
@@ -458,6 +845,24 @@
 						<div class="review-done">{t('v2.review.submitted')}</div>
 					{/if}
 
+					<!-- Cross-device handoff (contact step) -->
+					{#if !handoffQRUrl}
+						<button class="btn-handoff" onclick={createHandoff} disabled={handoffLoading}>
+							{handoffLoading ? t('v2.loading') : t('v2.helper.handoff_btn')}
+						</button>
+						{#if handoffError}<div class="err">{handoffError}</div>{/if}
+					{:else}
+						<div class="handoff-box">
+							<p class="handoff-title">{t('v2.helper.handoff_title')}</p>
+							<p class="handoff-scan">{t('v2.helper.handoff_scan')}</p>
+							<div class="handoff-qr"><V2QR data={handoffQRUrl} /></div>
+							<p class="handoff-expires">{t('v2.helper.handoff_expires', { time: formatExpiry(handoffExpiresAt) })}</p>
+							<button class="btn-text" onclick={() => { handoffQRUrl = ''; handoffExpiresAt = 0; }}>
+								{t('v2.helper.handoff_close')}
+							</button>
+						</div>
+					{/if}
+
 					{#if error}<div class="err">{error}</div>{/if}
 				</div>
 			</div>
@@ -467,7 +872,7 @@
 				<div class="step-inner">
 					<h2>{t('v2.helper.done_title')}</h2>
 					{#if error}<p class="err">{error}</p>{/if}
-					<a href="/v2/board/tbilisi" class="btn-secondary">{t('v2.listing.back')}</a>
+					<a href={backToBoardHref} class="btn-secondary">{t('v2.listing.back')}</a>
 				</div>
 			</div>
 		{/if}
@@ -495,9 +900,10 @@
 		justify-content: space-between;
 		padding: 0 20px;
 		border-bottom: 1px solid var(--border);
+		gap: 12px;
 	}
 
-	.logo { font-size: 16px; font-weight: 600; color: var(--text); }
+	.logo { font-size: 16px; font-weight: 600; color: var(--text); flex-shrink: 0; }
 	.v2-badge {
 		font-size: 10px;
 		background: var(--accent);
@@ -508,6 +914,21 @@
 		font-weight: 700;
 		vertical-align: middle;
 	}
+
+	/* Back nav */
+	.topbar-nav {
+		display: flex;
+		gap: 12px;
+		align-items: center;
+		flex-shrink: 0;
+	}
+	.back-link {
+		font-size: 12px;
+		color: var(--text-dim);
+		text-decoration: none;
+		white-space: nowrap;
+	}
+	.back-link:hover { color: var(--text); }
 
 	/* ── Progress bar ── */
 	.progress {
@@ -528,7 +949,18 @@
 		flex-shrink: 0;
 	}
 	.prog-step.done .prog-dot { background: var(--accent); border-color: var(--accent); opacity: 0.55; }
-	.prog-step.active .prog-dot { background: var(--accent); border-color: var(--accent); }
+	.prog-step.active .prog-dot {
+		background: var(--accent);
+		border-color: var(--accent);
+		animation: pulse-dot 1.8s ease-in-out infinite;
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.prog-step.active .prog-dot { animation: none; }
+	}
+	@keyframes pulse-dot {
+		0%, 100% { box-shadow: 0 0 0 0 rgba(100,180,255,0.4); }
+		50%       { box-shadow: 0 0 0 4px rgba(100,180,255,0); }
+	}
 	.prog-label {
 		font-size: 9px;
 		color: var(--text-faint);
@@ -593,7 +1025,7 @@
 	.meta-inner {
 		display: flex;
 		flex-direction: column;
-		gap: 18px;
+		gap: 14px;
 		width: 100%;
 	}
 
@@ -630,6 +1062,34 @@
 		margin-top: 2px;
 	}
 
+	/* Observability (Section D) */
+	.provider-degraded {
+		background: rgba(196, 163, 90, 0.12);
+		border: 1px solid var(--warn);
+		border-radius: 6px;
+		padding: 8px 10px;
+		font-size: 11px;
+		color: var(--warn);
+		line-height: 1.4;
+	}
+
+	.provider-checking {
+		font-size: 10px;
+		color: var(--text-faint);
+		line-height: 1.4;
+	}
+
+	.provider-healthy {
+		font-size: 10px;
+		color: var(--accent);
+		line-height: 1.4;
+	}
+
+	.last-check-info {
+		font-size: 10px;
+		color: var(--text-faint);
+	}
+
 	.instr-block {
 		display: flex;
 		flex-direction: column;
@@ -641,6 +1101,19 @@
 		color: var(--text-dim);
 		line-height: 1.4;
 		margin: 0;
+	}
+
+	/* Pulse animation dot (standalone) */
+	.pulse-dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: var(--accent);
+		animation: pulse-dot 1.8s ease-in-out infinite;
+		margin: 2px 0;
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.pulse-dot { animation: none; }
 	}
 
 	/* ── Pay panel ── */
@@ -789,6 +1262,29 @@
 	}
 	.open-btn:hover { opacity: 0.85; }
 
+	/* ── Review countdown (Section G) ── */
+	.review-countdown-box {
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		padding: 16px;
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+	.review-not-yet {
+		font-size: 12px;
+		color: var(--text-dim);
+		line-height: 1.4;
+		margin: 0;
+	}
+	.review-countdown {
+		font-size: 14px;
+		font-weight: 700;
+		color: var(--accent);
+		font-variant-numeric: tabular-nums;
+	}
+
 	/* ── Review ── */
 	.review-section {
 		background: var(--bg-card);
@@ -820,6 +1316,35 @@
 		padding: 8px;
 	}
 
+	/* ── Handoff redeem form (second device) ── */
+	.field { display: flex; flex-direction: column; gap: 6px; }
+	.field input {
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		color: var(--text);
+		font-family: inherit;
+		font-size: 14px;
+		padding: 10px 12px;
+		outline: none;
+		transition: border-color 0.15s;
+	}
+	.field input:focus { border-color: var(--accent); }
+
+	.btn-primary {
+		background: var(--accent);
+		color: var(--bg);
+		border: none;
+		border-radius: 8px;
+		padding: 12px 24px;
+		font-size: 14px;
+		font-weight: 600;
+		cursor: pointer;
+		transition: opacity 0.15s;
+	}
+	.btn-primary:hover:not(:disabled) { opacity: 0.85; }
+	.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
 	/* ── Shared button ── */
 	.btn-secondary {
 		background: var(--bg-card);
@@ -843,10 +1368,10 @@
 
 	/* ── Mobile: single column ── */
 	@media (max-width: 600px) {
-		.topbar { padding: 0 14px; }
+		.topbar { padding: 0 14px; height: auto; min-height: 44px; flex-wrap: wrap; }
+		.topbar-nav { order: 3; flex-basis: 100%; padding-bottom: 6px; }
 		.prog-label { display: none; }
 		.prog-current { display: inline; }
-
 		.invoice-wrap {
 			flex-direction: column;
 			overflow-y: auto;
@@ -884,14 +1409,120 @@
 		.qr-wrap :global(.v2qr svg) { width: 128px; height: 128px; }
 	}
 
-	/* ── Very small viewport (360×640 class): ultra-compact ── */
-	@media (max-height: 660px) and (max-width: 600px) {
-		.topbar { height: 38px; }
+	/* ── Short mobile viewport: keep payment and language controls separate ── */
+	@media (max-height: 700px) and (max-width: 600px) {
+		.topbar {
+			height: 38px;
+			min-height: 38px;
+			padding: 0 10px;
+			flex-wrap: nowrap;
+			gap: 8px;
+		}
+		.logo { display: none; }
+		.topbar-nav {
+			order: initial;
+			flex-basis: auto;
+			padding-bottom: 0;
+			gap: 8px;
+		}
+		.progress {
+			min-width: 0;
+			margin-left: auto;
+		}
+		.prog-line { width: 14px; }
+		.prog-current {
+			margin-left: 6px;
+			font-size: 10px;
+		}
 		.meta-panel { padding: 7px 14px; }
 		.pay-panel { padding: 8px 14px; }
 		.pay-surface { gap: 8px; }
 		.qr-wrap :global(.v2qr svg) { width: 112px; height: 112px; }
 	}
+
+	/* ── Telegram review reminder (Section C) ── */
+	.btn-reminder {
+		background: none;
+		border: 1px dashed var(--border);
+		border-radius: 6px;
+		color: var(--text-faint);
+		font-size: 11px;
+		padding: 6px 10px;
+		cursor: pointer;
+		transition: border-color 0.15s, color 0.15s;
+		align-self: flex-start;
+		margin-top: 4px;
+	}
+	.btn-reminder:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+	.btn-reminder:disabled { opacity: 0.5; cursor: not-allowed; }
+	.btn-reminder-link {
+		font-size: 12px;
+		color: var(--accent);
+		text-decoration: underline;
+		align-self: flex-start;
+		margin-top: 4px;
+	}
+	.reminder-sent {
+		font-size: 11px;
+		color: var(--accent);
+		margin: 4px 0 0;
+		line-height: 1.4;
+	}
+
+	/* ── Cross-device handoff (Section G) ── */
+	.btn-handoff {
+		background: none;
+		border: 1px dashed var(--border);
+		border-radius: 8px;
+		color: var(--text-faint);
+		font-size: 12px;
+		padding: 8px 14px;
+		cursor: pointer;
+		transition: border-color 0.15s, color 0.15s;
+		align-self: flex-start;
+	}
+	.btn-handoff:hover:not(:disabled) { border-color: var(--text-dim); color: var(--text-dim); }
+	.btn-handoff:disabled { opacity: 0.5; cursor: not-allowed; }
+
+	.handoff-box {
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		padding: 14px;
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+	.handoff-title {
+		font-size: 13px;
+		font-weight: 600;
+		color: var(--text);
+		margin: 0;
+	}
+	.handoff-scan {
+		font-size: 11px;
+		color: var(--text-dim);
+		line-height: 1.4;
+		margin: 0;
+	}
+	.handoff-qr { display: flex; }
+	.handoff-qr :global(.v2qr svg) { width: 140px; height: 140px; display: block; }
+	.handoff-expires {
+		font-size: 10px;
+		color: var(--text-faint);
+		margin: 0;
+	}
+	.btn-text {
+		background: none;
+		border: none;
+		color: var(--text-dim);
+		font-size: 12px;
+		padding: 0;
+		cursor: pointer;
+		text-decoration: underline;
+		align-self: flex-start;
+	}
+	.btn-text:hover { color: var(--text); }
 
 	/* ── Prevent document scroll — this page owns the full viewport ── */
 	:global(html), :global(body) {

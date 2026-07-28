@@ -777,6 +777,20 @@ Helper is not given a user-facing purchase recovery code and is not promised cro
 - 2026-07-19: Task 04S — Expanded display-name namespace from 40 000 to 2^128 (128-bit random suffix). Removed resolved entries from §5 unresolved list and §20 Decision Queue.
 - 2026-07-19: Task 04R — Fixed three decisions left open after Task 04 review: (1) exactly one structured text contact (Telegram or Signal), no image, no multiple contacts, immutable five days; (2) service Telegram binding reused automatically while active/deliverable, re-bind only on absence/expiry/invalidation/failure; (3) display name listing-scoped, stable five days, new for new paid listing, not persistent identity. Removed contradicting UNRESOLVED entries from sections 3.3, 8.1, 17, 19.2, and 21.2. Adapter tests use in-memory injected transport, not httptest.NewServer or TCP skip.
 - 2026-07-17: V2 document created from the product discussion.
+- 2026-07-26: Task 11 — Helper purchase journey hardened end-to-end. Changes:
+  (1) BlockCypher provider reliability: on 401/403/429 the adapter retries once without token; successful fallback resets watcher backoff; degraded state is user-visible with actionable message.
+  (2) Review lifecycle moved to `first_revealed_at`: `available_at = first_revealed_at + 3600`, `expires_at = first_revealed_at + 86400`; review blocked until `available_at`; existing consumed rows preserved.
+  (3) Receipt window: `receipt_expires_at = first_revealed_at + 24 h` (unchanged from Task 05-FIX; clarified as anchored to first reveal).
+  (4) Country lock: locked at first successful purchase; same-country additional cities allowed; different-country blocked before invoice.
+  (5) City registry unified: single `AllCities` Go registry for all 21 destinations (9 original + 12 new: Bangkok, Chiang Mai, Phuket, Hanoi, Ho Chi Minh City, Istanbul, Antalya, Dubai, Bali, Lisbon, Valencia, Malaga); listing validation, country lock, and Informer all use this registry; frontend gets city list from `GET /v2/board/cities`.
+  (6) Cross-device handoff: `POST /v2/helper/handoff/create` + `POST /v2/helper/handoff/redeem`; one-time HMAC token, 15 min TTL; redeem rotates browser_token_hash; old capability revoked; raw token never stored.
+  (7) Client Telegram: immediate purchase notice (no review buttons) on `contact_ready`; delayed review prompt at `available_at`; encrypted chat destination snapshot; dedup/cleanup enforced.
+  (8) Optional Helper Telegram review reminder: one-time deep link, 15 min TTL, isolated from Informer identity.
+  (9) Payment observability: `last_check_attempt_at`, `last_successful_chain_check_at`, `provider_status`, `confirmations` in restore response; degraded state shown to user.
+  (10) Board discovery: honest `active_count` (sample cards excluded); exactly 2 sample cards per city (non-purchasable); automatic empty state when `active_count=0`; grouped city selector with 21 cities; reputation shows "today"/"both counters"/"Platform nickname" label.
+  (11) My Purchases page: `GET /v2/helper/purchases` reads local index; restore-checks each; shows phase/deadline/action; terminal entries cleared locally.
+  (12) All new endpoints: Cache-Control no-store, body limits 4096, rate limits; tokens/fingerprints never in logs or error bodies.
+  — Resolved from UNRESOLVED: item 3 (contact visible on restore/reveal until receipt_expires_at); item 2 (purchase restores from localStorage token after close/reopen at any phase).
 - 2026-07-18: Task 03A — Fixed 6 blockers: btcutil address validation (BTC+LTC, all types), atomic CAS ExpireInvoice (single SQL with inline deadline check), real bounded backoff via CycleResult (Run manages backoff once per cycle, ProcessOnce is stateless), corrected HD derivation contract (shared counter is safe; separate counter would collide), real adapter tests via in-memory injected transport (roundTripFunc), SQLite CHECK constraints for all 4 invoice status/field configurations.
 - 2026-07-18: Task 03 — V2 invoice state machine implemented. Added fixed rules for detection window (60 min), confirmation grace (24 h), expiry transitions, exact-amount enforcement, sender verification, post-payment balance check, bounded watcher backoff. Removed "Whether V2 launch supports both BTC and LTC" from UNRESOLVED (both are supported).
 - 2026-07-17: Fixed five consecutive calendar days and initial/daily Client balance checks; added Telegram Helper-summary/review concept and contact text-vs-image decision.
@@ -1206,13 +1220,19 @@ The same rule must be enforced by the backend even if a user bypasses the fronte
 
 `FIXED (Task 06)`
 
-- **Helper review-code/link lifetime and target (was item 6):** review token expires 24 h from `contact_ready_at`. Review targets the Client's wallet-bound profile (v2_client_profiles). Token is HMAC-signed and single-use. Format and endpoints defined in §22.5.
+- **Helper review-code/link lifetime and target (was item 6):** review token expires 24 h from `first_revealed_at` (updated in Task 11). `available_at = first_revealed_at + 3600`. Review targets the Client's wallet-bound profile (v2_client_profiles). Token is HMAC-signed and single-use.
+
+`FIXED (Task 11)`
+
+- **Review clock anchor (was item 6 clarification):** `available_at = first_revealed_at + 3600`; `expires_at = first_revealed_at + 86400`. Review window: 23 hours. Contact is visible on restore/reveal until `receipt_expires_at = first_revealed_at + 86400`.
+- **Same-browser/close-reopen (was item 2):** purchase token stored in localStorage; restore call reconstructs full purchase state at any phase; page navigates directly to current phase. Cross-device requires explicit handoff.
+- **Contact visibility (was item 3):** contact remains visible on the purchase page until `receipt_expires_at` via the reveal endpoint; restore/status does NOT return contact plaintext.
+- **Cross-device handoff:** one-time HMAC token, 15 min TTL, redeems by rotating browser_token_hash; old capability immediately invalid.
+- **Provider degraded behavior:** invoice stays pending/detected during provider outage; user sees degraded warning; timely tx is recovered when provider returns; invoice expires only after successful chain check proves absence.
 
 `UNRESOLVED`
 
 1. Exact BTC/LTC funding-wallet resolution rule for multi-input and custodial transactions.
-2. Same-browser behavior when the page is refreshed or closed before payment confirmation completes.
-3. Whether the contact remains visible after refreshing the same result page or is strictly shown once.
 4. How long pending invoices and temporary purchase-to-review links remain stored.
 5. Whether the same wallet-bound profile may also act as a Client.
 

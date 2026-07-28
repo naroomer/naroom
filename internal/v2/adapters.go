@@ -4,9 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
-	"strings"
 	"time"
 
 	ncrypto "naroom/internal/crypto"
@@ -161,16 +161,11 @@ func newBlockcypherV2AdapterWithClient(baseURL string, c *http.Client) *Blockcyp
 	return &BlockcypherV2Adapter{baseURL: baseURL, httpClient: c}
 }
 
-func (a *BlockcypherV2Adapter) tokenParam() string {
-	if a.token == "" {
-		return ""
-	}
-	return "?token=" + a.token
-}
-
 // bcRawAddrTxs is the JSON schema for a blockcypher /addrs/{addr}/full response.
+// The Error field captures provider error envelopes (e.g. 200 + {"error":"Limits reached."}).
 type bcRawAddrTxs struct {
-	Txs []struct {
+	Error string `json:"error"` // non-empty: provider returned error body despite 200
+	Txs   []struct {
 		Hash          string `json:"hash"`
 		Confirmations int    `json:"confirmations"`
 		Outputs       []struct {
@@ -183,24 +178,72 @@ type bcRawAddrTxs struct {
 	} `json:"txs"`
 }
 
-func (a *BlockcypherV2Adapter) GetInvoiceTxs(ctx context.Context, address string) ([]V2TxResult, error) {
-	url := fmt.Sprintf("%s/addrs/%s/full?limit=10%s", a.baseURL, address,
-		strings.Replace(a.tokenParam(), "?", "&", 1))
+// bcIsAuthOrQuotaFailure returns true if the HTTP status indicates an
+// authentication/quota failure that warrants a token-free retry.
+// Note: 200 + error envelope is handled separately in bcFetchAndDecode.
+func bcIsAuthOrQuotaFailure(status int, _ []byte) bool {
+	return status == http.StatusUnauthorized ||
+		status == http.StatusForbidden ||
+		status == http.StatusTooManyRequests
+}
+
+// bcFetchAndDecode performs one HTTP GET and decodes the JSON body.
+// Returns (data, statusCode, bodyBytes, error).
+// The caller must check the status and decide whether to retry.
+func (a *BlockcypherV2Adapter) bcFetchAndDecode(ctx context.Context, url string) (bcRawAddrTxs, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("v2: blockcypher GetInvoiceTxs: %w", err)
+		return bcRawAddrTxs{}, 0, fmt.Errorf("v2: blockcypher GetInvoiceTxs: build request: %w", err)
 	}
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("v2: blockcypher GetInvoiceTxs: %w", err)
+		return bcRawAddrTxs{}, 0, fmt.Errorf("v2: blockcypher GetInvoiceTxs: http: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("v2: blockcypher GetInvoiceTxs: status %d", resp.StatusCode)
+	status := resp.StatusCode
+	if status != http.StatusOK {
+		// Drain and discard body before returning so the connection can be reused.
+		io.Copy(io.Discard, resp.Body) //nolint:errcheck
+		return bcRawAddrTxs{}, status, fmt.Errorf("v2: blockcypher GetInvoiceTxs: status %d", status)
 	}
 	var data bcRawAddrTxs
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, fmt.Errorf("v2: blockcypher GetInvoiceTxs: decode: %w", err)
+		return bcRawAddrTxs{}, status, fmt.Errorf("v2: blockcypher GetInvoiceTxs: decode: %w", err)
+	}
+	// BlockCypher sometimes returns 200 with {"error":"Limits reached."} or similar.
+	// Treat any non-empty error envelope as a quota/auth failure so the caller can retry
+	// without token. Never log the error text (may contain quota details or token hints).
+	if data.Error != "" {
+		return bcRawAddrTxs{}, http.StatusTooManyRequests, fmt.Errorf("v2: blockcypher GetInvoiceTxs: provider error envelope: [internal]")
+	}
+	return data, status, nil
+}
+
+func (a *BlockcypherV2Adapter) GetInvoiceTxs(ctx context.Context, address string) ([]V2TxResult, error) {
+	baseURL := fmt.Sprintf("%s/addrs/%s/full?limit=10", a.baseURL, address)
+
+	// First attempt: use token if configured.
+	urlWithToken := baseURL
+	if a.token != "" {
+		urlWithToken = baseURL + "&token=" + a.token
+	}
+	data, status, err := a.bcFetchAndDecode(ctx, urlWithToken)
+	if err != nil {
+		// If the failure is auth/quota related AND we had a token, retry without token.
+		if a.token != "" && bcIsAuthOrQuotaFailure(status, nil) {
+			// Check context is still alive before second attempt.
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("v2: blockcypher GetInvoiceTxs: context cancelled before fallback: %w", ctx.Err())
+			}
+			var fallbackErr error
+			data, _, fallbackErr = a.bcFetchAndDecode(ctx, baseURL)
+			if fallbackErr != nil {
+				return nil, fallbackErr
+			}
+			// Fallback succeeded — use data below.
+		} else {
+			return nil, err
+		}
 	}
 	results := make([]V2TxResult, 0, len(data.Txs))
 	for _, tx := range data.Txs {

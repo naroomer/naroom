@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -795,6 +796,279 @@ func TestAdapterWatcherLTC(t *testing.T) {
 			t.Errorf("detected txid: %v, want txid_ltc_correct2", reread.DetectedTxid)
 		}
 	})
+}
+
+// ── BlockcypherV2Adapter fallback tests (Section B) ──────────────────────────
+//
+// These tests verify the provider-fallback behaviour added in Task 11 Section B:
+// when a token-authenticated request returns 401/403/429, the adapter retries
+// with no token before reporting failure.
+
+// newBlockcypherTestAdapterWithToken creates a BlockcypherV2Adapter with an
+// explicit token and an injected transport. Package-internal use only.
+func newBlockcypherTestAdapterWithToken(token string, rt http.RoundTripper) *BlockcypherV2Adapter {
+	return &BlockcypherV2Adapter{
+		baseURL:    "http://test.invalid",
+		token:      token,
+		httpClient: testClient(rt),
+	}
+}
+
+// rtSequence returns a transport that responds to successive requests using
+// the provided RoundTrippers in order; the last one is reused when exhausted.
+func rtSequence(rts ...http.RoundTripper) http.RoundTripper {
+	i := 0
+	return roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		rt := rts[i]
+		if i < len(rts)-1 {
+			i++
+		}
+		return rt.RoundTrip(r)
+	})
+}
+
+// bcSuccessTx is a minimal BlockCypher JSON payload with one matching tx.
+func bcSuccessTxJSON(addr string) interface{} {
+	return map[string]interface{}{
+		"txs": []interface{}{
+			map[string]interface{}{
+				"hash":          "txid_ok",
+				"confirmations": 1,
+				"outputs": []interface{}{
+					map[string]interface{}{"addresses": []string{addr}, "value": int64(500_000)},
+				},
+				"inputs": []interface{}{
+					map[string]interface{}{"addresses": []string{"ltc1qsender"}},
+				},
+			},
+		},
+	}
+}
+
+// TestBlockcypherFallback_TokenSuccess verifies that when the authenticated
+// request returns 200, exactly one HTTP call is made and no fallback is tried.
+func TestBlockcypherFallback_TokenSuccess(t *testing.T) {
+	const addr = "ltc1qplatform000000000000000000000000000000"
+	callCount := 0
+	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		callCount++
+		if r.URL.RawQuery == "" {
+			t.Errorf("expected token in URL, got no query string")
+		}
+		b, _ := json.Marshal(bcSuccessTxJSON(addr))
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewReader(b)),
+			Header:     make(http.Header),
+		}, nil
+	})
+	a := newBlockcypherTestAdapterWithToken("mytoken", rt)
+	results, err := a.GetInvoiceTxs(t.Context(), addr)
+	if err != nil {
+		t.Fatalf("GetInvoiceTxs: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if callCount != 1 {
+		t.Errorf("HTTP call count: got %d, want 1 (no fallback on success)", callCount)
+	}
+}
+
+// TestBlockcypherFallback_429ThenSuccess verifies that a 429 response on the
+// token request triggers exactly one retry without the token, and that retry's
+// data is returned to the caller.
+func TestBlockcypherFallback_429ThenSuccess(t *testing.T) {
+	const addr = "ltc1qplatform000000000000000000000000000000"
+	b, _ := json.Marshal(bcSuccessTxJSON(addr))
+	rt := rtSequence(
+		rtStatus(http.StatusTooManyRequests), // first call: with token → 429
+		roundTripFunc(func(r *http.Request) (*http.Response, error) { // second call: no token
+			if strings.Contains(r.URL.RawQuery, "token=") {
+				t.Errorf("fallback request should not contain token, got query %q", r.URL.RawQuery)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewReader(b)),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	)
+	a := newBlockcypherTestAdapterWithToken("mytoken", rt)
+	results, err := a.GetInvoiceTxs(t.Context(), addr)
+	if err != nil {
+		t.Fatalf("GetInvoiceTxs after 429 fallback: %v", err)
+	}
+	if len(results) != 1 || results[0].Txid != "txid_ok" {
+		t.Errorf("unexpected results after fallback: %+v", results)
+	}
+}
+
+// TestBlockcypherFallback_401ThenSuccess verifies fallback on HTTP 401.
+func TestBlockcypherFallback_401ThenSuccess(t *testing.T) {
+	const addr = "ltc1qplatform000000000000000000000000000000"
+	b, _ := json.Marshal(bcSuccessTxJSON(addr))
+	rt := rtSequence(
+		rtStatus(http.StatusUnauthorized),
+		rtBody(b),
+	)
+	a := newBlockcypherTestAdapterWithToken("expiredtoken", rt)
+	results, err := a.GetInvoiceTxs(t.Context(), addr)
+	if err != nil {
+		t.Fatalf("GetInvoiceTxs after 401 fallback: %v", err)
+	}
+	if len(results) != 1 {
+		t.Errorf("expected 1 result after 401 fallback, got %d", len(results))
+	}
+}
+
+// TestBlockcypherFallback_403ThenSuccess verifies fallback on HTTP 403.
+func TestBlockcypherFallback_403ThenSuccess(t *testing.T) {
+	const addr = "ltc1qplatform000000000000000000000000000000"
+	b, _ := json.Marshal(bcSuccessTxJSON(addr))
+	rt := rtSequence(
+		rtStatus(http.StatusForbidden),
+		rtBody(b),
+	)
+	a := newBlockcypherTestAdapterWithToken("badtoken", rt)
+	results, err := a.GetInvoiceTxs(t.Context(), addr)
+	if err != nil {
+		t.Fatalf("GetInvoiceTxs after 403 fallback: %v", err)
+	}
+	if len(results) != 1 {
+		t.Errorf("expected 1 result after 403 fallback, got %d", len(results))
+	}
+}
+
+// TestBlockcypherFallback_BothAttemptsFail verifies that when both the
+// token attempt and the fallback attempt fail, an error is returned.
+func TestBlockcypherFallback_BothAttemptsFail(t *testing.T) {
+	rt := rtSequence(
+		rtStatus(http.StatusTooManyRequests),    // first: 429
+		rtStatus(http.StatusServiceUnavailable), // second: 503 (not a quota failure, just unavailable)
+	)
+	a := newBlockcypherTestAdapterWithToken("mytoken", rt)
+	results, err := a.GetInvoiceTxs(t.Context(), "ltc1qplatform000000000000000000000000000000")
+	if err == nil {
+		t.Fatalf("expected error when both attempts fail, got results: %+v", results)
+	}
+}
+
+// TestBlockcypherFallback_NoTokenSingleRequest verifies that when no token is
+// configured, exactly one request is made (no fallback attempt).
+func TestBlockcypherFallback_NoTokenSingleRequest(t *testing.T) {
+	const addr = "ltc1qplatform000000000000000000000000000000"
+	callCount := 0
+	b, _ := json.Marshal(bcSuccessTxJSON(addr))
+	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		callCount++
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewReader(b)),
+			Header:     make(http.Header),
+		}, nil
+	})
+	// No token — uses the standard test adapter constructor.
+	a := newBlockcypherTestAdapter(rt)
+	results, err := a.GetInvoiceTxs(t.Context(), addr)
+	if err != nil {
+		t.Fatalf("GetInvoiceTxs (no token): %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if callCount != 1 {
+		t.Errorf("HTTP call count: got %d, want 1 (no fallback without token)", callCount)
+	}
+}
+
+// TestBlockcypherFallback_NoTokenOnError verifies that when no token is
+// configured and the request fails, no fallback is attempted.
+func TestBlockcypherFallback_NoTokenOnError(t *testing.T) {
+	callCount := 0
+	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		callCount++
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Body:       io.NopCloser(bytes.NewReader(nil)),
+			Header:     make(http.Header),
+		}, nil
+	})
+	a := newBlockcypherTestAdapter(rt) // no token
+	_, err := a.GetInvoiceTxs(t.Context(), "ltc1qplatform000000000000000000000000000000")
+	if err == nil {
+		t.Fatal("expected error on 429 without token, got nil")
+	}
+	if callCount != 1 {
+		t.Errorf("HTTP call count: got %d, want 1 (no fallback without token)", callCount)
+	}
+}
+
+// TestBlockcypherFallback_200ErrorEnvelopeThenSuccess verifies that a 200
+// response with {"error":"Limits reached."} triggers fallback without token.
+func TestBlockcypherFallback_200ErrorEnvelopeThenSuccess(t *testing.T) {
+	const addr = "ltc1qplatform000000000000000000000000000000"
+	limitsReachedBody, _ := json.Marshal(map[string]string{"error": "Limits reached."})
+	successBody, _ := json.Marshal(bcSuccessTxJSON(addr))
+	rt := rtSequence(
+		// First call (with token): 200 + error envelope
+		rtBody(limitsReachedBody),
+		// Second call (without token): 200 + real data
+		roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if strings.Contains(r.URL.RawQuery, "token=") {
+				t.Errorf("fallback request should not contain token, got query %q", r.URL.RawQuery)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewReader(successBody)),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	)
+	a := newBlockcypherTestAdapterWithToken("mytoken", rt)
+	results, err := a.GetInvoiceTxs(t.Context(), addr)
+	if err != nil {
+		t.Fatalf("GetInvoiceTxs after 200+error fallback: %v", err)
+	}
+	if len(results) != 1 || results[0].Txid != "txid_ok" {
+		t.Errorf("unexpected results after 200+error fallback: %+v", results)
+	}
+}
+
+// TestBlockcypherFallback_200ErrorEnvelopeFallbackAlsoFails verifies that when
+// both the token attempt (200+error) and the fallback attempt fail, an error is
+// returned and no fabricated tx list is produced.
+func TestBlockcypherFallback_200ErrorEnvelopeFallbackAlsoFails(t *testing.T) {
+	const addr = "ltc1qplatform000000000000000000000000000000"
+	limitsReachedBody, _ := json.Marshal(map[string]string{"error": "Limits reached."})
+	// Fallback also returns 200+error (provider completely exhausted, both paths fail).
+	rt := rtSequence(
+		rtBody(limitsReachedBody),
+		rtBody(limitsReachedBody),
+	)
+	a := newBlockcypherTestAdapterWithToken("mytoken", rt)
+	results, err := a.GetInvoiceTxs(t.Context(), addr)
+	if err == nil {
+		t.Fatalf("expected error when both 200+error attempts fail, got %d results", len(results))
+	}
+	if len(results) != 0 {
+		t.Errorf("expected empty results on provider error, got %d", len(results))
+	}
+}
+
+// TestBlockcypherFallback_NoFalseSuccessOnNetworkError verifies that a network
+// error does not record a successful chain check (watcher guard).
+func TestBlockcypherFallback_NoFalseSuccessOnNetworkError(t *testing.T) {
+	rt := rtError(errors.New("network error"))
+	a := newBlockcypherTestAdapterWithToken("mytoken", rt)
+	results, err := a.GetInvoiceTxs(t.Context(), "ltc1qplatform000000000000000000000000000000")
+	if err == nil {
+		t.Fatalf("expected error on network failure, got %d results", len(results))
+	}
+	// Verify no results are returned (not a false empty list)
+	if len(results) != 0 {
+		t.Errorf("expected 0 results on network error, got %d", len(results))
+	}
 }
 
 // Ensure unused imports aren't flagged:

@@ -345,17 +345,36 @@ func MigrateSchema(db *sql.DB) error {
 		}
 	}
 
+	// Task 11C: payment observability columns on v2_helper_purchases.
+	helperPurchasesHasLastCheckAttempt, err := connColumnExists(ctx, conn, "v2_helper_purchases", "last_check_attempt_at")
+	if err != nil {
+		return fmt.Errorf("v2: MigrateSchema: last_check_attempt_at check: %w", err)
+	}
+	helperPurchasesHasLastSuccessfulCheck, err := connColumnExists(ctx, conn, "v2_helper_purchases", "last_successful_chain_check_at")
+	if err != nil {
+		return fmt.Errorf("v2: MigrateSchema: last_successful_chain_check_at check: %w", err)
+	}
+
+	// Task 11G: available_at column on v2_review_entitlements.
+	reviewEntitlementsHasAvailableAt, err := connColumnExists(ctx, conn, "v2_review_entitlements", "available_at")
+	if err != nil {
+		return fmt.Errorf("v2: MigrateSchema: available_at check: %w", err)
+	}
+
 	// ── Early return: nothing to do ──────────────────────────────────────────
 	//
 	// Condition: outbox exists and is clean, all optional cols present,
 	// recipients exists and is current, attempts column present,
 	// Task 10C snapshot columns are present, Task 10D columns are correct,
-	// and no legacy helper profile names remain.
+	// no legacy helper profile names remain, Task 11C observability columns present,
+	// and Task 11G available_at column present.
 	if outboxExists && !outboxNeedsRebuild && hasClaimedBy && hasClaimToken && hasLeaseUntil &&
 		recipientsExists && !recipientsNeedsRebuild && attemptsExists &&
 		clientFlowsHardFloor && !helperPurchasesNeedsRebuild &&
 		clientProfilesPublicName && !listingsDisplayNameHasUnique &&
-		!hasLegacyHelperNames {
+		!hasLegacyHelperNames &&
+		helperPurchasesHasLastCheckAttempt && helperPurchasesHasLastSuccessfulCheck &&
+		reviewEntitlementsHasAvailableAt {
 		return nil
 	}
 
@@ -584,6 +603,38 @@ CREATE INDEX IF NOT EXISTS idx_v2_outbox_recipients_pending
 		}
 		if !migrated {
 			return fmt.Errorf("v2: MigrateSchema: exceeded 10 alias retries for helper profile %s", hid)
+		}
+	}
+
+	// ── Task 11C: payment observability columns on v2_helper_purchases ───────
+	if !helperPurchasesHasLastCheckAttempt {
+		if _, err := tx.ExecContext(ctx,
+			`ALTER TABLE v2_helper_purchases ADD COLUMN last_check_attempt_at INTEGER`,
+		); err != nil {
+			return fmt.Errorf("v2: MigrateSchema: add last_check_attempt_at: %w", err)
+		}
+	}
+	if !helperPurchasesHasLastSuccessfulCheck {
+		if _, err := tx.ExecContext(ctx,
+			`ALTER TABLE v2_helper_purchases ADD COLUMN last_successful_chain_check_at INTEGER`,
+		); err != nil {
+			return fmt.Errorf("v2: MigrateSchema: add last_successful_chain_check_at: %w", err)
+		}
+	}
+
+	// ── Task 11G: available_at column on v2_review_entitlements ──────────────
+	if !reviewEntitlementsHasAvailableAt {
+		if _, err := tx.ExecContext(ctx,
+			`ALTER TABLE v2_review_entitlements ADD COLUMN available_at INTEGER NOT NULL DEFAULT 0`,
+		); err != nil {
+			return fmt.Errorf("v2: MigrateSchema: add available_at: %w", err)
+		}
+		// Migrate existing rows: set available_at = created_at + 3600 WHERE available_at = 0.
+		// This is idempotent: rows already populated will have available_at != 0 and are skipped.
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE v2_review_entitlements SET available_at = created_at + 3600 WHERE available_at = 0`,
+		); err != nil {
+			return fmt.Errorf("v2: MigrateSchema: backfill available_at: %w", err)
 		}
 	}
 

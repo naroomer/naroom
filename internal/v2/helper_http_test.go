@@ -3,6 +3,7 @@ package v2
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"math"
 	"net/http"
@@ -151,6 +152,94 @@ func TestHelperHTTP_TokenOnlyInCreate(t *testing.T) {
 	// Phase must be awaiting_payment.
 	if restoreResp["phase"] != "awaiting_payment" {
 		t.Errorf("restore phase: %v", restoreResp["phase"])
+	}
+}
+
+func TestHelperHTTP_RestorePaymentObservabilityUsesRecordedChecks(t *testing.T) {
+	h, svc := newTestHelperHandler(t, 1100.0)
+	listingID := mustCreateVisibleListing(t, svc.db, "US")
+	rawToken := newID()
+
+	rr := helperPost(t, h.Routes(), "/v2/helper/contact-purchases", map[string]string{
+		"purchase_token": rawToken,
+		"listing_id":     listingID,
+		"wallet_address": testBTCBech32Addr,
+	})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("create: status %d, body: %s", rr.Code, rr.Body)
+	}
+	var createBody map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&createBody); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+	purchaseID, ok := createBody["purchase_id"].(string)
+	if !ok || purchaseID == "" {
+		t.Fatalf("create response missing purchase_id: %v", createBody)
+	}
+
+	restore := func(wantStatus string) map[string]any {
+		t.Helper()
+		got := helperPost(t, h.Routes(), "/v2/helper/contact-purchases/restore", map[string]string{
+			"purchase_token": rawToken,
+			"wallet_address": testBTCBech32Addr,
+		})
+		if got.Code != http.StatusOK {
+			t.Fatalf("restore: status %d, body: %s", got.Code, got.Body)
+		}
+		if got.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("restore Cache-Control = %q, want no-store", got.Header().Get("Cache-Control"))
+		}
+		var body map[string]any
+		if err := json.NewDecoder(got.Body).Decode(&body); err != nil {
+			t.Fatalf("decode restore: %v", err)
+		}
+		if body["provider_status"] != wantStatus {
+			t.Fatalf("provider_status = %v, want %q; body=%v", body["provider_status"], wantStatus, body)
+		}
+		for _, forbidden := range []string{"next_check_at", "confirmations", "required_confirmations"} {
+			if _, exists := body[forbidden]; exists {
+				t.Fatalf("restore must not expose synthetic field %q", forbidden)
+			}
+		}
+		return body
+	}
+
+	initial := restore("checking")
+	if _, exists := initial["last_check_attempt_at"]; exists {
+		t.Fatal("checking response must not invent last_check_attempt_at")
+	}
+	if _, exists := initial["last_successful_chain_check_at"]; exists {
+		t.Fatal("checking response must not invent last_successful_chain_check_at")
+	}
+
+	now := time.Now().Unix()
+	if _, err := svc.db.Exec(`
+		UPDATE v2_helper_purchases
+		SET last_check_attempt_at = ?, last_successful_chain_check_at = NULL, updated_at = ?
+		WHERE id = ?`,
+		now, now, purchaseID,
+	); err != nil {
+		t.Fatalf("set degraded observability: %v", err)
+	}
+	degraded := restore("degraded")
+	if _, exists := degraded["last_check_attempt_at"]; !exists {
+		t.Fatal("degraded response must expose the recorded attempt timestamp")
+	}
+	if _, exists := degraded["last_successful_chain_check_at"]; exists {
+		t.Fatal("degraded response must not invent a successful check timestamp")
+	}
+
+	if _, err := svc.db.Exec(`
+		UPDATE v2_helper_purchases
+		SET last_successful_chain_check_at = ?, updated_at = ?
+		WHERE id = ?`,
+		now, now, purchaseID,
+	); err != nil {
+		t.Fatalf("set healthy observability: %v", err)
+	}
+	healthy := restore("healthy")
+	if _, exists := healthy["last_successful_chain_check_at"]; !exists {
+		t.Fatal("healthy response must expose the recorded successful check timestamp")
 	}
 }
 
@@ -1404,5 +1493,192 @@ func TestHelperHTTP_NoBindingReturns409(t *testing.T) {
 	}
 	if body["code"] != codeClientNotificationUnavailable {
 		t.Errorf("response code: want %q, got %q", codeClientNotificationUnavailable, body["code"])
+	}
+}
+
+func TestHelperHTTP_HandoffConcurrentRedeemHasSafeLoser(t *testing.T) {
+	svc, db := newTestHelperService(t)
+	_, _, rawBrowserToken, walletAddr, currency := mustCreateContactReadyPurchaseForHandoff(t, svc, db)
+	rawHandoff, _, err := svc.CreateHandoff(rawBrowserToken, walletAddr, currency)
+	if err != nil {
+		t.Fatalf("CreateHandoff: %v", err)
+	}
+
+	h, err := NewHelperPurchaseHandler(
+		svc,
+		&fakeHelperIssuer{},
+		&fakeHelperBalance{result: 1100},
+		testHMACKey,
+		time.Now,
+	)
+	if err != nil {
+		t.Fatalf("NewHelperPurchaseHandler: %v", err)
+	}
+	handler := h.Routes()
+	payload, err := json.Marshal(map[string]string{
+		"token":          rawHandoff,
+		"wallet_address": walletAddr,
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	type redeemResult struct {
+		status int
+		body   string
+	}
+	start := make(chan struct{})
+	results := make(chan redeemResult, 2)
+	for range 2 {
+		go func() {
+			<-start
+			req := httptest.NewRequest(http.MethodPost, "/v2/helper/handoff/redeem", bytes.NewReader(payload))
+			req.Header.Set("Content-Type", "application/json")
+			req.RemoteAddr = "127.0.0.1:1234"
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			results <- redeemResult{status: rr.Code, body: rr.Body.String()}
+		}()
+	}
+	close(start)
+
+	got := []redeemResult{<-results, <-results}
+	var success, safeLoser int
+	const safeBody = "{\"error\":\"purchase not found\",\"code\":\"purchase_not_found\"}\n"
+	for _, result := range got {
+		switch {
+		case result.status == http.StatusOK:
+			success++
+		case result.status == http.StatusNotFound && result.body == safeBody:
+			safeLoser++
+		default:
+			t.Fatalf("unexpected concurrent redeem response: status=%d body=%q", result.status, result.body)
+		}
+	}
+	if success != 1 || safeLoser != 1 {
+		t.Fatalf("concurrent redeem results: success=%d safe_loser=%d, want 1/1", success, safeLoser)
+	}
+}
+
+// mustCreateVisibleListingOwnedBy is a variant of mustCreateVisibleListing that sets
+// v2_client_flows.wallet_fingerprint to the real cross-check fingerprint of ownerAddr
+// (as computed by svc), so a self-purchase attempt from ownerAddr can be detected.
+func mustCreateVisibleListingOwnedBy(t *testing.T, svc *HelperPurchaseService, db *sql.DB, countryCode, ownerAddr string) string {
+	t.Helper()
+	normalized, currency, err := validateAndNormalizeAddress(ownerAddr)
+	if err != nil {
+		t.Fatalf("validateAndNormalizeAddress(%q): %v", ownerAddr, err)
+	}
+	ownerFP := svc.clientWalletFingerprintForCrossCheck(currency, normalized)
+
+	now := time.Now().Unix()
+	listingID := newID()
+	flowID := newID()
+	clientProfileID := mustInsertClientProfileForFlow(t, db, now)
+
+	if _, err := db.Exec(`
+		INSERT INTO v2_client_flows
+		  (id, wallet_fingerprint, currency, management_code_hash, state, client_profile_id, created_at, updated_at)
+		VALUES (?, ?, ?, 'ch1', 'form_ready', ?, ?, ?)`,
+		flowID, ownerFP, currency, clientProfileID, now, now,
+	); err != nil {
+		t.Fatalf("insert flow: %v", err)
+	}
+
+	invoiceID := newID()
+	entitlement := now + int64(entitlementDuration.Seconds())
+	if _, err := db.Exec(`
+		INSERT INTO v2_invoices
+		  (id, flow_id, status, payment_address, amount_usd_cents, amount_atomic,
+		   detection_deadline_at, detected_txid, payment_detected_at, confirmation_deadline_at,
+		   payment_txid, payment_confirmed_at, entitlement_expires_at, created_at, updated_at)
+		VALUES (?, ?, 'confirmed', 'addr1', 500, 100000,
+		        ?, 'txid1', ?, ?,
+		        'txid1', ?, ?, ?, ?)`,
+		invoiceID, flowID,
+		now+3600, now, now+86400,
+		now, entitlement, now, now,
+	); err != nil {
+		t.Fatalf("insert invoice: %v", err)
+	}
+
+	cipher, _ := NewAESGCMContactCipher(testAESKey, "v1")
+	ctHex, nonceHex, keyVer, _ := cipher.Encrypt("@testowner", listingID, flowID, "telegram")
+
+	visibleUntil := now + int64(listingDailyWindow.Seconds())
+	if _, err := db.Exec(`
+		INSERT INTO v2_listings
+		  (id, flow_id, city, country_code, dependency_type, help_type, urgency, languages,
+		   display_name, contact_type, contact_ciphertext, contact_nonce, contact_key_version,
+		   state, visible_until, first_published_at, last_activated_at, entitlement_expires_at,
+		   activation_count, created_at, updated_at)
+		VALUES (?, ?, 'TestCity', ?, 'housing', 'money', 'high', '["en"]',
+		        ?, 'telegram', ?, ?, ?,
+		        'visible', ?, ?, ?, ?,
+		        1, ?, ?)`,
+		listingID, flowID, countryCode,
+		"display_"+listingID[:8],
+		ctHex, nonceHex, keyVer,
+		visibleUntil, now, now, entitlement,
+		now, now,
+	); err != nil {
+		t.Fatalf("insert listing: %v", err)
+	}
+
+	mustInsertActiveBindingForFlow(t, db, flowID, now)
+	return listingID
+}
+
+// TestHelperHTTP_SelfPurchase_NoExternalCalls verifies the ACCEPTANCE_REPAIR P0
+// requirement: a self-purchase attempt (Helper wallet == listing owner wallet)
+// is rejected at handleCreate's early IsListingOwner check, BEFORE the balance
+// provider or invoice issuer are ever called, and creates zero purchase/invoice rows.
+func TestHelperHTTP_SelfPurchase_NoExternalCalls(t *testing.T) {
+	ci := &countingIssuer{}
+	cb := &countingBalance{result: 1100.0}
+	svc, db := newTestHelperService(t)
+	h, err := NewHelperPurchaseHandler(svc, ci, cb, testHMACKey, time.Now)
+	if err != nil {
+		t.Fatalf("NewHelperPurchaseHandler: %v", err)
+	}
+	listingID := mustCreateVisibleListingOwnedBy(t, svc, db, "US", testBTCBech32Addr)
+
+	rr := helperPost(t, h.Routes(), "/v2/helper/contact-purchases", map[string]string{
+		"purchase_token": newID(),
+		"listing_id":     listingID,
+		"wallet_address": testBTCBech32Addr, // same wallet as the listing owner
+	})
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("self-purchase: want 409, got %d body: %s", rr.Code, rr.Body)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body["code"] != codeSelfPurchase {
+		t.Errorf("response code: want %q, got %q", codeSelfPurchase, body["code"])
+	}
+
+	cb.mu.Lock()
+	providerCalls := cb.calls
+	cb.mu.Unlock()
+	ci.mu.Lock()
+	issuerCalls := ci.calls
+	ci.mu.Unlock()
+	if providerCalls != 0 {
+		t.Errorf("balance provider calls: want 0, got %d", providerCalls)
+	}
+	if issuerCalls != 0 {
+		t.Errorf("issuer calls: want 0, got %d", issuerCalls)
+	}
+
+	var nPu, nI int
+	db.QueryRow(`SELECT COUNT(*) FROM v2_helper_purchases WHERE listing_id = ?`, listingID).Scan(&nPu) //nolint:errcheck
+	db.QueryRow(`SELECT COUNT(*) FROM v2_helper_invoices`).Scan(&nI)                                   //nolint:errcheck
+	if nPu != 0 {
+		t.Errorf("helper_purchases: want 0, got %d", nPu)
+	}
+	if nI != 0 {
+		t.Errorf("helper_invoices: want 0, got %d", nI)
 	}
 }

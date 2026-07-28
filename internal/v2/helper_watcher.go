@@ -143,11 +143,25 @@ func (w *HelperPurchaseWatcher) processHelperPending(ctx context.Context, p Help
 		return false, true
 	}
 
+	// Record chain check attempt timestamp before calling the provider.
+	attemptAt := w.now().Unix()
+	_, _ = w.svc.db.Exec(
+		`UPDATE v2_helper_purchases SET last_check_attempt_at = ?, updated_at = ? WHERE id = ?`,
+		attemptAt, attemptAt, p.PurchaseID,
+	)
+
 	txs, err := client.GetInvoiceTxs(ctx, p.PaymentAddress)
 	if err != nil {
 		slog.Error("v2 helper watcher: get invoice txs", "err", "[internal]")
 		return true, true
 	}
+
+	// Record successful chain check timestamp.
+	successAt := w.now().Unix()
+	_, _ = w.svc.db.Exec(
+		`UPDATE v2_helper_purchases SET last_successful_chain_check_at = ?, updated_at = ? WHERE id = ?`,
+		successAt, successAt, p.PurchaseID,
+	)
 
 	for _, tx := range txs {
 		if tx.AmountAtomic < p.AmountAtomic {
@@ -199,11 +213,26 @@ func (w *HelperPurchaseWatcher) processHelperDetected(ctx context.Context, p Hel
 		return false, true
 	}
 
+	// The provider status exposed by restore is based on real watcher calls.
+	// Record both detected-stage attempts and successes; otherwise the UI can
+	// misleadingly look stale while confirmation polling is working normally.
+	attemptAt := w.now().Unix()
+	_, _ = w.svc.db.Exec(
+		`UPDATE v2_helper_purchases SET last_check_attempt_at = ?, updated_at = ? WHERE id = ?`,
+		attemptAt, attemptAt, p.PurchaseID,
+	)
+
 	txs, err := client.GetInvoiceTxs(ctx, p.PaymentAddress)
 	if err != nil {
 		slog.Error("v2 helper watcher: get txs for confirmation", "err", "[internal]")
 		return true, true
 	}
+
+	successAt := w.now().Unix()
+	_, _ = w.svc.db.Exec(
+		`UPDATE v2_helper_purchases SET last_successful_chain_check_at = ?, updated_at = ? WHERE id = ?`,
+		successAt, successAt, p.PurchaseID,
+	)
 
 	// We need to find the tx whose hash matches the stored txid_hash.
 	// We compute the hash of each candidate tx.

@@ -48,6 +48,16 @@ var (
 	ErrReviewCapabilityNotFound = errors.New("v2: helper review capability not found")
 )
 
+// ErrReviewGated is returned when available_at is in the future.
+// It wraps ErrReviewNotYetAvailable and carries the available_at timestamp
+// so HTTP handlers can return a 403 with the countdown target.
+type ErrReviewGated struct {
+	AvailableAt int64 // unix seconds
+}
+
+func (e *ErrReviewGated) Error() string { return ErrReviewNotYetAvailable.Error() }
+func (e *ErrReviewGated) Unwrap() error { return ErrReviewNotYetAvailable }
+
 // ── Safe view types ───────────────────────────────────────────────────────────
 
 // ClientReputationView is the public reputation snapshot of a Client profile.
@@ -245,21 +255,22 @@ func getOrCreateClientProfileTx(tx *sql.Tx, walletFP, currency string, now int64
 	return "", errors.New("v2: getOrCreateClientProfileTx: alias collision exhausted after 10 retries")
 }
 
-// createReviewEntitlementsTx inserts both review entitlements (client + helper) within
-// an existing transaction. contactReadyAt is the unix timestamp of the transition.
-// Both entitlements get expires_at = contactReadyAt + 86400.
-// The caller must verify idempotency (check entitlements don't already exist) before calling.
-func createReviewEntitlementsTx(
+// createReviewEntitlementsTxWithAvailableAt is the canonical implementation.
+// firstRevealedAt is used as created_at; availableAt is stored directly; expires_at = firstRevealedAt + 86400.
+// Pass availableAt = firstRevealedAt + 3600 for the Task 11G 1-hour delay.
+// Tests that need an already-open review window may pass availableAt = 0.
+func createReviewEntitlementsTxWithAvailableAt(
 	tx *sql.Tx,
 	purchaseID, helperProfileID, clientProfileID string,
-	contactReadyAt, nowUnix int64,
+	firstRevealedAt, availableAt, nowUnix int64,
 ) error {
-	expiresAt := contactReadyAt + 86400
+	createdAt := firstRevealedAt
+	expiresAt := firstRevealedAt + 86400
 
 	// Client entitlement: client reviews helper.
 	clientRawRef, clientRef, err := newReviewRef()
 	if err != nil {
-		return fmt.Errorf("v2: createReviewEntitlementsTx: client ref: %w", err)
+		return fmt.Errorf("v2: createReviewEntitlementsTxWithAvailableAt: client ref: %w", err)
 	}
 	_ = clientRawRef // stored in DB via review_ref; raw bytes not needed here
 	clientEntitlementID := newID()
@@ -267,32 +278,32 @@ func createReviewEntitlementsTx(
 		INSERT INTO v2_review_entitlements
 		  (id, purchase_id, reviewer_side, review_ref,
 		   target_helper_profile_id, target_client_profile_id,
-		   expires_at, created_at, updated_at)
-		VALUES (?, ?, 'client', ?, ?, NULL, ?, ?, ?)`,
+		   available_at, expires_at, created_at, updated_at)
+		VALUES (?, ?, 'client', ?, ?, NULL, ?, ?, ?, ?)`,
 		clientEntitlementID, purchaseID, clientRef,
-		helperProfileID, expiresAt, contactReadyAt, nowUnix,
+		helperProfileID, availableAt, expiresAt, createdAt, nowUnix,
 	)
 	if err != nil {
-		return fmt.Errorf("v2: createReviewEntitlementsTx: client insert: [internal]")
+		return fmt.Errorf("v2: createReviewEntitlementsTxWithAvailableAt: client insert: [internal]")
 	}
 
 	// Helper entitlement: helper reviews client.
 	_, helperRef, err := newReviewRef()
 	if err != nil {
-		return fmt.Errorf("v2: createReviewEntitlementsTx: helper ref: %w", err)
+		return fmt.Errorf("v2: createReviewEntitlementsTxWithAvailableAt: helper ref: %w", err)
 	}
 	helperEntitlementID := newID()
 	_, err = tx.Exec(`
 		INSERT INTO v2_review_entitlements
 		  (id, purchase_id, reviewer_side, review_ref,
 		   target_helper_profile_id, target_client_profile_id,
-		   expires_at, created_at, updated_at)
-		VALUES (?, ?, 'helper', ?, NULL, ?, ?, ?, ?)`,
+		   available_at, expires_at, created_at, updated_at)
+		VALUES (?, ?, 'helper', ?, NULL, ?, ?, ?, ?, ?)`,
 		helperEntitlementID, purchaseID, helperRef,
-		clientProfileID, expiresAt, contactReadyAt, nowUnix,
+		clientProfileID, availableAt, expiresAt, createdAt, nowUnix,
 	)
 	if err != nil {
-		return fmt.Errorf("v2: createReviewEntitlementsTx: helper insert: [internal]")
+		return fmt.Errorf("v2: createReviewEntitlementsTxWithAvailableAt: helper insert: [internal]")
 	}
 
 	return nil
@@ -375,17 +386,25 @@ func (rs *ReviewService) GetHelperReviewCapability(
 	// Read Helper entitlement for this purchase.
 	var reviewRef string
 	var expiresAt int64
+	var availableAt int64
 	err = rs.db.QueryRow(`
-		SELECT review_ref, expires_at
+		SELECT review_ref, expires_at, available_at
 		FROM v2_review_entitlements
 		WHERE purchase_id = ? AND reviewer_side = 'helper'`,
 		purchaseID,
-	).Scan(&reviewRef, &expiresAt)
+	).Scan(&reviewRef, &expiresAt, &availableAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return HelperReviewCapabilityResult{}, ErrReviewCapabilityNotFound
 	}
 	if err != nil {
 		return HelperReviewCapabilityResult{}, fmt.Errorf("v2: GetHelperReviewCapability: read entitlement: %w", err)
+	}
+
+	// Check not yet available: available_at > 0 AND now < available_at → not yet available.
+	// Return ErrReviewGated (wraps ErrReviewNotYetAvailable) so HTTP handlers can send 403 + available_at.
+	// available_at = 0 means immediately available (legacy / zero-delay path).
+	if availableAt > 0 && nowUnix < availableAt {
+		return HelperReviewCapabilityResult{}, &ErrReviewGated{AvailableAt: availableAt}
 	}
 
 	// Check expiry: now > expires_at → expired.
@@ -485,6 +504,7 @@ func (rs *ReviewService) consumeEntitlement(side, reviewRef, rating string, nowU
 	// Read entitlement.
 	var (
 		entID            string
+		availableAt      int64
 		expiresAt        int64
 		storedRating     sql.NullString
 		storedConsumedAt sql.NullInt64
@@ -492,12 +512,12 @@ func (rs *ReviewService) consumeEntitlement(side, reviewRef, rating string, nowU
 		targetClientID   sql.NullString
 	)
 	err = tx.QueryRow(`
-		SELECT id, expires_at, rating, consumed_at,
+		SELECT id, available_at, expires_at, rating, consumed_at,
 		       target_helper_profile_id, target_client_profile_id
 		FROM v2_review_entitlements
 		WHERE review_ref = ? AND reviewer_side = ?`,
 		reviewRef, side,
-	).Scan(&entID, &expiresAt, &storedRating, &storedConsumedAt, &targetHelperID, &targetClientID)
+	).Scan(&entID, &availableAt, &expiresAt, &storedRating, &storedConsumedAt, &targetHelperID, &targetClientID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrReviewNotFound
 	}
@@ -505,12 +525,8 @@ func (rs *ReviewService) consumeEntitlement(side, reviewRef, rating string, nowU
 		return fmt.Errorf("v2: consumeEntitlement: read: %w", err)
 	}
 
-	// Check expiry: strictly greater means expired.
-	if nowUnix > expiresAt {
-		return ErrReviewExpired
-	}
-
-	// Already consumed?
+	// Already consumed? Check idempotency BEFORE availability/expiry gates so
+	// a repeat call with the correct rating always succeeds regardless of timing.
 	if storedConsumedAt.Valid {
 		// Idempotent exact repeat.
 		if storedRating.Valid && storedRating.String == rating {
@@ -518,6 +534,21 @@ func (rs *ReviewService) consumeEntitlement(side, reviewRef, rating string, nowU
 		}
 		// Different rating → already consumed with other value.
 		return ErrReviewAlreadyConsumed
+	}
+
+	// Check not yet available: available_at > 0 AND now < available_at → not yet available.
+	// available_at = 0 means immediately available (legacy / migration default).
+	// Wrap in ErrReviewGated (carries available_at) so both the website submit path
+	// and the capability path can surface a stable domain response with a countdown
+	// target instead of an unhandled 500. errors.Is(err, ErrReviewNotYetAvailable)
+	// still succeeds via Unwrap().
+	if availableAt > 0 && nowUnix < availableAt {
+		return &ErrReviewGated{AvailableAt: availableAt}
+	}
+
+	// Check expiry: strictly greater means expired.
+	if nowUnix > expiresAt {
+		return ErrReviewExpired
 	}
 
 	// CAS consume: only if rating IS NULL (not yet consumed).
@@ -682,6 +713,17 @@ func (rs *ReviewService) CleanupExpiredReviews(now time.Time) error {
 		return fmt.Errorf("v2: CleanupExpiredReviews: delete snapshots: %w", err)
 	}
 
+	// Expire stale immediate notices (permanent_failure on pending past expires_at).
+	_, err = tx.Exec(`
+		UPDATE v2_review_immediate_notices
+		SET state = 'permanent_failure', chat_id_ciphertext = NULL, chat_id_nonce = NULL, updated_at = ?
+		WHERE state = 'pending' AND ? > expires_at`,
+		nowUnix, nowUnix,
+	)
+	if err != nil {
+		return fmt.Errorf("v2: CleanupExpiredReviews: expire immediate notices: %w", err)
+	}
+
 	return tx.Commit()
 }
 
@@ -699,7 +741,9 @@ type PendingDeliverySnapshot struct {
 }
 
 // LoadPendingDeliverySnapshots returns snapshots in 'pending_send' state whose
-// review window has not yet expired.
+// review window has not yet expired AND whose available_at has been reached.
+// Only delayed prompts (created at first_revealed_at) are returned here;
+// immediate notices are handled by LoadPendingImmediateNotices.
 func (rs *ReviewService) LoadPendingDeliverySnapshots(now time.Time) ([]PendingDeliverySnapshot, error) {
 	nowUnix := now.Unix()
 	rows, err := rs.db.Query(`
@@ -711,8 +755,9 @@ func (rs *ReviewService) LoadPendingDeliverySnapshots(now time.Time) ([]PendingD
 		JOIN v2_review_entitlements re
 		     ON re.purchase_id = ds.purchase_id AND re.reviewer_side = 'client'
 		WHERE ds.state = 'pending_send'
-		  AND ds.expires_at >= ?`,
-		nowUnix,
+		  AND ds.expires_at >= ?
+		  AND (re.available_at = 0 OR re.available_at <= ?)`,
+		nowUnix, nowUnix,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("v2: LoadPendingDeliverySnapshots: query: %w", err)
@@ -734,6 +779,79 @@ func (rs *ReviewService) LoadPendingDeliverySnapshots(now time.Time) ([]PendingD
 		result = append(result, snap)
 	}
 	return result, rows.Err()
+}
+
+// PendingImmediateNotice is returned by LoadPendingImmediateNotices.
+// It carries the encrypted Client destination for the immediate purchase notice
+// (sent at contact_ready WITHOUT review buttons).
+type PendingImmediateNotice struct {
+	NoticeID           string
+	PurchaseID         string
+	BindingRefSnapshot string
+	ChatIDCiphertext   string
+	ChatIDNonce        string
+	KeyVersion         string
+	HelperProfileID    string
+	ExpiresAt          time.Time
+}
+
+// LoadPendingImmediateNotices returns immediate notices in 'pending' state
+// that have not yet expired.
+func (rs *ReviewService) LoadPendingImmediateNotices(now time.Time) ([]PendingImmediateNotice, error) {
+	nowUnix := now.Unix()
+	rows, err := rs.db.Query(`
+		SELECT id, purchase_id, binding_ref_snapshot,
+		       chat_id_ciphertext, chat_id_nonce, key_version,
+		       helper_profile_id, expires_at
+		FROM v2_review_immediate_notices
+		WHERE state = 'pending' AND expires_at >= ?`,
+		nowUnix,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("v2: LoadPendingImmediateNotices: query: %w", err)
+	}
+	defer rows.Close()
+
+	var result []PendingImmediateNotice
+	for rows.Next() {
+		var n PendingImmediateNotice
+		var exp int64
+		if err = rows.Scan(
+			&n.NoticeID, &n.PurchaseID, &n.BindingRefSnapshot,
+			&n.ChatIDCiphertext, &n.ChatIDNonce, &n.KeyVersion,
+			&n.HelperProfileID, &exp,
+		); err != nil {
+			return nil, fmt.Errorf("v2: LoadPendingImmediateNotices: scan: %w", err)
+		}
+		n.ExpiresAt = time.Unix(exp, 0)
+		result = append(result, n)
+	}
+	return result, rows.Err()
+}
+
+// MarkNoticeSent marks an immediate notice as sent and NULLs the encrypted destination.
+func (rs *ReviewService) MarkNoticeSent(noticeID string) error {
+	nowUnix := rs.now().Unix()
+	_, err := rs.db.Exec(`
+		UPDATE v2_review_immediate_notices
+		SET state = 'sent', chat_id_ciphertext = NULL, chat_id_nonce = NULL, updated_at = ?
+		WHERE id = ? AND state = 'pending'`,
+		nowUnix, noticeID,
+	)
+	return err
+}
+
+// MarkNoticePermanentFailure marks an immediate notice as permanently failed
+// and NULLs the encrypted destination.
+func (rs *ReviewService) MarkNoticePermanentFailure(noticeID string) error {
+	nowUnix := rs.now().Unix()
+	_, err := rs.db.Exec(`
+		UPDATE v2_review_immediate_notices
+		SET state = 'permanent_failure', chat_id_ciphertext = NULL, chat_id_nonce = NULL, updated_at = ?
+		WHERE id = ? AND state = 'pending'`,
+		nowUnix, noticeID,
+	)
+	return err
 }
 
 // MarkSnapshotSent marks a snapshot as sent and NULLs the encrypted destination.
@@ -791,6 +909,9 @@ func helperWalletFingerprintReview(hmacKey []byte, currency, normalizedAddr stri
 // ReviewNotificationSender delivers review notification messages via Telegram.
 // Tests inject a stub that records calls without hitting the network.
 type ReviewNotificationSender interface {
+	// SendPlainMessage sends a plain text message with no inline keyboard.
+	// Used for the immediate purchase notice (no review buttons).
+	SendPlainMessage(ctx context.Context, chatID int64, text string) error
 	// SendReviewPrompt sends a message with thumb up/down inline buttons.
 	// posData and negData are the callback_data strings for the two buttons.
 	SendReviewPrompt(ctx context.Context, chatID int64, text, posData, negData string) error

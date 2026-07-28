@@ -74,12 +74,21 @@ func TestHelperWatcher_BTCFullFlow(t *testing.T) {
 	if view.InvoiceStatus != HPInvoiceDetected {
 		t.Errorf("after detection cycle: invoice status = %q, want %q", view.InvoiceStatus, HPInvoiceDetected)
 	}
+	if view.LastCheckAttemptAt == nil {
+		t.Error("after detection cycle: last_check_attempt_at must be recorded")
+	}
+	if view.LastSuccessfulChainCheckAt == nil {
+		t.Error("after detection cycle: last_successful_chain_check_at must be recorded")
+	}
 
 	// Cycle 2: 0 confirmations → stays detected.
 	w.ProcessOnce(ctx)
 	view, _ = svc.readPurchaseView(purchaseID)
 	if view.State != HPStatePaymentDetected {
 		t.Errorf("still detected: state = %q", view.State)
+	}
+	if view.LastCheckAttemptAt == nil || view.LastSuccessfulChainCheckAt == nil {
+		t.Error("confirmation polling must record both attempt and successful chain check")
 	}
 
 	// Tx gets confirmed.
@@ -285,6 +294,12 @@ func TestHelperWatcher_ProviderOutageAndDuplicateCycles(t *testing.T) {
 	if view.InvoiceStatus != HPInvoicePending {
 		t.Errorf("state changed during outage: %q", view.InvoiceStatus)
 	}
+	if view.LastCheckAttemptAt == nil {
+		t.Error("provider outage must still record last_check_attempt_at")
+	}
+	if view.LastSuccessfulChainCheckAt != nil {
+		t.Error("provider outage must not record last_successful_chain_check_at")
+	}
 
 	// Recovery.
 	chain.err = nil
@@ -300,6 +315,9 @@ func TestHelperWatcher_ProviderOutageAndDuplicateCycles(t *testing.T) {
 	view, _ = svc.readPurchaseView(purchaseID)
 	if view.State != HPStateContactReady {
 		t.Errorf("after recovery: state=%q, want contact_ready", view.State)
+	}
+	if view.LastCheckAttemptAt == nil || view.LastSuccessfulChainCheckAt == nil {
+		t.Error("provider recovery must record both attempt and successful chain check")
 	}
 
 	var pc int

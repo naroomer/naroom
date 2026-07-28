@@ -853,7 +853,7 @@ func TestHTTPRateLimitIsolation(t *testing.T) {
 		t.Errorf("ip2 hit rate limit of ip1: got 429 on first request")
 	}
 
-	const restoreLimit = 10
+	const restoreLimit = 60
 	body := map[string]string{"management_code": "fakecode", "wallet_address": "bc1qtest"}
 	ip3 := "10.0.0.3:1234"
 	for i := 1; i <= restoreLimit; i++ {

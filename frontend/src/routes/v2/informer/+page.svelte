@@ -1,10 +1,11 @@
 <script>
 	import { onMount, onDestroy } from 'svelte';
 	import { lang, t as tFn } from '$lib/i18n.js';
-	import { CITIES } from '$lib/cities.js';
+	// Cities loaded from API — no static registry in V2 frontend.
+	let citiesData = $state([]);
 
 	// Resolve city ID → display label for the success screen.
-	let cityLabel = $derived(CITIES.find(c => c.id === city)?.label ?? city);
+	let cityLabel = $derived(citiesData.find(c => c.id === city)?.label ?? city);
 
 	let t = $derived((key, params) => tFn($lang, key, params));
 
@@ -130,7 +131,14 @@
 		if (botUrl) window.open(botUrl, '_blank', 'noopener');
 	}
 
-	onMount(fetchPubConfig);
+	async function fetchCities() {
+		try {
+			const r = await fetch('/api/v2/board/cities');
+			if (r.ok) citiesData = await r.json();
+		} catch {}
+	}
+
+	onMount(() => { fetchPubConfig(); fetchCities(); });
 
 	onDestroy(() => {
 		stopPoll();
@@ -164,7 +172,7 @@
 			<div class="field">
 				<label>{t('v2.inf.city_label')}</label>
 				<select bind:value={city}>
-					{#each CITIES as c}
+					{#each citiesData as c}
 						<option value={c.id}>{c.label}</option>
 					{/each}
 				</select>

@@ -30,19 +30,29 @@ type tokenEntry struct {
 	waiters int // protected by HelperPurchaseHandler.tokenMu
 }
 
-// HelperPurchaseHandler holds dependencies for the four V2 Helper HTTP endpoints.
+// HelperPurchaseHandler holds dependencies for the V2 Helper HTTP endpoints.
 type HelperPurchaseHandler struct {
-	svc          *HelperPurchaseService
-	issuer       HelperInvoiceIssuerHTTP
-	balance      ClientBalanceReader
-	rateLimitKey []byte
-	createLim    *fixedWindowLimiter
-	restoreLim   *fixedWindowLimiter
-	recheckLim   *fixedWindowLimiter
-	revealLim    *fixedWindowLimiter
+	svc              *HelperPurchaseService
+	issuer           HelperInvoiceIssuerHTTP
+	balance          ClientBalanceReader
+	rateLimitKey     []byte
+	createLim        *fixedWindowLimiter
+	restoreLim       *fixedWindowLimiter
+	recheckLim       *fixedWindowLimiter
+	revealLim        *fixedWindowLimiter
+	handoffCreateLim *fixedWindowLimiter
+	handoffRedeemLim *fixedWindowLimiter
+	reminderLim      *fixedWindowLimiter
+	botUsername      string // optional; if empty, reminder-link endpoint returns 503
 	// keyed lock for concurrent create requests with the same token hash
 	tokenMu    sync.Mutex
 	tokenLocks map[string]*tokenEntry
+}
+
+// SetBotUsername configures the Telegram bot username (without @) used to
+// construct deep links for the optional Helper review reminder feature.
+func (h *HelperPurchaseHandler) SetBotUsername(username string) {
+	h.botUsername = username
 }
 
 // Stable error code constants for all Helper routes.
@@ -60,6 +70,7 @@ const (
 	codeReceiptExpired                = "receipt_expired"
 	codeClientNotificationUnavailable = "client_notification_unavailable"
 	codeDuplicatePurchase             = "duplicate_active_purchase"
+	codeSelfPurchase                  = "self_purchase_not_allowed"
 	codeInternalError                 = "internal_error"
 )
 
@@ -106,10 +117,15 @@ func NewHelperPurchaseHandler(
 		balance:      balance,
 		rateLimitKey: keyCopy,
 		createLim:    newFixedWindowLimiter(5, time.Minute, maxE, now),
-		restoreLim:   newFixedWindowLimiter(10, time.Minute, maxE, now),
-		recheckLim:   newFixedWindowLimiter(5, time.Minute, maxE, now),
-		revealLim:    newFixedWindowLimiter(5, time.Minute, maxE, now),
-		tokenLocks:   make(map[string]*tokenEntry),
+		// The payment page polls restore every five seconds (12/minute).
+		// Handoff and reloads must not make a legitimate session self-throttle.
+		restoreLim:       newFixedWindowLimiter(60, time.Minute, maxE, now),
+		recheckLim:       newFixedWindowLimiter(5, time.Minute, maxE, now),
+		revealLim:        newFixedWindowLimiter(5, time.Minute, maxE, now),
+		handoffCreateLim: newFixedWindowLimiter(3, 10*time.Minute, maxE, now),
+		handoffRedeemLim: newFixedWindowLimiter(5, 10*time.Minute, maxE, now),
+		reminderLim:      newFixedWindowLimiter(3, 10*time.Minute, maxE, now),
+		tokenLocks:       make(map[string]*tokenEntry),
 	}, nil
 }
 
@@ -138,7 +154,7 @@ func (h *HelperPurchaseHandler) acquireTokenLock(key string) func() {
 	}
 }
 
-// Routes returns an http.Handler with the four Helper endpoints.
+// Routes returns an http.Handler with all Helper endpoints.
 // This handler is test-only and must NOT be mounted in cmd/naroom/main.go.
 func (h *HelperPurchaseHandler) Routes() http.Handler {
 	mux := http.NewServeMux()
@@ -146,6 +162,9 @@ func (h *HelperPurchaseHandler) Routes() http.Handler {
 	mux.HandleFunc("POST /v2/helper/contact-purchases/restore", h.handleRestore)
 	mux.HandleFunc("POST /v2/helper/contact-purchases/recheck-balance", h.handleRecheckBalance)
 	mux.HandleFunc("POST /v2/helper/contact-purchases/reveal", h.handleReveal)
+	mux.HandleFunc("POST /v2/helper/handoff/create", h.handleHandoffCreate)
+	mux.HandleFunc("POST /v2/helper/handoff/redeem", h.handleHandoffRedeem)
+	mux.HandleFunc("POST /v2/helper/reviews/reminder-link", h.handleReminderLink)
 	return mux
 }
 
@@ -306,6 +325,18 @@ func (h *HelperPurchaseHandler) handleCreate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Self-purchase guard: check BEFORE balance/invoice provider calls.
+	// No external service is called if the wallet owns this listing.
+	isSelf, selfErr := h.svc.IsListingOwner(req.ListingID, currency, normalized)
+	if selfErr != nil {
+		helperError(w, http.StatusInternalServerError, "internal error", codeInternalError)
+		return
+	}
+	if isSelf {
+		helperError(w, http.StatusConflict, "owner wallet cannot purchase own listing", codeSelfPurchase)
+		return
+	}
+
 	// Server-side balance check.
 	balanceUSD, err := h.balance.BalanceUSD(r.Context(), normalized, currency)
 	if err != nil {
@@ -350,6 +381,10 @@ func (h *HelperPurchaseHandler) handleCreate(w http.ResponseWriter, r *http.Requ
 		}
 		if errors.Is(err, ErrHelperDuplicateActivePurchase) {
 			helperError(w, http.StatusConflict, "active purchase already exists for this listing", codeDuplicatePurchase)
+			return
+		}
+		if errors.Is(err, ErrHelperSelfPurchase) {
+			helperError(w, http.StatusConflict, "owner wallet cannot purchase own listing", codeSelfPurchase)
 			return
 		}
 		if errors.Is(err, ErrReviewNoBinding) {
@@ -409,6 +444,15 @@ type helperRestoreResponse struct {
 	LastBalanceUSD         *float64 `json:"last_balance_usd,omitempty"`
 	ContactReadyAt         *int64   `json:"contact_ready_at,omitempty"`
 	ReceiptExpiresAt       *int64   `json:"receipt_expires_at,omitempty"`
+
+	// Task 11C: payment observability fields.
+	LastCheckAttemptAt         *int64 `json:"last_check_attempt_at,omitempty"`
+	LastSuccessfulChainCheckAt *int64 `json:"last_successful_chain_check_at,omitempty"`
+	ProviderStatus             string `json:"provider_status,omitempty"`
+
+	// Task 11G: review entitlement fields.
+	ReviewAvailableAt *int64 `json:"review_available_at,omitempty"`
+	ReviewExpiresAt   *int64 `json:"review_expires_at,omitempty"`
 }
 
 func helperPurchasePhase(state string) (phase, nextAction string) {
@@ -473,6 +517,7 @@ func (h *HelperPurchaseHandler) handleRestore(w http.ResponseWriter, r *http.Req
 	}
 
 	phase, nextAction := helperPurchasePhase(view.State)
+	now := h.svc.now()
 	resp := helperRestoreResponse{
 		PurchaseID:       view.PurchaseID,
 		Phase:            phase,
@@ -498,7 +543,44 @@ func (h *HelperPurchaseHandler) handleRestore(w http.ResponseWriter, r *http.Req
 		resp.ReceiptExpiresAt = &u
 	}
 
+	// Task 11C / 11-REPAIR-E: payment observability fields.
+	if view.LastCheckAttemptAt != nil {
+		u := view.LastCheckAttemptAt.Unix()
+		resp.LastCheckAttemptAt = &u
+	}
+	if view.LastSuccessfulChainCheckAt != nil {
+		u := view.LastSuccessfulChainCheckAt.Unix()
+		resp.LastSuccessfulChainCheckAt = &u
+	}
+	// provider_status: "healthy" if last_successful_chain_check_at within 60s,
+	// "degraded" if last_check_attempt_at set but not a recent success, "checking" otherwise.
+	// For terminal/non-payment states the watcher is no longer polling: do not show degraded.
+	const healthyWindow = 60
+	switch {
+	case view.State == HPStateContactReady || view.State == HPStateReceiptExpired:
+		// Watcher has stopped; purchase is complete. Show healthy (not degraded).
+		resp.ProviderStatus = "healthy"
+	case view.LastSuccessfulChainCheckAt != nil &&
+		now.Unix()-view.LastSuccessfulChainCheckAt.Unix() <= healthyWindow:
+		resp.ProviderStatus = "healthy"
+	case view.LastCheckAttemptAt != nil:
+		resp.ProviderStatus = "degraded"
+	default:
+		resp.ProviderStatus = "checking"
+	}
+
+	// Task 11G: review entitlement fields.
+	if view.ReviewAvailableAt != nil {
+		u := view.ReviewAvailableAt.Unix()
+		resp.ReviewAvailableAt = &u
+	}
+	if view.ReviewExpiresAt != nil {
+		u := view.ReviewExpiresAt.Unix()
+		resp.ReviewExpiresAt = &u
+	}
+
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	json.NewEncoder(w).Encode(resp) //nolint:errcheck
 }
 
@@ -704,4 +786,208 @@ func setNoStoreHeaders(w http.ResponseWriter) {
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+}
+
+// ── POST /v2/helper/handoff/create ────────────────────────────────────────────
+
+type helperHandoffCreateRequest struct {
+	PurchaseToken string `json:"purchase_token"`
+	WalletAddress string `json:"wallet_address"`
+}
+
+type helperHandoffCreateResponse struct {
+	Token            string `json:"token"`
+	ExpiresAt        int64  `json:"expires_at"`
+	ExpiresInSeconds int    `json:"expires_in_seconds"`
+}
+
+func (h *HelperPurchaseHandler) handleHandoffCreate(w http.ResponseWriter, r *http.Request) {
+	key := h.clientKeyHelper(r)
+	if !h.handoffCreateLim.Allow(key) {
+		helperError(w, http.StatusTooManyRequests, "rate limit exceeded", codeRateLimited)
+		return
+	}
+
+	var req helperHandoffCreateRequest
+	if !decodeStrict(w, r, &req) {
+		return
+	}
+
+	setNoStoreHeaders(w)
+
+	if strings.TrimSpace(req.PurchaseToken) == "" {
+		helperError(w, http.StatusBadRequest, "purchase_token is required", codeInvalidRequest)
+		return
+	}
+	if strings.TrimSpace(req.WalletAddress) == "" {
+		helperError(w, http.StatusBadRequest, "wallet_address is required", codeInvalidRequest)
+		return
+	}
+
+	normalized, currency, err := validateAndNormalizeAddress(req.WalletAddress)
+	if err != nil {
+		helperError(w, http.StatusNotFound, "purchase not found", codePurchaseNotFound)
+		return
+	}
+
+	rawToken, expiresAt, err := h.svc.CreateHandoff(req.PurchaseToken, normalized, currency)
+	if err != nil {
+		if errors.Is(err, ErrHelperNotFound) {
+			helperError(w, http.StatusNotFound, "purchase not found", codePurchaseNotFound)
+			return
+		}
+		helperError(w, http.StatusInternalServerError, "internal error", codeInternalError)
+		return
+	}
+
+	now := h.svc.now()
+	resp := helperHandoffCreateResponse{
+		Token:            rawToken,
+		ExpiresAt:        expiresAt.Unix(),
+		ExpiresInSeconds: int(expiresAt.Unix() - now.Unix()),
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(resp) //nolint:errcheck
+}
+
+// ── POST /v2/helper/handoff/redeem ────────────────────────────────────────────
+
+type helperHandoffRedeemRequest struct {
+	Token         string `json:"token"`
+	WalletAddress string `json:"wallet_address"`
+}
+
+type helperHandoffRedeemResponse struct {
+	BrowserToken string `json:"browser_token"`
+	PurchaseID   string `json:"purchase_id"`
+	Currency     string `json:"currency"`
+}
+
+func (h *HelperPurchaseHandler) handleHandoffRedeem(w http.ResponseWriter, r *http.Request) {
+	key := h.clientKeyHelper(r)
+	if !h.handoffRedeemLim.Allow(key) {
+		helperError(w, http.StatusTooManyRequests, "rate limit exceeded", codeRateLimited)
+		return
+	}
+
+	var req helperHandoffRedeemRequest
+	if !decodeStrict(w, r, &req) {
+		return
+	}
+
+	setNoStoreHeaders(w)
+
+	if strings.TrimSpace(req.Token) == "" {
+		helperError(w, http.StatusNotFound, "purchase not found", codePurchaseNotFound)
+		return
+	}
+	if strings.TrimSpace(req.WalletAddress) == "" {
+		helperError(w, http.StatusNotFound, "purchase not found", codePurchaseNotFound)
+		return
+	}
+
+	normalized, currency, err := validateAndNormalizeAddress(req.WalletAddress)
+	if err != nil {
+		helperError(w, http.StatusNotFound, "purchase not found", codePurchaseNotFound)
+		return
+	}
+	// currency is now detected from wallet_address, not from request body
+
+	// Serialize redeems for this opaque handoff capability. SQLite permits only
+	// one writer at a time; without this lock, concurrent redeems can surface a
+	// transient database-lock error instead of the same safe not-found response
+	// returned for replayed, expired, or otherwise invalid capabilities.
+	lockKey := h.svc.helperHandoffTokenHash(req.Token)
+	release := h.acquireTokenLock(lockKey)
+	defer release()
+
+	newBrowserToken, purchaseID, err := h.svc.RedeemHandoff(req.Token, normalized, currency)
+	if err != nil {
+		if errors.Is(err, ErrHelperNotFound) {
+			helperError(w, http.StatusNotFound, "purchase not found", codePurchaseNotFound)
+			return
+		}
+		helperError(w, http.StatusInternalServerError, "internal error", codeInternalError)
+		return
+	}
+
+	resp := helperHandoffRedeemResponse{
+		BrowserToken: newBrowserToken,
+		PurchaseID:   purchaseID,
+		Currency:     currency,
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	json.NewEncoder(w).Encode(resp) //nolint:errcheck
+}
+
+// ── POST /v2/helper/reviews/reminder-link ─────────────────────────────────────
+
+type helperReminderLinkRequest struct {
+	PurchaseToken string `json:"purchase_token"`
+	WalletAddress string `json:"wallet_address"`
+}
+
+type helperReminderLinkResponse struct {
+	BotURL           string `json:"bot_url"`
+	SendAt           int64  `json:"send_at"`
+	ExpiresAt        int64  `json:"expires_at"`
+	ExpiresInSeconds int    `json:"expires_in_seconds"`
+}
+
+func (h *HelperPurchaseHandler) handleReminderLink(w http.ResponseWriter, r *http.Request) {
+	if h.botUsername == "" {
+		helperError(w, http.StatusServiceUnavailable, "reminder feature not configured", codeInternalError)
+		return
+	}
+
+	key := h.clientKeyHelper(r)
+	if !h.reminderLim.Allow(key) {
+		helperError(w, http.StatusTooManyRequests, "rate limit exceeded", codeRateLimited)
+		return
+	}
+
+	var req helperReminderLinkRequest
+	if !decodeStrict(w, r, &req) {
+		return
+	}
+
+	setNoStoreHeaders(w)
+
+	if strings.TrimSpace(req.PurchaseToken) == "" {
+		helperError(w, http.StatusBadRequest, "purchase_token is required", codeInvalidRequest)
+		return
+	}
+	if strings.TrimSpace(req.WalletAddress) == "" {
+		helperError(w, http.StatusBadRequest, "wallet_address is required", codeInvalidRequest)
+		return
+	}
+
+	normalized, currency, err := validateAndNormalizeAddress(req.WalletAddress)
+	if err != nil {
+		helperError(w, http.StatusNotFound, "purchase not found", codePurchaseNotFound)
+		return
+	}
+
+	rawToken, sendAt, expiresAt, err := h.svc.CreateReviewReminderLink(req.PurchaseToken, normalized, currency)
+	if err != nil {
+		if errors.Is(err, ErrHelperNotFound) {
+			helperError(w, http.StatusNotFound, "purchase not found", codePurchaseNotFound)
+			return
+		}
+		helperError(w, http.StatusInternalServerError, "internal error", codeInternalError)
+		return
+	}
+
+	now := h.svc.now()
+	botURL := "https://t.me/" + h.botUsername + "?start=" + rawToken
+	resp := helperReminderLinkResponse{
+		BotURL:           botURL,
+		SendAt:           sendAt,
+		ExpiresAt:        expiresAt,
+		ExpiresInSeconds: int(expiresAt - now.Unix()),
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(resp) //nolint:errcheck
 }

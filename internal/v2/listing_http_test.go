@@ -1519,9 +1519,9 @@ func TestListingHTTPBoardContent(t *testing.T) {
 	h, transport, svc, ls, db := newJourneyHandlerWithUniqueName(t, nowFn, bal)
 	mux := h.Routes()
 
-	// Create 2 visible listings + 1 hidden.
+	// Create 2 visible listings (different wallets: one-visible-per-profile enforced) + 1 hidden.
 
-	// Flow 1 → visible.
+	// Flow 1 → visible (wallet A).
 	rawCode1, _ := makeFormReadyFlowForTransport(t, svc, testBTCBech32Addr)
 	rawToken1 := createPendingAttempt(t, transport, rawCode1, testBTCBech32Addr)
 	sendWebhook(transport, buildWebhookBody(1001, "private", "/start "+rawToken1), string(testWebhookSecret)) //nolint:errcheck
@@ -1530,11 +1530,11 @@ func TestListingHTTPBoardContent(t *testing.T) {
 		t.Fatalf("publish1: got %d; body: %s", w1.Code, w1.Body.String())
 	}
 
-	// Flow 2 → visible.
-	rawCode2, _ := makeFormReadyFlowForTransport(t, svc, testBTCBech32Addr)
-	rawToken2 := createPendingAttempt(t, transport, rawCode2, testBTCBech32Addr)
+	// Flow 2 → visible (wallet B — different profile, so one-visible-per-profile allows it).
+	rawCode2, _ := makeFormReadyFlowForTransport(t, svc, testBTCLegacyAddr)
+	rawToken2 := createPendingAttempt(t, transport, rawCode2, testBTCLegacyAddr)
 	sendWebhook(transport, buildWebhookBody(1002, "private", "/start "+rawToken2), string(testWebhookSecret)) //nolint:errcheck
-	w2 := journeyPost(mux, "/v2/client/listings/publish", publishBody(rawCode2, testBTCBech32Addr))
+	w2 := journeyPost(mux, "/v2/client/listings/publish", publishBody(rawCode2, testBTCLegacyAddr))
 	if w2.Code != http.StatusCreated {
 		t.Fatalf("publish2: got %d; body: %s", w2.Code, w2.Body.String())
 	}

@@ -21,6 +21,8 @@ const (
 	codeReviewExpired         = "review_expired"
 	codeReviewAlreadyConsumed = "review_already_consumed"
 	codeReviewInvalidRating   = "invalid_rating"
+	codeReviewNotYetAvailable = "review_not_yet_available"
+	// codeInternalError is shared with helper_http.go in package v2.
 )
 
 // reviewError writes {"error":"...","code":"..."} and sets no-store headers.
@@ -151,11 +153,22 @@ func (h *HelperReviewHandler) handleCapability(w http.ResponseWriter, r *http.Re
 
 	result, err := h.svc.GetHelperReviewCapability(req.PurchaseID, req.PurchaseToken, normalized, currency)
 	if err != nil {
+		var gated *ErrReviewGated
 		switch {
 		case errors.Is(err, ErrReviewCapabilityNotFound):
 			reviewError(w, http.StatusNotFound, "review capability not found", codeReviewNotFound)
 		case errors.Is(err, ErrReviewExpired):
 			reviewError(w, http.StatusGone, "review window has expired", codeReviewExpired)
+		case errors.As(err, &gated):
+			// Return 403 with available_at so the frontend can show a countdown.
+			setNoStoreHeaders(w)
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(struct { //nolint:errcheck
+				Error       string `json:"error"`
+				Code        string `json:"code"`
+				AvailableAt int64  `json:"available_at"`
+			}{"review not yet available", codeReviewNotYetAvailable, gated.AvailableAt})
 		default:
 			reviewError(w, http.StatusInternalServerError, "internal error", codeInternalError)
 		}
@@ -220,6 +233,7 @@ func (h *HelperReviewHandler) handleSubmit(w http.ResponseWriter, r *http.Reques
 
 	err := h.svc.SubmitHelperReview(req.ReviewToken, req.Rating)
 	if err != nil {
+		var gated *ErrReviewGated
 		switch {
 		case errors.Is(err, ErrReviewNotFound):
 			reviewError(w, http.StatusNotFound, "review not found", codeReviewNotFound)
@@ -227,6 +241,17 @@ func (h *HelperReviewHandler) handleSubmit(w http.ResponseWriter, r *http.Reques
 			reviewError(w, http.StatusGone, "review window has expired", codeReviewExpired)
 		case errors.Is(err, ErrReviewAlreadyConsumed):
 			reviewError(w, http.StatusConflict, "review already submitted", codeReviewAlreadyConsumed)
+		case errors.As(err, &gated):
+			// Return 403 with available_at so the frontend can show a countdown,
+			// the same stable domain response handleCapability returns.
+			setNoStoreHeaders(w)
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(struct { //nolint:errcheck
+				Error       string `json:"error"`
+				Code        string `json:"code"`
+				AvailableAt int64  `json:"available_at"`
+			}{"review not yet available", codeReviewNotYetAvailable, gated.AvailableAt})
 		default:
 			reviewError(w, http.StatusInternalServerError, "internal error", codeInternalError)
 		}

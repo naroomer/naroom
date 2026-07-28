@@ -348,6 +348,10 @@ CREATE TABLE IF NOT EXISTS v2_helper_purchases (
     listing_id                TEXT NOT NULL REFERENCES v2_listings(id),
     helper_profile_id         TEXT NOT NULL REFERENCES v2_helper_profiles(id),
     browser_token_hash        TEXT NOT NULL UNIQUE,
+    -- alt_browser_token_hash: issued to a second device via cross-device handoff redeem.
+    -- NULL until a handoff is redeemed; set atomically by RedeemHandoff (never rotated).
+    -- Both browser_token_hash and alt_browser_token_hash are accepted by RestorePurchase.
+    alt_browser_token_hash    TEXT UNIQUE,
     state                     TEXT NOT NULL DEFAULT 'awaiting_payment'
                                    CHECK (state IN (
                                        'awaiting_payment', 'payment_detected',
@@ -364,6 +368,8 @@ CREATE TABLE IF NOT EXISTS v2_helper_purchases (
                                           OR (last_balance_usd >= 0 AND last_balance_usd < 1e15)),
     last_balance_checked_at   INTEGER,
     required_post_payment_floor_usd REAL NOT NULL DEFAULT 1000.0,
+    last_check_attempt_at          INTEGER,
+    last_successful_chain_check_at INTEGER,
     created_at                INTEGER NOT NULL,
     updated_at                INTEGER NOT NULL,
 
@@ -536,7 +542,9 @@ CREATE TABLE IF NOT EXISTS v2_client_profiles (
 );
 
 -- v2_review_entitlements: one row per purchase × reviewer_side.
--- Created atomically in the same transaction as the contact_ready transition.
+-- Created atomically in the same transaction as the FIRST successful contact reveal
+-- (RevealHelperContact), not at contact_ready. Entitlements do not exist before the
+-- first reveal; no review clock runs until then.
 -- review_ref: opaque, random. Format: "rev_" + 32 lowercase hex chars (16 random bytes).
 -- The Helper website review token is derived server-side from review_ref + HMAC secret;
 -- the raw token is never stored. Telegram callback_data encodes the raw_ref only.
@@ -551,7 +559,11 @@ CREATE TABLE IF NOT EXISTS v2_review_entitlements (
     -- helper reviewer → target Client profile
     target_helper_profile_id TEXT REFERENCES v2_helper_profiles(id),
     target_client_profile_id TEXT REFERENCES v2_client_profiles(id),
-    -- expires_at = contact_ready_at + 86400 (enforced at application layer)
+    -- available_at = 0 means immediately available; > 0 means gated until that unix timestamp.
+    -- Default 0 for backward compat with pre-migration rows. Production path sets
+    -- available_at = first_revealed_at + 3600 on first reveal (Task 11G contract).
+    available_at             INTEGER NOT NULL DEFAULT 0,
+    -- expires_at = first_revealed_at + 86400 (enforced at application layer)
     expires_at               INTEGER NOT NULL,
     -- Before consume: both NULL. After consume: both NOT NULL.
     rating                   TEXT CHECK (rating IN ('positive', 'negative')),
@@ -586,8 +598,9 @@ CREATE TABLE IF NOT EXISTS v2_review_entitlements (
     -- Post-consume timestamp bounds
     CHECK (consumed_at IS NULL OR (consumed_at >= created_at AND consumed_at <= expires_at)),
 
-    -- Exact 24-hour window: createReviewEntitlementsTx uses created_at=contactReadyAt
-    -- so expires_at = contactReadyAt + 86400 = created_at + 86400.
+    -- Exact 24-hour window: createReviewEntitlementsTxWithAvailableAt uses
+    -- created_at = first_revealed_at, so expires_at = first_revealed_at + 86400
+    -- = created_at + 86400.
     CHECK (expires_at = created_at + 86400),
     CHECK (updated_at >= created_at)
 );
@@ -632,9 +645,37 @@ CREATE TABLE IF NOT EXISTS v2_review_delivery_snapshots (
     CHECK (expires_at > created_at)
 );
 
+-- v2_review_immediate_notices: immediate purchase notice sent to Client at contact_ready.
+-- Does NOT contain review buttons. Created at contact_ready; encrypted destination
+-- preserved until sent (nulled after delivery or permanent failure).
+-- State: pending → sent | permanent_failure
+CREATE TABLE IF NOT EXISTS v2_review_immediate_notices (
+    id                   TEXT PRIMARY KEY,
+    purchase_id          TEXT NOT NULL UNIQUE REFERENCES v2_helper_purchases(id),
+    binding_ref_snapshot TEXT NOT NULL,
+    chat_id_ciphertext   TEXT,
+    chat_id_nonce        TEXT,
+    key_version          TEXT NOT NULL,
+    helper_profile_id    TEXT NOT NULL REFERENCES v2_helper_profiles(id),
+    state                TEXT NOT NULL DEFAULT 'pending'
+                             CHECK (state IN ('pending', 'sent', 'permanent_failure')),
+    expires_at           INTEGER NOT NULL,
+    created_at           INTEGER NOT NULL,
+    updated_at           INTEGER NOT NULL,
+    CHECK (length(binding_ref_snapshot) > 0),
+    CHECK (length(key_version) > 0),
+    CHECK (updated_at >= created_at),
+    CHECK (expires_at > created_at)
+);
+CREATE INDEX IF NOT EXISTS idx_v2_immediate_notices_purchase ON v2_review_immediate_notices(purchase_id);
+CREATE INDEX IF NOT EXISTS idx_v2_immediate_notices_state    ON v2_review_immediate_notices(state);
+
 CREATE INDEX IF NOT EXISTS idx_v2_client_profiles_fp    ON v2_client_profiles(wallet_fingerprint);
--- NOTE: uniq_v2_client_profiles_public_name is created by MigrateSchema (not here)
--- because ApplySchema runs before MigrateSchema adds public_name to existing DBs.
+-- Partial UNIQUE: allow empty public_name during migration but enforce uniqueness once set.
+-- WHERE public_name != '' lets MigrateSchema populate aliases before the constraint applies.
+-- MigrateSchema also creates this index (idempotent, IF NOT EXISTS) for pre-existing DBs.
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_v2_client_profiles_public_name
+    ON v2_client_profiles(public_name) WHERE public_name != '';
 CREATE INDEX IF NOT EXISTS idx_v2_review_entitlements_purchase ON v2_review_entitlements(purchase_id);
 CREATE INDEX IF NOT EXISTS idx_v2_review_entitlements_ref      ON v2_review_entitlements(review_ref);
 CREATE INDEX IF NOT EXISTS idx_v2_review_snapshots_purchase    ON v2_review_delivery_snapshots(purchase_id);
@@ -762,3 +803,47 @@ CREATE TABLE IF NOT EXISTS v2_informer_outbox_recipients (
 );
 CREATE INDEX IF NOT EXISTS idx_v2_outbox_recipients_pending
     ON v2_informer_outbox_recipients(outbox_id) WHERE state = 'pending';
+
+-- ── Task 11F: Cross-device handoff tokens ─────────────────────────────────────
+-- One-time tokens for transferring a purchase view to another device.
+-- Raw token is never stored; only HMAC-SHA256 hash persisted.
+CREATE TABLE IF NOT EXISTS v2_helper_purchase_handoffs (
+    id                TEXT PRIMARY KEY,
+    purchase_id       TEXT NOT NULL REFERENCES v2_helper_purchases(id),
+    helper_profile_id TEXT NOT NULL REFERENCES v2_helper_profiles(id),
+    token_hash        TEXT NOT NULL UNIQUE,  -- HMAC-SHA256; raw token never stored
+    state             TEXT NOT NULL DEFAULT 'pending'
+                          CHECK (state IN ('pending', 'consumed', 'expired')),
+    expires_at        INTEGER NOT NULL,
+    consumed_at       INTEGER,
+    created_at        INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL,
+    CHECK (length(id) = 64 AND NOT (id GLOB '*[^0-9a-f]*')),
+    CHECK (length(token_hash) = 64 AND NOT (token_hash GLOB '*[^0-9a-f]*')),
+    CHECK (created_at < expires_at),
+    CHECK (updated_at >= created_at),
+    CHECK ((state = 'consumed') = (consumed_at IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_v2_handoffs_purchase ON v2_helper_purchase_handoffs(purchase_id);
+CREATE INDEX IF NOT EXISTS idx_v2_handoffs_hash ON v2_helper_purchase_handoffs(token_hash);
+
+-- ── Task 11C: Optional Helper Telegram review reminders ─────────────────────
+-- One-time deep-link tokens that register the Helper's Telegram chat_id so the
+-- worker can send a review-available notice at available_at.
+CREATE TABLE IF NOT EXISTS v2_helper_review_reminders (
+    id                  TEXT    PRIMARY KEY,
+    purchase_id         TEXT    NOT NULL,
+    token_hash          TEXT    NOT NULL UNIQUE,
+    chat_id_ciphertext  TEXT,
+    chat_id_nonce       TEXT,
+    key_version         TEXT,
+    binding_ref         TEXT,
+    expires_at          INTEGER NOT NULL,   -- token expiry (15 min from creation)
+    send_at             INTEGER NOT NULL,   -- available_at from entitlement
+    state               TEXT    NOT NULL DEFAULT 'pending_start'
+                            CHECK (state IN ('pending_start','chat_registered','sent','permanent_failure')),
+    created_at          INTEGER NOT NULL,
+    updated_at          INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_v2_hrr_hash ON v2_helper_review_reminders(token_hash);
+CREATE INDEX IF NOT EXISTS idx_v2_hrr_send ON v2_helper_review_reminders(send_at, state);

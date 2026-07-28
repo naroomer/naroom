@@ -1,8 +1,23 @@
 <script>
 	import { onMount, onDestroy } from 'svelte';
 	import { lang, t as tFn } from '$lib/i18n.js';
-	import { CITIES } from '$lib/cities.js';
+	import { FALLBACK_CITY_ID } from '$lib/cities.js';
 	import V2QR from '$lib/V2QR.svelte';
+
+	// Cities come solely from the backend registry (/api/v2/board/cities), never
+	// from a duplicated frontend array. FALLBACK_CITY_ID is the only static value
+	// used, and only until the fetch completes (or if it fails).
+	let cities = $state([{ id: FALLBACK_CITY_ID, label: FALLBACK_CITY_ID }]);
+
+	async function fetchCities() {
+		try {
+			const r = await fetch('/api/v2/board/cities');
+			if (r.ok) {
+				const data = await r.json();
+				if (Array.isArray(data) && data.length > 0) cities = data;
+			}
+		} catch {}
+	}
 
 	let t = $derived((key, params) => tFn($lang, key, params));
 
@@ -27,7 +42,7 @@
 
 	// Form fields
 	let walletAddress = $state('');
-	let city = $state('tbilisi');
+	let city = $state(FALLBACK_CITY_ID);
 	let depType = $state('');
 	let helpType = $state('');
 	let urgency = $state('');
@@ -50,7 +65,6 @@
 
 	// Code acknowledgement gate
 	let codeSaved = $state(false);
-	let isReactivating = $state(false);
 
 	// Restore tracking
 	let wasRestored = $state(false);
@@ -83,6 +97,7 @@
 	// ── Restore on mount (idempotency) ─────────────────────────────────────────
 	onMount(() => {
 		fetchPubConfig();
+		fetchCities();
 		const saved = sessionStorage.getItem('v2_client_state');
 		if (saved) {
 			try {
@@ -92,7 +107,7 @@
 				flowId = s.flowId || '';
 				invoiceId = s.invoiceId || '';
 				currency = s.currency || 'BTC';
-				city = s.city || 'tbilisi';
+				city = s.city || FALLBACK_CITY_ID;
 				if (managementCode && walletAddress) {
 					restoreFlow();
 				}
@@ -111,6 +126,27 @@
 		try { sessionStorage.setItem('v2_client_state', JSON.stringify(s)); } catch {}
 	}
 
+	// Clears the in-progress create-flow marker so a completed flow can never
+	// intercept a fresh "+" click later in the same browser session.
+	function clearClientState() {
+		try { sessionStorage.removeItem('v2_client_state'); } catch {}
+	}
+
+	// Stores the management code + wallet locally, keyed by listing ID, so the
+	// listing page can offer server-authenticated owner mode. The code is only
+	// a convenience carrier for the frontend — the listing page's owner-view
+	// endpoint independently re-verifies it server-side on every load; storage
+	// is never itself an authorization basis.
+	function saveOwnerCapability(lid) {
+		if (!lid) return;
+		try {
+			localStorage.setItem(`v2_mgmt_${lid}`, JSON.stringify({
+				code: managementCode,
+				wallet: walletAddress,
+			}));
+		} catch {}
+	}
+
 	// ── Step: create payment intent ────────────────────────────────────────────
 	async function createIntent() {
 		if (!walletAddress.trim()) return;
@@ -123,7 +159,14 @@
 				body: JSON.stringify({ wallet_address: walletAddress.trim() }),
 			});
 			const data = await res.json();
-			if (!res.ok) { error = data.error || `HTTP ${res.status}`; return; }
+			if (!res.ok) {
+				if (data.code === 'wallet_already_visible') {
+					error = t('new.wallet_already_visible');
+				} else {
+					error = data.error || `HTTP ${res.status}`;
+				}
+				return;
+			}
 
 			managementCode = data.management_code;
 			flowId = data.flow_id;
@@ -181,24 +224,21 @@
 					step = 'telegram';
 					telegramStatus = data.telegram_status || 'needs_link';
 				}
-			} else if (phase === 'visible') {
-				listingId = data.listing?.id || '';
-				displayName = data.listing?.display_name || '';
-				visibleUntil = data.listing?.visible_until || null;
-				step = 'done';
-			} else if (phase === 'hidden') {
-				// Daily window expired; need fresh Telegram binding + reactivate (no new invoice)
-				isReactivating = true;
-				telegramStatus = data.telegram_status || 'needs_link';
-				if (telegramStatus === 'ready' || telegramStatus === 'active') {
-					// Binding already exists for next window — reactivate immediately
-					step = 'telegram'; // briefly show connected badge
-					await reactivateListing();
-				} else {
-					step = 'telegram';
-					startTgPoll(); // poll until fresh binding arrives
+			} else if (phase === 'visible' || phase === 'hidden') {
+				// A listing already exists (visible or hidden). Create NEVER drives
+				// reactivation or Telegram-for-reactivation itself — that whole
+				// journey lives on the listing page (owner mode). Hand off there.
+				const lid = data.listing?.id || '';
+				clearClientState();
+				if (lid) {
+					saveOwnerCapability(lid);
+					window.location.href = `/v2/listing/${lid}`;
+					return;
 				}
+				error = t('v2.client.entitlement_expired');
 			} else if (phase === 'finished' || phase === 'payment_expired') {
+				// Terminal: this marker must not intercept the next "+" click.
+				clearClientState();
 				error = t('v2.client.entitlement_expired');
 			}
 		} catch (e) {
@@ -333,41 +373,10 @@
 			if (data.status === 'ready' || data.status === 'active') {
 				stopTgPoll();
 				if (step === 'telegram') {
-					if (isReactivating) {
-						await reactivateListing();
-					} else {
-						step = 'form';
-					}
+					step = 'form';
 				}
 			}
 		} catch {}
-	}
-
-	async function reactivateListing() {
-		loading = true;
-		error = '';
-		try {
-			const res = await fetch('/api/v2/client/listings/reactivate', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ management_code: managementCode, wallet_address: walletAddress }),
-			});
-			const data = await res.json();
-			if (!res.ok) {
-				if (data.code === 'already_visible') {
-					step = 'done';
-					return;
-				}
-				error = data.error || `HTTP ${res.status}`;
-				return;
-			}
-			listingId = data.id || listingId;
-			step = 'done';
-		} catch (e) {
-			error = e.message;
-		} finally {
-			loading = false;
-		}
 	}
 
 	// ── Step: publish listing ──────────────────────────────────────────────────
@@ -403,6 +412,8 @@
 					// Already published — just navigate
 					listingId = data.listing?.id || '';
 					displayName = data.listing?.display_name || '';
+					saveOwnerCapability(listingId);
+					clearClientState();
 					step = 'done';
 					return;
 				}
@@ -412,6 +423,8 @@
 			listingId = data.id;
 			displayName = data.display_name || '';
 			visibleUntil = data.visible_until || null;
+			saveOwnerCapability(listingId);
+			clearClientState();
 			step = 'done';
 		} catch (e) {
 			error = e.message;
@@ -635,7 +648,7 @@
 			<div class="field">
 				<label>{t('new.city')}</label>
 				<select bind:value={city}>
-					{#each CITIES as c}
+					{#each cities as c}
 						<option value={c.id}>{c.label}</option>
 					{/each}
 				</select>
@@ -747,7 +760,7 @@
 			{/if}
 			<div class="done-actions">
 				{#if listingId}
-					<a href="/v2/listing/{listingId}" class="btn-primary" data-testid="view-listing-btn">{t('v2.done.view_listing')}</a>
+					<a href="/v2/listing/{listingId}" class="btn-primary" data-testid="manage-listing-btn">{t('v2.done.manage_listing')}</a>
 				{/if}
 				<a href="/v2/board/{city}" class="btn-secondary">{t('v2.done.board')}</a>
 			</div>

@@ -18,22 +18,9 @@ import (
 	"time"
 )
 
-// cityDisplayNames maps city IDs to human-readable names shown in bot messages.
-var cityDisplayNames = map[string]string{
-	"buenos_aires": "Buenos Aires",
-	"sao_paulo":    "São Paulo",
-	"nha_trang":    "Nha Trang",
-	"da_nang":      "Da Nang",
-	"tbilisi":      "Tbilisi",
-	"batumi":       "Batumi",
-	"almaty":       "Almaty",
-	"yerevan":      "Yerevan",
-	"moscow":       "Moscow",
-}
-
 func cityName(id string) string {
-	if n, ok := cityDisplayNames[id]; ok {
-		return n
+	if c, ok := CityByID(id); ok {
+		return c.Label
 	}
 	return id
 }

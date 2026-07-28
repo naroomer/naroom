@@ -35,18 +35,19 @@ import (
 // ── Stable machine-readable error codes ───────────────────────────────────────
 
 const (
-	errCodeInvalidRequest      = "invalid_request"
-	errCodeNotFound            = "not_found"
-	errCodeNotReady            = "not_ready"
-	errCodeTelegramRequired    = "telegram_required"
-	errCodeAlreadyVisible      = "already_visible"
-	errCodeAlreadyPublished    = "already_published"
-	errCodeLowBalance          = "low_balance"
-	errCodeEntitlementExpired  = "entitlement_expired"
-	errCodeProviderUnavailable = "provider_unavailable"
-	errCodeConflict            = "conflict"
-	errCodeInternalError       = "internal_error"
-	errCodeRateLimited         = "rate_limited"
+	errCodeInvalidRequest        = "invalid_request"
+	errCodeNotFound              = "not_found"
+	errCodeNotReady              = "not_ready"
+	errCodeTelegramRequired      = "telegram_required"
+	errCodeAlreadyVisible        = "already_visible"
+	errCodeProfileAlreadyVisible = "profile_already_visible"
+	errCodeAlreadyPublished      = "already_published"
+	errCodeLowBalance            = "low_balance"
+	errCodeEntitlementExpired    = "entitlement_expired"
+	errCodeProviderUnavailable   = "provider_unavailable"
+	errCodeConflict              = "conflict"
+	errCodeInternalError         = "internal_error"
+	errCodeRateLimited           = "rate_limited"
 )
 
 // ── Phase constants ───────────────────────────────────────────────────────────
@@ -261,6 +262,7 @@ func (h *ClientJourneyHandler) Routes() http.Handler {
 	mux.HandleFunc("POST /v2/client/listings/reactivate", h.handleReactivate)
 	mux.HandleFunc("GET /v2/board/{city}", h.handleBoard)
 	mux.HandleFunc("GET /v2/listings/{listing_id}", h.handleListingDetail)
+	mux.HandleFunc("POST /v2/listings/{id}/owner-view", h.handleOwnerView)
 	return mux
 }
 
@@ -518,6 +520,8 @@ func (h *ClientJourneyHandler) handlePublish(w http.ResponseWriter, r *http.Requ
 			jsonErrCode(w, http.StatusConflict, "listing already published", errCodeAlreadyPublished)
 		case errors.Is(err, ErrAlreadyVisible):
 			jsonErrCode(w, http.StatusConflict, "listing already visible", errCodeAlreadyVisible)
+		case errors.Is(err, ErrProfileAlreadyVisible):
+			jsonErrCode(w, http.StatusConflict, "another listing from this wallet is already visible", errCodeProfileAlreadyVisible)
 		case errors.Is(err, ErrBindingRequired), errors.Is(err, ErrDestinationMissing):
 			jsonErrCode(w, http.StatusConflict, "telegram binding required", errCodeTelegramRequired)
 		default:
@@ -605,6 +609,8 @@ func (h *ClientJourneyHandler) handleReactivate(w http.ResponseWriter, r *http.R
 			jsonErrCode(w, http.StatusConflict, "telegram binding required for next window", errCodeTelegramRequired)
 		case errors.Is(err, ErrAlreadyVisible):
 			jsonErrCode(w, http.StatusConflict, "listing already visible", errCodeAlreadyVisible)
+		case errors.Is(err, ErrProfileAlreadyVisible):
+			jsonErrCode(w, http.StatusConflict, "another listing from this wallet is already visible", errCodeProfileAlreadyVisible)
 		case errors.Is(err, ErrFormNotReady):
 			jsonErrCode(w, http.StatusConflict, "listing not ready for reactivation", errCodeNotReady)
 		case errors.Is(err, ErrConflict):
@@ -669,4 +675,66 @@ func (h *ClientJourneyHandler) handleListingDetail(w http.ResponseWriter, r *htt
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(publicViewToJSON(p)) //nolint:errcheck
+}
+
+// ── POST /v2/listings/{id}/owner-view ────────────────────────────────────────
+
+// ownerViewRequest carries the management_code in the POST body. The code is a
+// bearer-style secret and must never travel as a URL query parameter (it would
+// otherwise land in access logs, browser history, and Referer headers — the
+// same class of leak the cross-device handoff fix addresses for purchase tokens).
+type ownerViewRequest struct {
+	ManagementCode string `json:"management_code"`
+}
+
+// handleOwnerView returns an owner-only summary for a listing, authenticated via management_code.
+// POST /v2/listings/{id}/owner-view  Body: {"management_code": "..."}
+// Wrong code, wrong listing ID, or missing parameters all return identical 404.
+// storage (localStorage) is never treated as an authorization basis by itself — the
+// frontend may read a locally-saved code, but this endpoint is the sole authority.
+func (h *ClientJourneyHandler) handleOwnerView(w http.ResponseWriter, r *http.Request) {
+	if !h.detailLim.Allow(h.journeyKey(r)) {
+		jsonErrCode(w, http.StatusTooManyRequests, "rate limit exceeded", errCodeRateLimited)
+		return
+	}
+	id := r.PathValue("id")
+	var req ownerViewRequest
+	if !decodeStrict(w, r, &req) {
+		return
+	}
+	code := req.ManagementCode
+	if strings.TrimSpace(id) == "" || strings.TrimSpace(code) == "" {
+		jsonErrCode(w, http.StatusNotFound, "not found", errCodeNotFound)
+		return
+	}
+
+	view, err := h.ls.GetListingOwnerView(id, code)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			jsonErrCode(w, http.StatusNotFound, "not found", errCodeNotFound)
+			return
+		}
+		jsonErrCode(w, http.StatusInternalServerError, "internal error", errCodeInternalError)
+		return
+	}
+
+	resp := map[string]any{
+		"listing_id":     view.ListingID,
+		"state":          view.State,
+		"city":           view.City,
+		"country_code":   view.CountryCode,
+		"display_name":   view.DisplayName,
+		"urgency":        view.Urgency,
+		"languages":      view.Languages,
+		"dep_type":       view.DepType,
+		"help_type":      view.HelpType,
+		"telegram_ready": view.TelegramReady,
+	}
+	if view.VisibleUntil != nil {
+		resp["visible_until"] = view.VisibleUntil.Unix()
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	json.NewEncoder(w).Encode(resp) //nolint:errcheck
 }

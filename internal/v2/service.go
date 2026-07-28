@@ -357,6 +357,25 @@ const selectFlowByID = `
 
 // CreatePaymentIntent atomically creates a client flow, a linked invoice, and a
 // management code. The raw code is returned exactly once and is never stored.
+// HasVisibleListing reports whether the wallet already has an effectively visible listing.
+// Used as a pre-check before creating a payment intent, so no invoice or external call is made.
+func (s *Service) HasVisibleListing(currency, normalizedAddr string) (bool, error) {
+	fp := s.walletFingerprint(currency, normalizedAddr)
+	nowUnix := s.nowUnix()
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM v2_listings l
+		JOIN v2_client_flows f ON f.id = l.flow_id
+		WHERE f.wallet_fingerprint = ?
+		  AND l.state = 'visible' AND l.visible_until > ?`,
+		fp, nowUnix,
+	).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("v2: HasVisibleListing: query: %w", err)
+	}
+	return count > 0, nil
+}
+
 // The wallet address is never stored; only its keyed fingerprint is persisted.
 //
 // Validation order: currency → wallet address → draft; no DB write on any error.
