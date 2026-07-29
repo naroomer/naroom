@@ -620,6 +620,7 @@
 
 		{:else if step === 'invoice'}
 			<div class="invoice-wrap">
+				<div class="invoice-shell">
 
 				<!-- Meta panel: aliases + instructions + observability -->
 				<div class="meta-panel">
@@ -745,6 +746,7 @@
 					{/if}
 
 					{#if error}<div class="err">{error}</div>{/if}
+				</div>
 				</div>
 			</div>
 
@@ -1008,17 +1010,29 @@
 	.invoice-wrap {
 		flex: 1;
 		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 16px;
+		overflow: hidden;
+	}
+
+	.invoice-shell {
+		width: min(760px, 100%);
+		max-height: 100%;
+		display: grid;
+		grid-template-columns: minmax(210px, 250px) minmax(0, 1fr);
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 8px;
 		overflow: hidden;
 	}
 
 	.meta-panel {
-		width: 220px;
-		flex-shrink: 0;
+		min-width: 0;
 		border-right: 1px solid var(--border);
 		display: flex;
-		align-items: center;
-		justify-content: center;
-		padding: 20px;
+		align-items: flex-start;
+		padding: 18px;
 		overflow-y: auto;
 	}
 
@@ -1118,21 +1132,20 @@
 
 	/* ── Pay panel ── */
 	.pay-panel {
-		flex: 1;
 		min-width: 0;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		padding: 16px 28px;
+		padding: 18px 22px;
 		overflow-y: auto;
 	}
 
 	.pay-surface {
 		width: 100%;
-		max-width: 380px;
+		max-width: 430px;
 		display: flex;
 		flex-direction: column;
-		gap: 11px;
+		gap: 10px;
 	}
 
 	.inv-status {
@@ -1189,7 +1202,7 @@
 		padding-top: 6px;
 	}
 	/* Desktop default: 180px QR */
-	.qr-wrap :global(.v2qr svg) { width: 180px; height: 180px; display: block; }
+	.qr-wrap :global(.v2qr svg) { width: 168px; height: 168px; display: block; }
 
 	/* ── Centered steps (balance / contact / done) ── */
 	.step-center {
@@ -1363,7 +1376,10 @@
 
 	/* ── Desktop: tight height — shrink QR slightly ── */
 	@media (min-width: 601px) and (max-height: 780px) {
-		.qr-wrap :global(.v2qr svg) { width: 170px; height: 170px; }
+		.invoice-wrap { padding: 10px 16px; }
+		.meta-panel { padding: 14px 16px; }
+		.pay-panel { padding: 14px 18px; }
+		.qr-wrap :global(.v2qr svg) { width: 154px; height: 154px; }
 	}
 
 	/* ── Mobile: single column ── */
@@ -1373,32 +1389,45 @@
 		.prog-label { display: none; }
 		.prog-current { display: inline; }
 		.invoice-wrap {
-			flex-direction: column;
+			padding: 8px 10px 48px;
+			align-items: center;
+			overflow: hidden;
+		}
+
+		.invoice-shell {
+			width: 100%;
+			grid-template-columns: 1fr;
+			max-height: 100%;
 			overflow-y: auto;
 		}
 
 		.meta-panel {
-			width: 100%;
 			border-right: none;
 			border-bottom: 1px solid var(--border);
-			padding: 10px 16px;
+			padding: 10px 12px;
 			align-items: flex-start;
-			justify-content: flex-start;
 			overflow-y: visible;
 		}
 
 		.meta-inner {
 			flex-direction: row;
 			flex-wrap: wrap;
-			gap: 12px;
+			gap: 8px 12px;
 		}
 
-		.alias-block { flex: 1; min-width: 140px; }
-		.instr-block { flex: 1; min-width: 140px; }
+		.alias-block { flex: 1 1 140px; min-width: 0; }
+		.instr-block { flex: 1 1 140px; min-width: 0; }
+		.alias-row { gap: 1px; }
+		.alias-value { font-size: 12px; }
+		.alias-hint { display: none; }
+		.provider-healthy,
+		.provider-checking,
+		.last-check-info { display: none; }
+		.instr { font-size: 11px; line-height: 1.3; }
+		.btn-handoff { width: 100%; box-sizing: border-box; }
 
 		.pay-panel {
-			flex: none;
-			padding: 12px 16px;
+			padding: 10px 12px 12px;
 			overflow-y: visible;
 			align-items: flex-start;
 			justify-content: flex-start;
@@ -1406,7 +1435,7 @@
 
 		.pay-surface { max-width: 100%; }
 
-		.qr-wrap :global(.v2qr svg) { width: 128px; height: 128px; }
+		.qr-wrap :global(.v2qr svg) { width: 120px; height: 120px; }
 	}
 
 	/* ── Short mobile viewport: keep payment and language controls separate ── */
@@ -1434,9 +1463,11 @@
 			margin-left: 6px;
 			font-size: 10px;
 		}
-		.meta-panel { padding: 7px 14px; }
-		.pay-panel { padding: 8px 14px; }
-		.pay-surface { gap: 8px; }
+		.invoice-wrap { padding: 6px 8px 46px; }
+		.meta-panel { padding: 7px 10px; }
+		.pay-panel { padding: 7px 10px 9px; }
+		.pay-surface { gap: 7px; }
+		.qr-wrap { padding-top: 2px; }
 		.qr-wrap :global(.v2qr svg) { width: 112px; height: 112px; }
 	}
 

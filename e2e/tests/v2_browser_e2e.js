@@ -775,6 +775,42 @@ async function runOnce(runNumber) {
       await helperPage.screenshot({ path: join(SCREENSHOTS_DIR, `run${runNumber}_06_helper_invoice.png`) });
     });
 
+    // ── Step 6a: Same purchase from a second device ─────────────────────────
+    await step('6a: Second device → no duplicate invoice → localized handoff guidance', async () => {
+      const secondDevice = await browser.newContext();
+      scratchContexts.push(secondDevice);
+      const secondPage = await secondDevice.newPage();
+      await secondPage.setViewportSize({ width: 390, height: 844 });
+      await secondPage.goto(`${frontendBase}/v2/listing/${listingId}`);
+      await secondPage.waitForLoadState('networkidle');
+      await secondPage.fill('input[type="text"]', HELPER_WALLET);
+      await secondPage.click('button.btn-primary:not(:disabled)');
+
+      const duplicateMessage = secondPage.locator('.err').first();
+      await duplicateMessage.waitFor({ state: 'visible', timeout: 10000 });
+      const messageText = (await duplicateMessage.textContent() || '').trim();
+      assert(messageText.includes('Continue on another device'),
+        `second-device guidance missing handoff action: "${messageText}"`);
+      assert(!messageText.includes('active purchase already exists'),
+        `raw backend duplicate error leaked to UI: "${messageText}"`);
+      assert(!secondPage.url().includes('/v2/helper/purchase'),
+        `second device incorrectly entered purchase page: ${secondPage.url()}`);
+
+      const scroll = await secondPage.evaluate(() => ({
+        sW: document.documentElement.scrollWidth,
+        cW: document.documentElement.clientWidth,
+      }));
+      assert(scroll.sW <= scroll.cW,
+        `390×844 listing form has horizontal overflow: ${scroll.sW} > ${scroll.cW}`);
+
+      await secondPage.screenshot({
+        path: join(SCREENSHOTS_DIR, `run${runNumber}_6a_second_device.png`),
+      });
+      await secondPage.close();
+      await secondDevice.close();
+      scratchContexts.splice(scratchContexts.indexOf(secondDevice), 1);
+    });
+
     // ── Step 6g: Cross-device handoff — full threat matrix ────────────────────
     await step('6g: Cross-device handoff — wrong wallet, expiry, concurrent redeem, real redeem, old-token revoked, replay', async () => {
       // helperPage is on /v2/helper/purchase (invoice step) from step 6.
@@ -1417,7 +1453,7 @@ async function runOnce(runNumber) {
   const screenshots = [
     '01_invoice', '04_done', '04b_owner_mode', '05_board_desktop', '05_board_mobile',
     '5b_outage', '5c_wallet_already', '5d_self_purchase', '5e_reactivated',
-    '06_helper_invoice', '6g_handoff', '6b_continue',
+    '06_helper_invoice', '6a_second_device', '6g_handoff', '6b_continue',
     'layout_1440x900', 'layout_1280x720', 'layout_390x844', 'layout_375x667', 'layout_360x640',
     '6c_terminal', '07_contact', '09_review', '10_restore_error', '10_restore_owner',
   ].map(s => join(SCREENSHOTS_DIR, `run${runNumber}_${s}.png`));

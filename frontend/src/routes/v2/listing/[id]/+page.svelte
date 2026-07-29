@@ -316,6 +316,9 @@
 				if (data.code === 'balance_provider_unavailable') {
 					balanceOutage = true;
 					helperError = t('v2.helper.balance_unavailable');
+				} else if (data.code === 'duplicate_active_purchase') {
+					balanceOutage = false;
+					helperError = t('v2.helper.duplicate_active_help');
 				} else {
 					balanceOutage = false;
 					helperError = data.error || `HTTP ${res.status}`;
@@ -657,8 +660,11 @@
 
 	.page {
 		max-width: 600px;
+		width: 100%;
+		box-sizing: border-box;
 		margin: 0 auto;
 		padding: 0 16px 60px;
+		overflow-x: hidden;
 	}
 
 	header {
@@ -705,7 +711,7 @@
 	.rep-age { font-size: 10px; color: var(--text-faint); }
 	.rep-score { font-size: 12px; color: var(--text-dim); }
 
-	.helper-section { display: flex; flex-direction: column; gap: 16px; }
+	.helper-section { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 	h2 { font-size: 18px; font-weight: 700; color: var(--text); margin: 0; }
 	.sub { color: var(--text-dim); font-size: 14px; line-height: 1.5; margin: 0; }
 
@@ -713,6 +719,9 @@
 	.field label { font-size: 13px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
 
 	input {
+		width: 100%;
+		min-width: 0;
+		box-sizing: border-box;
 		background: var(--bg-card);
 		border: 1px solid var(--border);
 		border-radius: 8px;
@@ -729,7 +738,12 @@
 	.currency-tag { font-size: 11px; color: var(--accent); font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; }
 	.hint { font-size: 12px; color: var(--text-faint); line-height: 1.4; margin: 0; }
 	.fine-print { font-size: 12px; color: var(--text-faint); line-height: 1.4; }
-	.err { color: var(--danger); font-size: 13px; }
+	.err {
+		color: var(--danger);
+		font-size: 13px;
+		line-height: 1.4;
+		overflow-wrap: anywhere;
+	}
 
 	.btn-primary {
 		background: var(--accent);
@@ -847,4 +861,54 @@
 	}
 	.btn-secondary:hover:not(:disabled) { border-color: var(--text-dim); }
 	.btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+	@media (max-width: 600px) {
+		.page {
+			padding: 0 14px 72px;
+		}
+		header {
+			padding: 14px 0 16px;
+			margin-bottom: 16px;
+		}
+		.listing-card {
+			margin-bottom: 16px;
+		}
+		.listing-body {
+			padding: 13px;
+		}
+		.helper-section {
+			gap: 12px;
+		}
+		.sub {
+			font-size: 13px;
+		}
+		.progress-bar {
+			width: 100%;
+			min-width: 0;
+		}
+		.progress-step {
+			flex: 0 0 auto;
+		}
+		.progress-label {
+			display: none;
+		}
+		.progress-line {
+			min-width: 12px;
+			margin: 0 6px;
+		}
+		.notice-box {
+			padding: 10px 12px;
+		}
+		.notice-list li {
+			font-size: 11px;
+		}
+		.btn-primary,
+		.btn-secondary {
+			width: 100%;
+			box-sizing: border-box;
+		}
+		.fine-print {
+			margin: 0;
+		}
+	}
 </style>
