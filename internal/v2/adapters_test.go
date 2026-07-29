@@ -147,6 +147,110 @@ func newBlockcypherTestAdapter(rt http.RoundTripper) *BlockcypherV2Adapter {
 	return newBlockcypherV2AdapterWithClient("http://test.invalid", testClient(rt))
 }
 
+type chainClientFunc func(context.Context, string) ([]V2TxResult, error)
+
+func (f chainClientFunc) GetInvoiceTxs(ctx context.Context, address string) ([]V2TxResult, error) {
+	return f(ctx, address)
+}
+
+func TestFallbackChainClientPrimarySuccess(t *testing.T) {
+	var fallbackCalls int
+	client := NewFallbackV2ChainClient(
+		chainClientFunc(func(context.Context, string) ([]V2TxResult, error) {
+			return []V2TxResult{{Txid: "primary"}}, nil
+		}),
+		chainClientFunc(func(context.Context, string) ([]V2TxResult, error) {
+			fallbackCalls++
+			return nil, nil
+		}),
+	)
+
+	got, err := client.GetInvoiceTxs(t.Context(), "address")
+	if err != nil {
+		t.Fatalf("GetInvoiceTxs: %v", err)
+	}
+	if len(got) != 1 || got[0].Txid != "primary" {
+		t.Fatalf("result = %#v, want primary result", got)
+	}
+	if fallbackCalls != 0 {
+		t.Fatalf("fallback calls = %d, want 0", fallbackCalls)
+	}
+}
+
+func TestFallbackChainClientPrimaryFailureUsesFallback(t *testing.T) {
+	client := NewFallbackV2ChainClient(
+		chainClientFunc(func(context.Context, string) ([]V2TxResult, error) {
+			return nil, errors.New("primary unavailable")
+		}),
+		chainClientFunc(func(context.Context, string) ([]V2TxResult, error) {
+			return []V2TxResult{{Txid: "fallback", Confirmations: 1}}, nil
+		}),
+	)
+
+	got, err := client.GetInvoiceTxs(t.Context(), "address")
+	if err != nil {
+		t.Fatalf("GetInvoiceTxs: %v", err)
+	}
+	if len(got) != 1 || got[0].Txid != "fallback" || got[0].Confirmations != 1 {
+		t.Fatalf("result = %#v, want fallback result", got)
+	}
+}
+
+func TestFallbackChainClientBothProvidersFail(t *testing.T) {
+	client := NewFallbackV2ChainClient(
+		chainClientFunc(func(context.Context, string) ([]V2TxResult, error) {
+			return nil, errors.New("primary unavailable")
+		}),
+		chainClientFunc(func(context.Context, string) ([]V2TxResult, error) {
+			return nil, errors.New("fallback unavailable")
+		}),
+	)
+
+	if _, err := client.GetInvoiceTxs(t.Context(), "address"); err == nil {
+		t.Fatal("GetInvoiceTxs: expected error")
+	}
+}
+
+type atomicBalanceReaderFunc func(context.Context, string) (int64, error)
+
+func (f atomicBalanceReaderFunc) GetBalanceAtomic(ctx context.Context, address string) (int64, error) {
+	return f(ctx, address)
+}
+
+func TestFallbackBalanceReaderPrimaryFailureUsesFallback(t *testing.T) {
+	reader := NewFallbackV2AtomicBalanceReader(
+		atomicBalanceReaderFunc(func(context.Context, string) (int64, error) {
+			return 0, errors.New("primary unavailable")
+		}),
+		atomicBalanceReaderFunc(func(context.Context, string) (int64, error) {
+			return 123456, nil
+		}),
+	)
+
+	balance, err := reader.GetBalanceAtomic(t.Context(), "address")
+	if err != nil {
+		t.Fatalf("GetBalanceAtomic: %v", err)
+	}
+	if balance != 123456 {
+		t.Fatalf("balance = %d, want 123456", balance)
+	}
+}
+
+func TestFallbackBalanceReaderBothProvidersFail(t *testing.T) {
+	reader := NewFallbackV2AtomicBalanceReader(
+		atomicBalanceReaderFunc(func(context.Context, string) (int64, error) {
+			return 0, errors.New("primary unavailable")
+		}),
+		atomicBalanceReaderFunc(func(context.Context, string) (int64, error) {
+			return 0, errors.New("fallback unavailable")
+		}),
+	)
+
+	if _, err := reader.GetBalanceAtomic(t.Context(), "address"); err == nil {
+		t.Fatal("GetBalanceAtomic: expected error")
+	}
+}
+
 // ── BTC adapter tests (MempoolV2Adapter) ─────────────────────────────────────
 
 func TestMempoolAdapterUnconfirmedTx(t *testing.T) {

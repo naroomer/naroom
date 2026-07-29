@@ -28,6 +28,33 @@ type V2ChainClient interface {
 	GetInvoiceTxs(ctx context.Context, address string) ([]V2TxResult, error)
 }
 
+// FallbackV2ChainClient uses the fallback only when the primary provider
+// returns an error. A successful empty result remains authoritative.
+type FallbackV2ChainClient struct {
+	primary  V2ChainClient
+	fallback V2ChainClient
+}
+
+// NewFallbackV2ChainClient creates a two-provider chain client.
+func NewFallbackV2ChainClient(primary, fallback V2ChainClient) *FallbackV2ChainClient {
+	return &FallbackV2ChainClient{primary: primary, fallback: fallback}
+}
+
+func (c *FallbackV2ChainClient) GetInvoiceTxs(ctx context.Context, address string) ([]V2TxResult, error) {
+	txs, err := c.primary.GetInvoiceTxs(ctx, address)
+	if err == nil {
+		return txs, nil
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	txs, fallbackErr := c.fallback.GetInvoiceTxs(ctx, address)
+	if fallbackErr != nil {
+		return nil, fmt.Errorf("v2: chain providers unavailable: primary: %w; fallback: %v", err, fallbackErr)
+	}
+	return txs, nil
+}
+
 // V2PriceSource returns the current USD price per coin (1 BTC or 1 LTC in USD).
 type V2PriceSource interface {
 	PricePerCoin(ctx context.Context, currency string) (float64, error)
@@ -303,6 +330,32 @@ type V2AtomicBalanceReader interface {
 	GetBalanceAtomic(ctx context.Context, address string) (int64, error)
 }
 
+// FallbackV2AtomicBalanceReader retries a failed balance lookup through a
+// second provider.
+type FallbackV2AtomicBalanceReader struct {
+	primary  V2AtomicBalanceReader
+	fallback V2AtomicBalanceReader
+}
+
+func NewFallbackV2AtomicBalanceReader(primary, fallback V2AtomicBalanceReader) *FallbackV2AtomicBalanceReader {
+	return &FallbackV2AtomicBalanceReader{primary: primary, fallback: fallback}
+}
+
+func (r *FallbackV2AtomicBalanceReader) GetBalanceAtomic(ctx context.Context, address string) (int64, error) {
+	balance, err := r.primary.GetBalanceAtomic(ctx, address)
+	if err == nil {
+		return balance, nil
+	}
+	if ctx.Err() != nil {
+		return 0, ctx.Err()
+	}
+	balance, fallbackErr := r.fallback.GetBalanceAtomic(ctx, address)
+	if fallbackErr != nil {
+		return 0, fmt.Errorf("v2: balance providers unavailable: primary: %w; fallback: %v", err, fallbackErr)
+	}
+	return balance, nil
+}
+
 // MempoolBalanceAdapter adapts *crypto.MempoolClient for balance reading.
 type MempoolBalanceAdapter struct{ client *ncrypto.MempoolClient }
 
@@ -456,9 +509,11 @@ var _ ClientInvoiceIssuer = (*V2InvoiceIssuer)(nil)
 var _ ClientBalanceReader = (*V2BalanceReader)(nil)
 
 // ensure adapters implement their interfaces.
+var _ V2ChainClient = (*FallbackV2ChainClient)(nil)
 var _ V2ChainClient = (*MempoolV2Adapter)(nil)
 var _ V2ChainClient = (*BlockcypherV2Adapter)(nil)
 var _ V2PriceSource = (*PriceCacheV2Adapter)(nil)
+var _ V2AtomicBalanceReader = (*FallbackV2AtomicBalanceReader)(nil)
 var _ V2AtomicBalanceReader = (*MempoolBalanceAdapter)(nil)
 var _ V2AtomicBalanceReader = (*BlockcypherBalanceAdapter)(nil)
 var _ V2AddressAllocator = (*HDAllocatorAdapter)(nil)

@@ -115,10 +115,16 @@ func wireV2(
 
 	// ── Build production adapters ─────────────────────────────────────────────
 	btcChain := v2.NewMempoolV2Adapter(cfg.MempoolAPI)
-	ltcChain := v2.NewBlockcypherV2Adapter(cfg.BlockcypherAPI, cfg.BlockcypherToken)
+	ltcChain := v2.NewFallbackV2ChainClient(
+		v2.NewBlockcypherV2Adapter(cfg.BlockcypherAPI, cfg.BlockcypherToken),
+		v2.NewMempoolV2Adapter("https://litecoinspace.org/api"),
+	)
 	priceAdap := v2.NewPriceCacheV2Adapter(prices)
 	btcBal := v2.NewMempoolBalanceAdapter(mempool)
-	ltcBal := v2.NewBlockcypherBalanceAdapter(blockcypher)
+	ltcBal := v2.NewFallbackV2AtomicBalanceReader(
+		v2.NewBlockcypherBalanceAdapter(blockcypher),
+		v2.NewMempoolBalanceAdapter(ncrypto.NewMempoolClient("https://litecoinspace.org/api")),
+	)
 	hdAlloc := v2.NewHDAllocatorAdapter(wallet)
 
 	// ── Build Telegram bot senders ─────────────────────────────────────────────
