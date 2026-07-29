@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"math"
 	"net/http"
 	"strings"
@@ -83,6 +84,13 @@ func helperError(w http.ResponseWriter, status int, msg, code string) {
 		Error string `json:"error"`
 		Code  string `json:"code"`
 	}{Error: msg, Code: code})
+}
+
+// helperInternalError keeps the public response generic while recording the
+// failing stage. Callers must not pass errors containing wallet or token data.
+func helperInternalError(w http.ResponseWriter, stage string, err error) {
+	slog.Error("v2 helper request failed", "stage", stage, "err", err)
+	helperError(w, http.StatusInternalServerError, "internal error", codeInternalError)
 }
 
 // NewHelperPurchaseHandler constructs a HelperPurchaseHandler.
@@ -258,6 +266,19 @@ func (h *HelperPurchaseHandler) handleCreate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Self-purchase guard must precede token idempotency. A browser may retain a
+	// token from an older Helper purchase made before this wallet owned the
+	// listing; that stale purchase must never bypass the owner restriction.
+	isSelf, selfErr := h.svc.IsListingOwner(req.ListingID, currency, normalized)
+	if selfErr != nil {
+		helperInternalError(w, "create.owner_check_before_lookup", selfErr)
+		return
+	}
+	if isSelf {
+		helperError(w, http.StatusConflict, "owner wallet cannot purchase own listing", codeSelfPurchase)
+		return
+	}
+
 	// ── Idempotency fast path: token lookup BEFORE any listing/balance/issuer call ──
 	// Exact same token + same wallet + same listing → return existing purchase immediately.
 	// Same token + different wallet or listing → 404 (no enumeration).
@@ -268,7 +289,7 @@ func (h *HelperPurchaseHandler) handleCreate(w http.ResponseWriter, r *http.Requ
 			helperError(w, http.StatusNotFound, "purchase not found", codePurchaseNotFound)
 			return
 		}
-		helperError(w, http.StatusInternalServerError, "internal error", codeInternalError)
+		helperInternalError(w, "create.lookup_before_lock", lookupErr)
 		return
 	}
 	if found {
@@ -291,7 +312,7 @@ func (h *HelperPurchaseHandler) handleCreate(w http.ResponseWriter, r *http.Requ
 			helperError(w, http.StatusNotFound, "purchase not found", codePurchaseNotFound)
 			return
 		}
-		helperError(w, http.StatusInternalServerError, "internal error", codeInternalError)
+		helperInternalError(w, "create.lookup_after_lock", lookupErr)
 		return
 	}
 	if found {
@@ -317,23 +338,11 @@ func (h *HelperPurchaseHandler) handleCreate(w http.ResponseWriter, r *http.Requ
 		`SELECT country_code FROM v2_helper_profiles WHERE wallet_fingerprint = ?`, fp,
 	).Scan(&existingCountry)
 	if dbErr != nil && !errors.Is(dbErr, sql.ErrNoRows) {
-		helperError(w, http.StatusInternalServerError, "internal error", codeInternalError)
+		helperInternalError(w, "create.profile_country", dbErr)
 		return
 	}
 	if dbErr == nil && existingCountry.Valid && existingCountry.String != listingCountry {
 		helperError(w, http.StatusConflict, "profile locked to a different country", codeCountryConflict)
-		return
-	}
-
-	// Self-purchase guard: check BEFORE balance/invoice provider calls.
-	// No external service is called if the wallet owns this listing.
-	isSelf, selfErr := h.svc.IsListingOwner(req.ListingID, currency, normalized)
-	if selfErr != nil {
-		helperError(w, http.StatusInternalServerError, "internal error", codeInternalError)
-		return
-	}
-	if isSelf {
-		helperError(w, http.StatusConflict, "owner wallet cannot purchase own listing", codeSelfPurchase)
 		return
 	}
 
@@ -391,7 +400,7 @@ func (h *HelperPurchaseHandler) handleCreate(w http.ResponseWriter, r *http.Requ
 			helperError(w, http.StatusConflict, "client notification binding unavailable for review", codeClientNotificationUnavailable)
 			return
 		}
-		helperError(w, http.StatusInternalServerError, "internal error", codeInternalError)
+		helperInternalError(w, "create.transaction", err)
 		return
 	}
 

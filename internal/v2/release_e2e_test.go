@@ -40,6 +40,7 @@ package v2
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -742,6 +743,41 @@ func TestReleaseR08b_SelfPurchaseGuard(t *testing.T) {
 	c.db.QueryRow(`SELECT COUNT(*) FROM v2_helper_invoices`).Scan(&invoiceCount) //nolint:errcheck
 	if invoiceCount != 0 {
 		t.Errorf("self-purchase guard: want 0 invoices, got %d", invoiceCount)
+	}
+}
+
+// TestReleaseR08b_SelfPurchaseGuardHTTP proves the guard through the production
+// composition and a real LTC Client publish journey, rather than direct fixtures.
+func TestReleaseR08b_SelfPurchaseGuardHTTP(t *testing.T) {
+	c := newE2EComp(t)
+	lv := c.e2ePublishListing(t, testLTCBech32Addr, "LTC", "tbilisi")
+
+	rr := helperPost(t, c.sys.HelperHandler.Routes(), "/v2/helper/contact-purchases", map[string]string{
+		"purchase_token": newID(),
+		"listing_id":     lv.ID,
+		"wallet_address": testLTCBech32Addr,
+	})
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("self-purchase HTTP: want 409, got %d body: %s", rr.Code, rr.Body)
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("decode self-purchase response: %v", err)
+	}
+	if body["code"] != codeSelfPurchase {
+		t.Fatalf("self-purchase code: want %q, got %q", codeSelfPurchase, body["code"])
+	}
+
+	var purchases, invoices int
+	if err := c.db.QueryRow(`SELECT COUNT(*) FROM v2_helper_purchases WHERE listing_id = ?`, lv.ID).Scan(&purchases); err != nil {
+		t.Fatalf("count purchases: %v", err)
+	}
+	if err := c.db.QueryRow(`SELECT COUNT(*) FROM v2_helper_invoices`).Scan(&invoices); err != nil {
+		t.Fatalf("count invoices: %v", err)
+	}
+	if purchases != 0 || invoices != 0 {
+		t.Fatalf("self-purchase left rows: purchases=%d invoices=%d", purchases, invoices)
 	}
 }
 

@@ -1682,3 +1682,65 @@ func TestHelperHTTP_SelfPurchase_NoExternalCalls(t *testing.T) {
 		t.Errorf("helper_invoices: want 0, got %d", nI)
 	}
 }
+
+func TestHelperHTTP_SelfPurchase_PrecedesExistingTokenRestore(t *testing.T) {
+	ci := &countingIssuer{}
+	cb := &countingBalance{result: 1100.0}
+	svc, db := newTestHelperService(t)
+	h, err := NewHelperPurchaseHandler(svc, ci, cb, testHMACKey, time.Now)
+	if err != nil {
+		t.Fatalf("NewHelperPurchaseHandler: %v", err)
+	}
+
+	// First create an ordinary Helper purchase while another wallet owns the listing.
+	listingID := mustCreateVisibleListing(t, db, "US")
+	rawToken := newID()
+	rr := helperPost(t, h.Routes(), "/v2/helper/contact-purchases", map[string]string{
+		"purchase_token": rawToken,
+		"listing_id":     listingID,
+		"wallet_address": testBTCBech32Addr,
+	})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("initial purchase: want 201, got %d body: %s", rr.Code, rr.Body)
+	}
+
+	// Reproduce production: the retained Helper token exists, while this wallet
+	// is now also the listing owner.
+	normalized, currency, err := validateAndNormalizeAddress(testBTCBech32Addr)
+	if err != nil {
+		t.Fatalf("normalize owner: %v", err)
+	}
+	ownerFP := svc.clientWalletFingerprintForCrossCheck(currency, normalized)
+	if _, err := db.Exec(`
+		UPDATE v2_client_flows
+		SET wallet_fingerprint = ?
+		WHERE id = (SELECT flow_id FROM v2_listings WHERE id = ?)`,
+		ownerFP, listingID,
+	); err != nil {
+		t.Fatalf("set listing owner: %v", err)
+	}
+
+	rr = helperPost(t, h.Routes(), "/v2/helper/contact-purchases", map[string]string{
+		"purchase_token": rawToken,
+		"listing_id":     listingID,
+		"wallet_address": testBTCBech32Addr,
+	})
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("stale-token self-purchase: want 409, got %d body: %s", rr.Code, rr.Body)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body["code"] != codeSelfPurchase {
+		t.Fatalf("response code: want %q, got %q", codeSelfPurchase, body["code"])
+	}
+
+	// Only the original purchase/invoice remains; the retry creates nothing.
+	var purchases, invoices int
+	db.QueryRow(`SELECT COUNT(*) FROM v2_helper_purchases WHERE listing_id = ?`, listingID).Scan(&purchases) //nolint:errcheck
+	db.QueryRow(`SELECT COUNT(*) FROM v2_helper_invoices`).Scan(&invoices)                                   //nolint:errcheck
+	if purchases != 1 || invoices != 1 {
+		t.Fatalf("rows changed on retry: purchases=%d invoices=%d", purchases, invoices)
+	}
+}

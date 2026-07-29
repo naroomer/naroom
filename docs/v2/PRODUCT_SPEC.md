@@ -254,6 +254,16 @@ Unresolved Helper journey points:
 - The name is not a persistent Client identity and carries no reputation across separate listings.
 - Purpose: a Helper may visually recognize that they have already encountered or purchased this listing during its active period.
 
+#### Deferred UX clarification for names and reputation
+
+`DECIDED — implement later, not part of the current manual gate`
+
+- A public name such as `True Dawn · MUHE` must have a localized explanatory label such as `Platform nickname`. The name must not appear as an unexplained identifier.
+- Account/listing age may continue to use a localized phrase such as `3 days on platform`; its meaning is already understandable.
+- Positive and negative review totals must be presented as reviews, not as unexplained thumb icons. The UI must use localized text or an equally explicit legend, for example `Positive reviews: 1` and `Negative reviews: 0`.
+- The clarification applies wherever these values are shown: board cards, listing details, purchase screens, and Telegram summaries where relevant.
+- This requirement changes labels and explanation only. It must not change identity generation, wallet binding, rating aggregation, privacy rules, or the approved visual design without separate owner approval.
+
 ### 8.2 Permanent public pseudonym
 
 `FIXED`
