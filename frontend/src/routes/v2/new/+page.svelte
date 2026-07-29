@@ -35,17 +35,20 @@
 	}
 
 	// ── State ──────────────────────────────────────────────────────────────────
-	let step = $state('wallet');      // wallet | invoice | code | balance | form | telegram | done
+	let step = $state('details');     // details | wallet | invoice | code | balance | telegram | contact | done
 	let loading = $state(false);
 	let error = $state('');
 	let copyMsg = $state('');
+	let detailsNextStep = $state('wallet');
 
 	// Form fields
 	let walletAddress = $state('');
 	let city = $state(FALLBACK_CITY_ID);
 	let depType = $state('');
 	let helpType = $state('');
-	let urgency = $state('');
+	// The public flow no longer asks the client to rank urgency. Keep a neutral
+	// value for the existing backend contract and previously created flows.
+	let urgency = $state('can_wait');
 	let languages = $state([]);
 	let contactType = $state('telegram');
 	let contactValue = $state('');
@@ -89,9 +92,9 @@
 	// ── Computed progress step ─────────────────────────────────────────────────
 	let progressStep = $derived(
 		step === 'done' ? 5 :
-		step === 'telegram' ? 4 :
-		step === 'form' ? 3 :
-		step === 'balance' ? 2 : 1
+		(step === 'telegram' || step === 'contact') ? 4 :
+		step === 'balance' ? 3 :
+		(step === 'wallet' || step === 'code' || step === 'invoice') ? 2 : 1
 	);
 
 	// ── Restore on mount (idempotency) ─────────────────────────────────────────
@@ -120,10 +123,27 @@
 				invoiceId = s.invoiceId || '';
 				currency = s.currency || 'BTC';
 				city = s.city || FALLBACK_CITY_ID;
+				depType = s.depType || '';
+				helpType = s.helpType || '';
+				urgency = s.urgency || 'can_wait';
+				languages = Array.isArray(s.languages) ? s.languages : [];
 				if (managementCode && walletAddress) {
 					restoreFlow();
 				}
 			} catch {}
+		} else {
+			const draft = sessionStorage.getItem('v2_client_draft');
+			if (draft) {
+				try {
+					const d = JSON.parse(draft);
+					city = d.city || FALLBACK_CITY_ID;
+					depType = d.depType || '';
+					helpType = d.helpType || '';
+					urgency = d.urgency || 'can_wait';
+					languages = Array.isArray(d.languages) ? d.languages : [];
+					if (hasListingDetails()) step = 'wallet';
+				} catch {}
+			}
 		}
 	});
 
@@ -134,14 +154,48 @@
 	});
 
 	function saveState() {
-		const s = { managementCode, walletAddress, flowId, invoiceId, currency, city };
+		const s = {
+			managementCode, walletAddress, flowId, invoiceId, currency,
+			city, depType, helpType, urgency, languages
+		};
 		try { sessionStorage.setItem('v2_client_state', JSON.stringify(s)); } catch {}
+	}
+
+	function saveDraft() {
+		try {
+			sessionStorage.setItem('v2_client_draft', JSON.stringify({
+				city, depType, helpType, urgency, languages
+			}));
+		} catch {}
 	}
 
 	// Clears the in-progress create-flow marker so a completed flow can never
 	// intercept a fresh "+" click later in the same browser session.
 	function clearClientState() {
-		try { sessionStorage.removeItem('v2_client_state'); } catch {}
+		try {
+			sessionStorage.removeItem('v2_client_state');
+			sessionStorage.removeItem('v2_client_draft');
+		} catch {}
+	}
+
+	function hasListingDetails() {
+		return !!(city && depType && helpType && urgency && languages.length > 0);
+	}
+
+	function continueDetails() {
+		if (!hasListingDetails()) return;
+		saveDraft();
+		error = '';
+		step = detailsNextStep;
+	}
+
+	function routeAfterRestore(nextStep) {
+		if (hasListingDetails()) {
+			step = nextStep;
+			return;
+		}
+		detailsNextStep = nextStep;
+		step = 'details';
 	}
 
 	// Stores the management code + wallet locally, keyed by listing ID, so the
@@ -225,16 +279,16 @@
 					currency = d2.currency;
 					invoice = d2.invoice;
 				}
-				step = 'invoice';
+				routeAfterRestore('invoice');
 			} else if (phase === 'paid_low_balance') {
-				step = 'balance';
+				routeAfterRestore('balance');
 			} else if (phase === 'form_ready') {
 				if (nextAction === 'publish') {
-					step = 'form';
+					routeAfterRestore('contact');
 				} else {
 					// Needs telegram first
-					step = 'telegram';
 					telegramStatus = data.telegram_status || 'needs_link';
+					routeAfterRestore('telegram');
 				}
 			} else if (phase === 'visible' || phase === 'hidden') {
 				// A listing already exists (visible or hidden). Create NEVER drives
@@ -353,6 +407,7 @@
 				return;
 			}
 			tgLinkUrl = data.bot_url;
+			telegramStatus = 'link_pending';
 			window.open(tgLinkUrl, '_blank', 'noopener');
 			startTgPoll();
 		} catch (e) {
@@ -385,7 +440,7 @@
 			if (data.status === 'ready' || data.status === 'active') {
 				stopTgPoll();
 				if (step === 'telegram') {
-					step = 'form';
+					step = 'contact';
 				}
 			}
 		} catch {}
@@ -393,7 +448,7 @@
 
 	// ── Step: publish listing ──────────────────────────────────────────────────
 	function canPublish() {
-		return city && depType && helpType && urgency && languages.length > 0 && contactValue.trim();
+		return hasListingDetails() && contactValue.trim();
 	}
 
 	async function publishListing() {
@@ -478,8 +533,7 @@
 <div class="page">
 	<a href="/v2/board/{city || 'tbilisi'}" class="back">← {t('back_to_board')}</a>
 
-	<!-- Progress indicator (hidden on wallet/code steps since user hasn't committed yet) -->
-	{#if step !== 'wallet' && step !== 'code'}
+	<!-- Progress indicator -->
 	<div class="progress-bar" aria-label="Progress">
 		{#each [1,2,3,4,5] as n}
 			<div class="prog-step" class:active={progressStep === n} class:done={progressStep > n}>
@@ -488,17 +542,74 @@
 			</div>
 			{#if n < 5}<div class="prog-line" class:done={progressStep > n}></div>{/if}
 		{/each}
+		<span class="prog-current">{t('v2.progress.step' + progressStep)} · {progressStep}/5</span>
 	</div>
-	{/if}
 
-	{#if wasRestored && step !== 'wallet' && step !== 'done'}
+	{#if wasRestored && step !== 'details' && step !== 'wallet' && step !== 'done'}
 	<div class="restore-banner" data-testid="restore-banner">
 		<strong>{t('v2.restore.found')}</strong> {t('v2.restore.nopay')}
 	</div>
 	{/if}
 
-	{#if step === 'wallet'}
-		<!-- Step 1: Enter wallet -->
+	{#if step === 'details'}
+		<!-- Step 1: Listing details -->
+		<div class="section">
+			<h1>{t('v2.form.title')}</h1>
+			<p class="sub">{t('v2.form.details_sub')}</p>
+
+			<div class="field">
+				<label>{t('new.city')}</label>
+				<select bind:value={city}>
+					{#each cities as c}
+						<option value={c.id}>{c.label}</option>
+					{/each}
+				</select>
+			</div>
+
+			<div class="field">
+				<label>{t('new.what_dealing')}</label>
+				<div class="chip-group">
+					{#each DEP_VALUES as v}
+						<button
+							class="chip"
+							class:active={depType === v}
+							onclick={() => depType = v}
+						>{t('dep.' + v)}</button>
+					{/each}
+				</div>
+			</div>
+
+			<div class="field">
+				<label>{t('new.what_help')}</label>
+				<div class="chip-group">
+					{#each HELP_VALUES as v}
+						<button
+							class="chip"
+							class:active={helpType === v}
+							onclick={() => helpType = v}
+						>{t('help.' + v)}</button>
+					{/each}
+				</div>
+			</div>
+
+			<div class="field">
+				<label>{t('new.languages')}</label>
+				<div class="chip-group">
+					{#each LANG_VALUES as v}
+						<button class="chip" class:active={languages.includes(v)} onclick={() => toggleLang(v)}>
+							{v.toUpperCase()}
+						</button>
+					{/each}
+				</div>
+			</div>
+
+			<button class="btn-primary" onclick={continueDetails} disabled={!hasListingDetails()}>
+				{t('v2.form.continue')}
+			</button>
+		</div>
+
+	{:else if step === 'wallet'}
+		<!-- Step 2: Enter wallet -->
 		<div class="section">
 			<h1>{t('v2.client.title')}</h1>
 			<p class="sub">{t('v2.client.sub')}</p>
@@ -636,7 +747,7 @@
 			<p class="sub">{t('v2.telegram.sub')}</p>
 			{#if telegramStatus === 'ready' || telegramStatus === 'active'}
 				<div class="ok-badge">{t('v2.telegram.connected')}</div>
-				<button class="btn-primary" onclick={() => step = 'form'}>
+				<button class="btn-primary" onclick={() => step = 'contact'}>
 					{t('v2.telegram.continue')}
 				</button>
 			{:else if telegramStatus === 'link_pending'}
@@ -652,67 +763,11 @@
 			{#if error}<div class="err">{error}</div>{/if}
 		</div>
 
-	{:else if step === 'form'}
-		<!-- Step 6: Listing form -->
+	{:else if step === 'contact'}
+		<!-- Step 6: Contact and publish -->
 		<div class="section">
-			<h2>{t('v2.form.title')}</h2>
-
-			<div class="field">
-				<label>{t('new.city')}</label>
-				<select bind:value={city}>
-					{#each cities as c}
-						<option value={c.id}>{c.label}</option>
-					{/each}
-				</select>
-			</div>
-
-			<div class="field">
-				<label>{t('new.what_dealing')}</label>
-				<div class="chip-group">
-					{#each DEP_VALUES as v}
-						<button
-							class="chip"
-							class:active={depType === v}
-							onclick={() => depType = v}
-						>{t('dep.' + v)}</button>
-					{/each}
-				</div>
-			</div>
-
-			<div class="field">
-				<label>{t('new.what_help')}</label>
-				<div class="chip-group">
-					{#each HELP_VALUES as v}
-						<button
-							class="chip"
-							class:active={helpType === v}
-							onclick={() => helpType = v}
-						>{t('help.' + v)}</button>
-					{/each}
-				</div>
-			</div>
-
-			<div class="field">
-				<label>{t('new.how_urgent')}</label>
-				<div class="chip-group">
-					{#each ['urgent','soon','can_wait'] as v}
-						<button class="chip" class:active={urgency === v} onclick={() => urgency = v}>
-							{t('urgency.' + v)}
-						</button>
-					{/each}
-				</div>
-			</div>
-
-			<div class="field">
-				<label>{t('new.languages')}</label>
-				<div class="chip-group">
-					{#each LANG_VALUES as v}
-						<button class="chip" class:active={languages.includes(v)} onclick={() => toggleLang(v)}>
-							{v.toUpperCase()}
-						</button>
-					{/each}
-				</div>
-			</div>
+			<h2>{t('v2.form.contact_title')}</h2>
+			<p class="sub">{t('v2.form.contact_sub')}</p>
 
 			<div class="field">
 				<label>{t('v2.form.contact_label')}</label>
@@ -1043,6 +1098,18 @@
 		min-width: 16px;
 	}
 	.prog-line.done { background: var(--accent); opacity: 0.4; }
+	.prog-current {
+		display: none;
+		margin-left: 10px;
+		color: var(--text-dim);
+		font-size: 11px;
+		font-weight: 500;
+		white-space: nowrap;
+	}
+	@media (max-width: 600px) {
+		.progress-bar .prog-label { display: none; }
+		.progress-bar .prog-current { display: inline; }
+	}
 
 	/* Restore banner */
 	.restore-banner {

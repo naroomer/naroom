@@ -12,6 +12,11 @@
 	let loading = $state(true);
 	let error = $state('');
 	let savedListingIds = $state(new Set());
+	const samples = [
+		{ dependency_type: 'cannabis', help_type: 'crisis', languages: ['EN', 'RU'], display_name: 'Quiet Harbor · A7KM', age_key: 'v2.rep.days_short', age_n: 12, positive_count: 0, negative_count: 0 },
+		{ dependency_type: 'cocaine', help_type: 'just_talk', languages: ['EN', 'ES'], display_name: 'Clear Path · R4NX', age_key: 'v2.rep.months_short', age_n: 3, positive_count: 2, negative_count: 0 },
+		{ dependency_type: 'alcohol', help_type: 'relapse_prevention', languages: ['EN', 'KA'], display_name: 'Still River · K9TW', age_key: 'v2.rep.weeks_short', age_n: 5, positive_count: 1, negative_count: 0 }
+	];
 
 	function urgencyColor(u) {
 		if (u === 'urgent')   return 'var(--urgent)';
@@ -19,21 +24,14 @@
 		return 'var(--can-wait)';
 	}
 
-	function timeLeft(sec) {
-		if (sec <= 0) return t('time.expired');
-		const h = Math.floor(sec / 3600);
-		const m = Math.floor((sec % 3600) / 60);
-		if (h > 0) return t('time.h_m_left', { h, m });
-		return t('time.m_left', { m });
-	}
-
 	function reputationAge(memberSinceUnix) {
 		if (!memberSinceUnix) return '';
 		const days = Math.floor((Date.now() / 1000 - memberSinceUnix) / 86400);
-		if (days < 7) return t('v2.rep.days', { n: days });
-		if (days < 30) return t('v2.rep.weeks', { n: Math.floor(days / 7) });
-		if (days < 365) return t('v2.rep.months', { n: Math.floor(days / 30) });
-		return t('v2.rep.years', { n: Math.floor(days / 365) });
+		if (days <= 0) return t('v2.rep.today');
+		if (days < 7) return t('v2.rep.days_short', { n: days });
+		if (days < 30) return t('v2.rep.weeks_short', { n: Math.floor(days / 7) });
+		if (days < 365) return t('v2.rep.months_short', { n: Math.floor(days / 30) });
+		return t('v2.rep.years_short', { n: Math.floor(days / 365) });
 	}
 
 	async function loadBoard() {
@@ -110,45 +108,62 @@
 						<div class="dep">{t('dep.' + l.dependency_type)}</div>
 						<div class="help">{t('help.' + l.help_type)}</div>
 						<div class="meta">
-							<span class="urgency-tag" style="color: {urgencyColor(l.urgency)}">
-								{t('urgency.' + l.urgency)}
-							</span>
 							<span class="langs">{(l.languages || []).join(', ').toUpperCase()}</span>
 						</div>
-						{#if l.client_reputation}
-							<div class="rep">
-								<span class="rep-age">{reputationAge(l.client_reputation.member_since)}</span>
-								{#if l.client_reputation.positive_count > 0 || l.client_reputation.negative_count > 0}
-									<span class="rep-score">
-										👍{l.client_reputation.positive_count}
-										{#if l.client_reputation.negative_count > 0}
-										 👎{l.client_reputation.negative_count}
-										{/if}
-									</span>
-								{/if}
+						{#if l.display_name}
+							<div class="identity">
+								<span>{t('v2.rep.label')}:</span>
+								<strong>{l.display_name}</strong>
 							</div>
 						{/if}
-						{#if l.display_name}
-							<div class="client-name">{l.display_name}</div>
+						{#if l.client_reputation}
+							<div class="rep">
+								<span class="rep-age">{t('v2.rep.since', { age: reputationAge(l.client_reputation.member_since) })}</span>
+								<span class="rep-score">{t('v2.rep.reviews', {
+									pos: l.client_reputation.positive_count,
+									neg: l.client_reputation.negative_count
+								})}</span>
+							</div>
 						{/if}
 						{#if savedListingIds.has(l.id)}
 							<div class="continue-badge">{t('v2.helper.continue_purchase')}</div>
 						{/if}
-						<div class="footer">
-							<span class="time">{timeLeft(l.time_left_sec)}</span>
-						</div>
 					</div>
 				</a>
 			{/each}
 
-			{#if listings.length === 0}
-				{#each [1,2,3,4,5] as _}
-					<div class="card empty">
-						<div class="empty-label">{t('board.waiting')}</div>
+			{#each samples as sample}
+				<article class="card listing sample" aria-label={t('v2.board.example_badge')}>
+					<div class="urgency-strip" style="background: var(--can-wait)"></div>
+					<div class="card-body">
+						<div class="dep">{t('dep.' + sample.dependency_type)}</div>
+						<div class="help">{t('help.' + sample.help_type)}</div>
+						<div class="meta">
+							<span class="langs">{sample.languages.join(', ')}</span>
+						</div>
+						<div class="identity">
+							<span>{t('v2.rep.label')}:</span>
+							<strong>{sample.display_name}</strong>
+						</div>
+						<div class="rep">
+							<span class="rep-age">{t('v2.rep.since', { age: t(sample.age_key, { n: sample.age_n }) })}</span>
+							<span class="rep-score">{t('v2.rep.reviews', {
+								pos: sample.positive_count,
+								neg: sample.negative_count
+							})}</span>
+						</div>
+						<span class="example-badge">{t('v2.board.example_badge')}</span>
 					</div>
-				{/each}
-			{/if}
+				</article>
+			{/each}
 		</div>
+
+		{#if listings.length === 0}
+			<div class="empty-note">
+				<span>{t('v2.board.empty_state')}</span>
+				<a href="/v2/new?fresh=1">{t('v2.board.empty_cta')}</a>
+			</div>
+		{/if}
 	{/if}
 </div>
 
@@ -267,34 +282,63 @@
 	.listing:hover { border-color: var(--text-faint); }
 
 	.urgency-strip { height: 3px; width: 100%; }
-	.card-body { padding: 12px 14px; display: flex; flex-direction: column; gap: 4px; }
+	.card-body {
+		box-sizing: border-box;
+		height: calc(100% - 3px);
+		padding: 12px 14px;
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
 	.dep { font-size: 15px; font-weight: 600; color: var(--text); }
 	.help { font-size: 12px; color: var(--text-dim); }
 	.meta { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
-	.urgency-tag { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
 	.langs { font-size: 11px; color: var(--text-faint); }
+
+	.identity {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px;
+		font-size: 10px;
+		color: var(--text-faint);
+		margin-top: 2px;
+	}
+	.identity strong { color: var(--text-dim); font-weight: 500; }
 
 	.rep {
 		display: flex;
-		align-items: center;
-		gap: 8px;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 2px;
 		margin-top: 2px;
 	}
 	.rep-age { font-size: 10px; color: var(--text-faint); }
 	.rep-score { font-size: 11px; color: var(--text-dim); }
 
-	.footer { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
-	.time { font-size: 11px; color: var(--text-dim); }
-
-	.empty {
-		border: 1px dashed var(--border);
-		background: transparent;
+	.empty-note {
 		display: flex;
+		gap: 8px;
 		align-items: center;
 		justify-content: center;
+		text-align: center;
+		padding: 14px 0 0;
 	}
-	.empty-label { font-size: 11px; color: var(--text-faint); letter-spacing: 1px; text-transform: uppercase; }
-	.client-name { font-size: 10px; color: var(--text-faint); font-style: italic; }
+	.empty-note span { font-size: 12px; color: var(--text-dim); }
+	.empty-note a { font-size: 12px; color: var(--accent); }
+
+	.sample { pointer-events: none; }
+	.example-badge {
+		align-self: flex-end;
+		margin-top: auto;
+		background: var(--warn);
+		color: var(--bg);
+		border-radius: 4px;
+		padding: 3px 7px;
+		font-size: 9px;
+		font-weight: 700;
+		letter-spacing: 0.8px;
+		text-transform: uppercase;
+	}
 
 	.continue-badge {
 		font-size: 10px;
@@ -306,4 +350,5 @@
 		font-weight: 600;
 		display: inline-block;
 	}
+
 </style>

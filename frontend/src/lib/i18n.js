@@ -422,6 +422,10 @@ en: {
 
 	// ── V2 listing form ────────────────────────────────────────────────────────
 	'v2.form.title':        'Your listing',
+	'v2.form.details_sub':  'Choose what kind of support you need before payment.',
+	'v2.form.continue':     'Continue',
+	'v2.form.contact_title':'How can a Helper contact you?',
+	'v2.form.contact_sub':  'This is the only information a Helper receives after paying.',
 	'v2.form.contact_label':'Contact',
 	'v2.form.contact_hint': 'This contact is shown only to the helper who pays to view it.',
 	'v2.form.publish':      'Publish listing',
@@ -457,10 +461,10 @@ en: {
 	'v2.owner.telegram_not_ready': 'Telegram: not connected',
 	'v2.owner.reactivate_btn':     'Reactivate listing',
 	'v2.owner.connect_telegram_btn': 'Connect Telegram to reactivate',
-	'v2.progress.step1':           'Payment',
-	'v2.progress.step2':           'Wallet check',
-	'v2.progress.step3':           'Listing details',
-	'v2.progress.step4':           'Telegram',
+	'v2.progress.step1':           'Details',
+	'v2.progress.step2':           'Payment',
+	'v2.progress.step3':           'Wallet check',
+	'v2.progress.step4':           'Telegram & contact',
 	'v2.progress.step5':           'Published',
 	'v2.invoice.await_send':       'Send exactly this amount to the address below.',
 	'v2.invoice.await_auto':       'We check payment automatically.',
@@ -567,6 +571,7 @@ en: {
 	'v2.rep.years_short':  '{n}y',
 	'v2.rep.rating':       '👍 {pos} / 👎 {neg}',
 	'v2.rep.since':        'On platform: {age}',
+	'v2.rep.reviews':      'Reviews: 👍 {pos} / 👎 {neg}',
 
 	// ── V2 payment observability (D) ──────────────────────────────────────────
 	'v2.helper.provider_checking':  'Checking network every 5 seconds',
@@ -612,10 +617,11 @@ en: {
 	// ── V2 board examples (H2) ────────────────────────────────────────────────
 	'v2.board.examples_heading': 'Examples',
 	'v2.board.example_badge':    'Example',
-	'v2.board.example_1_title':  'Help with apartment paperwork',
-	'v2.board.example_1_desc':   'Need someone to help navigate rental documents and translation.',
-	'v2.board.example_2_title':  'Help with visa application',
-	'v2.board.example_2_desc':   'Looking for someone familiar with local visa offices and procedures.',
+	'v2.board.example_1_title':  'Cannabis',
+	'v2.board.example_1_desc':   'Crisis support',
+	'v2.board.example_2_title':  'Cocaine',
+	'v2.board.example_2_desc':   'Just talk',
+	'v2.board.example_note':     'This is a sample, not an active request.',
 
 	// ── V2 board empty state (H2.5) ───────────────────────────────────────────
 	'v2.board.empty_state': 'No active requests in this city right now.',
@@ -997,6 +1003,10 @@ ru: {
 	'v2.telegram.open_bot':    'Открыть Telegram-бота',
 
 	'v2.form.title':        'Ваше объявление',
+	'v2.form.details_sub':  'До оплаты выберите, какая поддержка вам нужна.',
+	'v2.form.continue':     'Продолжить',
+	'v2.form.contact_title':'Как Helper сможет связаться с вами?',
+	'v2.form.contact_sub':  'Только этот контакт получит Helper после оплаты.',
 	'v2.form.contact_label':'Контакт',
 	'v2.form.contact_hint': 'Контакт виден только помощнику, который оплатил доступ к нему.',
 	'v2.form.publish':      'Опубликовать объявление',
@@ -1030,10 +1040,10 @@ ru: {
 	'v2.restore.back':       '← На доску',
 	'v2.restore.not_found':  'Объявление не найдено. Проверьте кошелёк и код.',
 	'v2.restore.no_listing_yet': 'По этому коду объявление ещё не опубликовано. Вернитесь на страницу, где вы начали оплату, чтобы продолжить её.',
-	'v2.progress.step1':           'Оплата',
-	'v2.progress.step2':           'Проверка кошелька',
-	'v2.progress.step3':           'Детали',
-	'v2.progress.step4':           'Telegram',
+	'v2.progress.step1':           'Детали',
+	'v2.progress.step2':           'Оплата',
+	'v2.progress.step3':           'Проверка кошелька',
+	'v2.progress.step4':           'Telegram и контакт',
 	'v2.progress.step5':           'Опубликовано',
 	'v2.invoice.await_send':       'Отправьте ровно эту сумму на указанный адрес.',
 	'v2.invoice.await_auto':       'Мы проверяем оплату автоматически.',
@@ -1137,6 +1147,7 @@ ru: {
 	'v2.rep.years_short':  '{n}г',
 	'v2.rep.rating':       '👍 {pos} / 👎 {neg}',
 	'v2.rep.since':        'На платформе: {age}',
+	'v2.rep.reviews':      'Отзывы: 👍 {pos} / 👎 {neg}',
 
 	// ── V2 payment observability (D) ──────────────────────────────────────────
 	'v2.helper.provider_checking':  'Проверяем сеть каждые 5 секунд',
@@ -1182,10 +1193,11 @@ ru: {
 	// ── V2 board examples (H2) ────────────────────────────────────────────────
 	'v2.board.examples_heading': 'Примеры',
 	'v2.board.example_badge':    'Образец',
-	'v2.board.example_1_title':  'Помощь с оформлением квартиры',
-	'v2.board.example_1_desc':   'Нужна помощь с документами при аренде и переводом.',
-	'v2.board.example_2_title':  'Помощь с подачей на визу',
-	'v2.board.example_2_desc':   'Ищу человека знакомого с местными визовыми центрами.',
+	'v2.board.example_1_title':  'Каннабис',
+	'v2.board.example_1_desc':   'Кризисная поддержка',
+	'v2.board.example_2_title':  'Кокаин',
+	'v2.board.example_2_desc':   'Просто поговорить',
+	'v2.board.example_note':     'Это образец, а не активное объявление.',
 
 	// ── V2 board empty state (H2.5) ───────────────────────────────────────────
 	'v2.board.empty_state': 'В этом городе сейчас нет активных объявлений.',
@@ -1561,6 +1573,10 @@ es: {
 	'v2.telegram.open_bot':    'Abrir Bot de Telegram',
 
 	'v2.form.title':        'Tu anuncio',
+	'v2.form.details_sub':  'Elige el tipo de apoyo que necesitas antes del pago.',
+	'v2.form.continue':     'Continuar',
+	'v2.form.contact_title':'¿Cómo puede contactarte un Helper?',
+	'v2.form.contact_sub':  'Este es el único dato que recibe un Helper después de pagar.',
 	'v2.form.contact_label':'Contacto',
 	'v2.form.contact_hint': 'Este contacto solo es visible para el ayudante que paga para verlo.',
 	'v2.form.publish':      'Publicar anuncio',
@@ -1594,10 +1610,10 @@ es: {
 	'v2.restore.back':       '← Volver al tablero',
 	'v2.restore.not_found':  'Anuncio no encontrado. Verifica tu billetera y código.',
 	'v2.restore.no_listing_yet': 'Este código todavía no tiene un anuncio publicado. Vuelve a la página donde iniciaste el pago para continuarlo.',
-	'v2.progress.step1':           'Pago',
-	'v2.progress.step2':           'Verificación',
-	'v2.progress.step3':           'Detalles',
-	'v2.progress.step4':           'Telegram',
+	'v2.progress.step1':           'Detalles',
+	'v2.progress.step2':           'Pago',
+	'v2.progress.step3':           'Verificación',
+	'v2.progress.step4':           'Telegram y contacto',
 	'v2.progress.step5':           'Publicado',
 	'v2.invoice.await_send':       'Envía exactamente este monto a la dirección indicada.',
 	'v2.invoice.await_auto':       'Verificamos el pago automáticamente.',
@@ -1701,6 +1717,7 @@ es: {
 	'v2.rep.years_short':  '{n}a',
 	'v2.rep.rating':       '👍 {pos} / 👎 {neg}',
 	'v2.rep.since':        'En la plataforma: {age}',
+	'v2.rep.reviews':      'Reseñas: 👍 {pos} / 👎 {neg}',
 
 	// ── V2 payment observability (D) ──────────────────────────────────────────
 	'v2.helper.provider_checking':  'Verificando red cada 5 segundos',
@@ -1746,10 +1763,11 @@ es: {
 	// ── V2 board examples (H2) ────────────────────────────────────────────────
 	'v2.board.examples_heading': 'Ejemplos',
 	'v2.board.example_badge':    'Ejemplo',
-	'v2.board.example_1_title':  'Ayuda con trámites del apartamento',
-	'v2.board.example_1_desc':   'Necesito a alguien que ayude a gestionar documentos de alquiler y traducción.',
-	'v2.board.example_2_title':  'Ayuda con solicitud de visa',
-	'v2.board.example_2_desc':   'Busco a alguien familiarizado con las oficinas de visas locales y procedimientos.',
+	'v2.board.example_1_title':  'Cannabis',
+	'v2.board.example_1_desc':   'Apoyo en crisis',
+	'v2.board.example_2_title':  'Cocaína',
+	'v2.board.example_2_desc':   'Solo hablar',
+	'v2.board.example_note':     'Este es un ejemplo, no una solicitud activa.',
 
 	// ── V2 board empty state (H2.5) ───────────────────────────────────────────
 	'v2.board.empty_state': 'No hay solicitudes activas en esta ciudad ahora mismo.',
@@ -2126,6 +2144,10 @@ ka: {
 	'v2.telegram.open_bot':    'Telegram ბოტის გახსნა',
 
 	'v2.form.title':        'თქვენი განცხადება',
+	'v2.form.details_sub':  'გადახდამდე აირჩიეთ, რა სახის მხარდაჭერა გჭირდებათ.',
+	'v2.form.continue':     'გაგრძელება',
+	'v2.form.contact_title':'როგორ დაგიკავშირდეთ Helper?',
+	'v2.form.contact_sub':  'გადახდის შემდეგ Helper მხოლოდ ამ კონტაქტს მიიღებს.',
 	'v2.form.contact_label':'კონტაქტი',
 	'v2.form.contact_hint': 'ეს კონტაქტი მხოლოდ დამხმარეს ეჩვენება, ვინც გადაიხდის წვდომისთვის.',
 	'v2.form.publish':      'განცხადების გამოქვეყნება',
@@ -2159,10 +2181,10 @@ ka: {
 	'v2.restore.back':       '← დაფაზე დაბრუნება',
 	'v2.restore.not_found':  'განცხადება ვერ მოიძებნა. შეამოწმეთ საფულე და კოდი.',
 	'v2.restore.no_listing_yet': 'ამ კოდზე განცხადება ჯერ არ არის გამოქვეყნებული. დაუბრუნდით გვერდს, სადაც გადახდა დაიწყეთ, რომ გააგრძელოთ იგი.',
-	'v2.progress.step1':           'გადახდა',
-	'v2.progress.step2':           'საფულის შემოწმება',
-	'v2.progress.step3':           'დეტალები',
-	'v2.progress.step4':           'Telegram',
+	'v2.progress.step1':           'დეტალები',
+	'v2.progress.step2':           'გადახდა',
+	'v2.progress.step3':           'საფულის შემოწმება',
+	'v2.progress.step4':           'Telegram და კონტაქტი',
 	'v2.progress.step5':           'გამოქვეყნებულია',
 	'v2.invoice.await_send':       'გამოაგზავნეთ ზუსტად ეს თანხა მითითებულ მისამართზე.',
 	'v2.invoice.await_auto':       'გადახდას ავტომატურად ვამოწმებთ.',
@@ -2266,6 +2288,7 @@ ka: {
 	'v2.rep.years_short':  '{n}წ',
 	'v2.rep.rating':       '👍 {pos} / 👎 {neg}',
 	'v2.rep.since':        'პლატფორმაზე: {age}',
+	'v2.rep.reviews':      'შეფასებები: 👍 {pos} / 👎 {neg}',
 
 	// ── V2 payment observability (D) ──────────────────────────────────────────
 	'v2.helper.provider_checking':  'ქსელს ვამოწმებთ ყოველ 5 წამში',
@@ -2311,10 +2334,11 @@ ka: {
 	// ── V2 board examples (H2) ────────────────────────────────────────────────
 	'v2.board.examples_heading': 'მაგალითები',
 	'v2.board.example_badge':    'მაგალითი',
-	'v2.board.example_1_title':  'დახმარება ბინის დოკუმენტებით',
-	'v2.board.example_1_desc':   'საჭიროა ვინმე, ვინც დაეხმარება გაქირავების დოკუმენტებსა და თარგმანში.',
-	'v2.board.example_2_title':  'დახმარება ვიზის განაცხადით',
-	'v2.board.example_2_desc':   'ვეძებ ადამიანს, ვინც ადგილობრივ საკონსულო ოფისებს იცნობს.',
+	'v2.board.example_1_title':  'კანაფი',
+	'v2.board.example_1_desc':   'კრიზისული მხარდაჭერა',
+	'v2.board.example_2_title':  'კოკაინი',
+	'v2.board.example_2_desc':   'უბრალოდ საუბარი',
+	'v2.board.example_note':     'ეს მხოლოდ მაგალითია და არა აქტიური განცხადება.',
 
 	// ── V2 board empty state (H2.5) ───────────────────────────────────────────
 	'v2.board.empty_state': 'ამ ქალაქში ახლა აქტიური განცხადებები არ არის.',

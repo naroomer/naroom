@@ -247,15 +247,27 @@ async function runOnce(runNumber) {
   let helperContext = null;
   let helperPage = null;
 
+  async function fillClientListingDetails(page) {
+    await page.waitForSelector('.chip-group', { timeout: 10000 });
+    await page.locator('.chip-group').nth(0).locator('.chip').first().click();
+    await page.locator('.chip-group').nth(1).locator('.chip').first().click();
+    await page.locator('.chip-group').nth(2).locator('.chip').first().click();
+    await page.click('button.btn-primary:not(:disabled)');
+    await page.waitForSelector('input[type="text"]', { timeout: 10000 });
+  }
+
   try {
 
-    // ── Step 1: wallet → code gate (BEFORE invoice) → invoice ────────────────
-    await step('1: Wallet entry → code gate first → then invoice (correct order)', async () => {
+    // ── Step 1: details → wallet → code gate (BEFORE invoice) → invoice ──────
+    await step('1: Listing details → wallet → code gate → invoice', async () => {
       clientPage = await context.newPage();
       clientPage.on('popup', p => { p.close().catch(() => {}); });
       await clientPage.setViewportSize({ width: 1440, height: 900 });
       await clientPage.goto(`${frontendBase}/v2/new`);
       await clientPage.waitForLoadState('networkidle');
+
+      // A new Client first sees what can be published, before entering a wallet.
+      await fillClientListingDetails(clientPage);
 
       // iOS Safari zooms the whole page when a focused form control is below
       // 16px. Verify the wallet field remains mobile-safe with a full address.
@@ -360,8 +372,8 @@ async function runOnce(runNumber) {
       await clientPage.screenshot({ path: join(SCREENSHOTS_DIR, `run${runNumber}_02_balance.png`) });
     });
 
-    // ── Step 3: Browser clicks Connect Telegram → dev simulate-start → form ──
-    await step('3: Click Connect Telegram → simulate-start → form step auto-advances', async () => {
+    // ── Step 3: Browser clicks Connect Telegram → contact step ───────────────
+    await step('3: Click Connect Telegram → simulate-start → contact step auto-advances', async () => {
       // Must be on telegram step with the tg-btn (initial state, not yet link_pending)
       await clientPage.waitForSelector('button.tg-btn', { timeout: 10000 });
 
@@ -383,26 +395,16 @@ async function runOnce(runNumber) {
       // External event: simulate Telegram sending /start <rawToken> via real webhook
       await devAPI(backendBase, 'POST', '/dev/telegram/simulate-start', { raw_token: rawToken });
 
-      // Poll detects binding=ready → step auto-advances to form.
-      // Wait for chip-group (form step selector).
-      await clientPage.waitForSelector('.chip-group', { timeout: 20000 });
+      // Poll detects binding=ready → step auto-advances to contact.
+      await clientPage.waitForSelector('input.contact-val', { timeout: 20000 });
 
       await clientPage.screenshot({ path: join(SCREENSHOTS_DIR, `run${runNumber}_03_telegram.png`) });
     });
 
-    // ── Step 4: Fill form → publish → done screen ─────────────────────────────
-    await step('4: Fill listing form → publish → done screen with Manage-listing link', async () => {
-      // Already on form step (chip-group visible from step 3)
-      await clientPage.waitForSelector('.chip-group', { timeout: 10000 });
+    // ── Step 4: Fill contact → publish → done screen ──────────────────────────
+    await step('4: Fill contact → publish → done screen with Manage-listing link', async () => {
+      await clientPage.waitForSelector('input.contact-val', { timeout: 10000 });
 
-      // Dependency type — pick first chip
-      await clientPage.locator('.chip-group').first().locator('.chip').first().click();
-      // Help type — second chip-group, first chip
-      await clientPage.locator('.chip-group').nth(1).locator('.chip').first().click();
-      // Urgency — third chip-group
-      await clientPage.locator('.chip-group').nth(2).locator('.chip').first().click();
-      // Language — fourth chip-group
-      await clientPage.locator('.chip-group').nth(3).locator('.chip').first().click();
       // Contact
       await clientPage.locator('input.contact-val').fill('@testv2e2erun' + runNumber);
       await clientPage.waitForTimeout(300);
@@ -468,6 +470,17 @@ async function runOnce(runNumber) {
       const boardHTML = await clientPage.locator('.card.listing').first().innerHTML();
       assert(!boardHTML.includes('@testv2e2erun'), 'contact value visible on board — security violation');
       assert(!boardHTML.includes('management_code'), 'management_code visible on board — security violation');
+
+      const samples = clientPage.locator('.grid > article.card.listing.sample');
+      assert(await samples.count() === 3, `board must contain exactly 3 samples, got ${await samples.count()}`);
+      assert(await clientPage.locator('section.examples').count() === 0,
+        'samples must be part of the common board grid, not a separate section');
+      assert(await clientPage.locator('a.sample').count() === 0,
+        'sample cards must not be clickable purchase links');
+      assert(await samples.locator('.example-badge').count() === 3,
+        'each sample card must have its own visible Example badge');
+      assert(await clientPage.locator('.card.listing .time').count() === 0,
+        'board cards must not show a remaining-time row');
 
       await clientPage.screenshot({ path: join(SCREENSHOTS_DIR, `run${runNumber}_05_board_desktop.png`) });
 
@@ -545,7 +558,7 @@ async function runOnce(runNumber) {
         await tempPage.setViewportSize({ width: 390, height: 844 });
         await tempPage.goto(`${frontendBase}/v2/new`);
         await tempPage.waitForLoadState('networkidle');
-        await tempPage.waitForSelector('input[type="text"]', { timeout: 10000 });
+        await fillClientListingDetails(tempPage);
 
         // Fill same wallet that already has a listing
         await tempPage.fill('input[type="text"]', CLIENT_WALLET);
@@ -656,13 +669,14 @@ async function runOnce(runNumber) {
         'board create link must explicitly request a fresh create journey');
       await createLink.click();
       await clientPage.waitForURL('**/v2/new', { timeout: 10000 });
-      await clientPage.waitForSelector('input[type="text"]', { timeout: 10000 });
+      await clientPage.waitForSelector('.chip-group', { timeout: 10000 });
 
       const staleState = await clientPage.evaluate(() => sessionStorage.getItem('v2_client_state'));
       assert(staleState === null, 'fresh create link did not clear stale v2_client_state');
       assert(await clientPage.locator('.code-box').count() === 0,
         'fresh create incorrectly reopened the old paid flow');
 
+      await fillClientListingDetails(clientPage);
       await clientPage.fill('input[type="text"]', CLIENT_WALLET);
       await clientPage.waitForTimeout(300);
       await clientPage.click('button.btn-primary:not(:disabled)');
