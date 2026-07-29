@@ -819,6 +819,13 @@
 	input:focus, select:focus { border-color: var(--accent); }
 	input.detected { border-color: var(--accent); }
 
+	@media (max-width: 600px) {
+		input, select, textarea {
+			font-size: 16px;
+			max-width: 100%;
+		}
+	}
+
 	.currency-tag {
 		font-size: 11px;
 		color: var(--accent);

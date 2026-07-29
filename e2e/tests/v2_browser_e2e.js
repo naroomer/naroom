@@ -257,9 +257,29 @@ async function runOnce(runNumber) {
       await clientPage.goto(`${frontendBase}/v2/new`);
       await clientPage.waitForLoadState('networkidle');
 
-      // Fill wallet
+      // iOS Safari zooms the whole page when a focused form control is below
+      // 16px. Verify the wallet field remains mobile-safe with a full address.
+      await clientPage.setViewportSize({ width: 390, height: 844 });
       await clientPage.fill('input[type="text"]', CLIENT_WALLET);
+      await clientPage.locator('input[type="text"]').focus();
       await clientPage.waitForTimeout(400);
+      const mobileWalletLayout = await clientPage.evaluate(() => {
+        const input = document.querySelector('input[type="text"]');
+        return {
+          fontSize: Number.parseFloat(getComputedStyle(input).fontSize),
+          documentWidth: document.documentElement.scrollWidth,
+          viewportWidth: document.documentElement.clientWidth,
+          inputRight: input.getBoundingClientRect().right,
+        };
+      });
+      assert(mobileWalletLayout.fontSize >= 16,
+        `mobile wallet input font is ${mobileWalletLayout.fontSize}px; iOS requires at least 16px`);
+      assert(mobileWalletLayout.documentWidth <= mobileWalletLayout.viewportWidth,
+        `new page overflows at 390px: ${mobileWalletLayout.documentWidth} > ${mobileWalletLayout.viewportWidth}`);
+      assert(mobileWalletLayout.inputRight <= mobileWalletLayout.viewportWidth,
+        `wallet input exceeds viewport: right=${mobileWalletLayout.inputRight}, viewport=${mobileWalletLayout.viewportWidth}`);
+      await clientPage.screenshot({ path: join(SCREENSHOTS_DIR, `run${runNumber}_00_wallet_mobile.png`) });
+      await clientPage.setViewportSize({ width: 1440, height: 900 });
 
       // Click the primary button ("Continue" / "$5")
       const btn = clientPage.locator('button.btn-primary:not(:disabled)').first();
