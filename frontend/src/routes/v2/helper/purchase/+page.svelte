@@ -801,6 +801,7 @@
 							<p class="hint">{t('v2.helper.contact_hint')}</p>
 							{#if receiptExpiresAt}
 								<p class="expiry">{t('v2.helper.receipt_expires', { time: formatExpiry(receiptExpiresAt) })}</p>
+								<p class="expiry">{t('v2.helper.same_browser_return')}</p>
 							{/if}
 						</div>
 					{/if}
