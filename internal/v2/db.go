@@ -355,6 +355,13 @@ func MigrateSchema(db *sql.DB) error {
 		return fmt.Errorf("v2: MigrateSchema: last_successful_chain_check_at check: %w", err)
 	}
 
+	// Task 11G handoff: existing production DBs predate the alternate browser
+	// token column even though fresh DBs receive it from schema.sql.
+	helperPurchasesHasAltBrowserToken, err := connColumnExists(ctx, conn, "v2_helper_purchases", "alt_browser_token_hash")
+	if err != nil {
+		return fmt.Errorf("v2: MigrateSchema: alt_browser_token_hash check: %w", err)
+	}
+
 	// Task 11G: available_at column on v2_review_entitlements.
 	reviewEntitlementsHasAvailableAt, err := connColumnExists(ctx, conn, "v2_review_entitlements", "available_at")
 	if err != nil {
@@ -374,6 +381,7 @@ func MigrateSchema(db *sql.DB) error {
 		clientProfilesPublicName && !listingsDisplayNameHasUnique &&
 		!hasLegacyHelperNames &&
 		helperPurchasesHasLastCheckAttempt && helperPurchasesHasLastSuccessfulCheck &&
+		helperPurchasesHasAltBrowserToken &&
 		reviewEntitlementsHasAvailableAt {
 		return nil
 	}
@@ -620,6 +628,19 @@ CREATE INDEX IF NOT EXISTS idx_v2_outbox_recipients_pending
 		); err != nil {
 			return fmt.Errorf("v2: MigrateSchema: add last_successful_chain_check_at: %w", err)
 		}
+	}
+	if !helperPurchasesHasAltBrowserToken {
+		if _, err := tx.ExecContext(ctx,
+			`ALTER TABLE v2_helper_purchases ADD COLUMN alt_browser_token_hash TEXT`,
+		); err != nil {
+			return fmt.Errorf("v2: MigrateSchema: add alt_browser_token_hash: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		CREATE UNIQUE INDEX IF NOT EXISTS uniq_v2_helper_purchases_alt_browser_token
+		ON v2_helper_purchases(alt_browser_token_hash)
+		WHERE alt_browser_token_hash IS NOT NULL`); err != nil {
+		return fmt.Errorf("v2: MigrateSchema: create alt_browser_token_hash index: %w", err)
 	}
 
 	// ── Task 11G: available_at column on v2_review_entitlements ──────────────

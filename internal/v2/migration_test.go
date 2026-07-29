@@ -790,3 +790,126 @@ func TestMigration_IdempotentAllPaths(t *testing.T) {
 		}
 	})
 }
+
+func TestMigration_AddsAltBrowserTokenToExistingHelperPurchases(t *testing.T) {
+	oldSchema := strings.Replace(
+		schemaSQL,
+		"    alt_browser_token_hash    TEXT UNIQUE,\n",
+		"",
+		1,
+	)
+	if oldSchema == schemaSQL {
+		t.Fatal("old-schema fixture did not remove alt_browser_token_hash")
+	}
+
+	db, err := sql.Open("sqlite", "file::memory:?mode=memory&_busy_timeout=5000")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		t.Fatalf("enable foreign keys: %v", err)
+	}
+	if _, err := db.Exec(oldSchema); err != nil {
+		t.Fatalf("apply old schema: %v", err)
+	}
+
+	const (
+		clientProfileID  = "1111111111111111111111111111111111111111111111111111111111111111"
+		clientWalletFP   = "2222222222222222222222222222222222222222222222222222222222222222"
+		flowID           = "3333333333333333333333333333333333333333333333333333333333333333"
+		listingID        = "4444444444444444444444444444444444444444444444444444444444444444"
+		helperProfileID  = "5555555555555555555555555555555555555555555555555555555555555555"
+		helperWalletFP   = "6666666666666666666666666666666666666666666666666666666666666666"
+		purchaseID       = "7777777777777777777777777777777777777777777777777777777777777777"
+		browserTokenHash = "8888888888888888888888888888888888888888888888888888888888888888"
+	)
+	const now = int64(1700000000)
+
+	if _, err := db.Exec(`
+		INSERT INTO v2_client_profiles
+			(id, wallet_fingerprint, currency, public_name, created_at, updated_at)
+		VALUES (?, ?, 'LTC', 'Old Client', ?, ?)`,
+		clientProfileID, clientWalletFP, now, now,
+	); err != nil {
+		t.Fatalf("insert client profile: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO v2_client_flows
+			(id, wallet_fingerprint, currency, management_code_hash, state,
+			 client_profile_id, required_hard_floor_usd, created_at, updated_at)
+		VALUES (?, ?, 'LTC', 'old-code-hash', 'form_ready', ?, 50, ?, ?)`,
+		flowID, clientWalletFP, clientProfileID, now, now,
+	); err != nil {
+		t.Fatalf("insert client flow: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO v2_listings
+			(id, flow_id, city, country_code, dependency_type, help_type, urgency,
+			 languages, display_name, contact_type, contact_ciphertext, contact_nonce,
+			 contact_key_version, state, visible_until, first_published_at,
+			 last_activated_at, entitlement_expires_at, activation_count, created_at, updated_at)
+		VALUES (?, ?, 'tbilisi', 'GE', 'alcohol', 'crisis', 'urgent',
+			'["en"]', 'Old Listing', 'telegram', 'cipher', 'nonce', 'v1',
+			'visible', ?, ?, ?, ?, 1, ?, ?)`,
+		listingID, flowID, now+86400, now, now, now+5*86400, now, now,
+	); err != nil {
+		t.Fatalf("insert listing: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO v2_helper_profiles
+			(id, wallet_fingerprint, currency, public_name, created_at, updated_at)
+		VALUES (?, ?, 'LTC', 'Old Helper', ?, ?)`,
+		helperProfileID, helperWalletFP, now, now,
+	); err != nil {
+		t.Fatalf("insert helper profile: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO v2_helper_purchases
+			(id, listing_id, helper_profile_id, browser_token_hash, state,
+			 country_code_snapshot, required_post_payment_floor_usd, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'awaiting_payment', 'GE', 50, ?, ?)`,
+		purchaseID, listingID, helperProfileID, browserTokenHash, now, now,
+	); err != nil {
+		t.Fatalf("insert helper purchase: %v", err)
+	}
+
+	for run := 1; run <= 2; run++ {
+		if err := MigrateSchema(db); err != nil {
+			t.Fatalf("MigrateSchema run %d: %v", run, err)
+		}
+	}
+	if err := VerifyRequiredColumns(db, "v2_helper_purchases", []string{"alt_browser_token_hash"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotID string
+	if err := db.QueryRow(`
+		SELECT id FROM v2_helper_purchases
+		WHERE browser_token_hash = ? OR alt_browser_token_hash = ?`,
+		browserTokenHash, browserTokenHash,
+	).Scan(&gotID); err != nil {
+		t.Fatalf("lookup using migrated query: %v", err)
+	}
+	if gotID != purchaseID {
+		t.Fatalf("purchase changed during migration: got %s want %s", gotID, purchaseID)
+	}
+
+	altHash := "9999999999999999999999999999999999999999999999999999999999999999"
+	if _, err := db.Exec(`UPDATE v2_helper_purchases SET alt_browser_token_hash = ? WHERE id = ?`, altHash, purchaseID); err != nil {
+		t.Fatalf("set alternate browser token: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO v2_helper_purchases
+			(id, listing_id, helper_profile_id, browser_token_hash, alt_browser_token_hash,
+			 state, country_code_snapshot, required_post_payment_floor_usd, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, 'failed', 'GE', 50, ?, ?)`,
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		listingID, helperProfileID,
+		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		altHash, now, now,
+	); err == nil {
+		t.Fatal("duplicate alt_browser_token_hash must violate unique index")
+	}
+}
