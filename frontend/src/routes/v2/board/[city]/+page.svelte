@@ -3,11 +3,11 @@
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
 	import { lang, t as tFn } from '$lib/i18n.js';
-	import { CITIES } from '$lib/cities.js';
 
 	let t = $derived((key, params) => tFn($lang, key, params));
 
 	let city = $derived(page.params.city);
+	let cities = $state([]);
 	let listings = $state([]);
 	let loading = $state(true);
 	let error = $state('');
@@ -49,7 +49,17 @@
 		}
 	}
 
+	async function loadCities() {
+		try {
+			const res = await fetch('/api/v2/board/cities');
+			if (!res.ok) return;
+			const data = await res.json();
+			if (Array.isArray(data)) cities = data;
+		} catch {}
+	}
+
 	onMount(() => {
+		loadCities();
 		loadBoard();
 		// Scan localStorage for any saved helper purchases
 		try {
@@ -78,7 +88,7 @@
 	</header>
 
 	<div class="tabs">
-		{#each CITIES as c}
+		{#each cities as c}
 			<a
 				href="/v2/board/{c.id}"
 				class="tab"
