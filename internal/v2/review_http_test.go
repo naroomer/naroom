@@ -74,6 +74,34 @@ func TestReviewHTTP_CapabilitySuccess(t *testing.T) {
 	if _, ok := resp["client_display_name"].(string); !ok {
 		t.Error("response missing client_display_name")
 	}
+	if submitted, ok := resp["review_submitted"].(bool); !ok || submitted {
+		t.Errorf("fresh capability review_submitted: want false, got %v", resp["review_submitted"])
+	}
+}
+
+func TestReviewHTTP_CapabilityReportsConsumedAfterReload(t *testing.T) {
+	h, rs, db := newTestReviewHandler(t)
+	purchaseID, _, _, rawToken := mustCreateContactReadyPurchase(t, db)
+
+	token := helperTokenFromPurchase(t, db, purchaseID)
+	if err := rs.SubmitHelperReview(token, "positive"); err != nil {
+		t.Fatalf("SubmitHelperReview: %v", err)
+	}
+
+	rr := reviewPost(t, h.Routes(), "/v2/helper/reviews/capability", map[string]string{
+		"purchase_id":    purchaseID,
+		"purchase_token": rawToken,
+		"wallet_address": testBTCBech32Addr,
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("capability after consume: status %d, body: %s", rr.Code, rr.Body)
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
+	if submitted, ok := resp["review_submitted"].(bool); !ok || !submitted {
+		t.Errorf("consumed capability review_submitted: want true, got %v", resp["review_submitted"])
+	}
 }
 
 func TestReviewHTTP_CapabilityNoStoreHeaders(t *testing.T) {

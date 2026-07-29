@@ -85,6 +85,7 @@ type HelperReviewCapabilityResult struct {
 	ExpiresAt         time.Time
 	ClientReputation  ClientReputationView
 	ClientDisplayName string // listing-scoped temporary display name
+	ReviewSubmitted   bool
 }
 
 // ── review_ref generation ─────────────────────────────────────────────────────
@@ -387,12 +388,13 @@ func (rs *ReviewService) GetHelperReviewCapability(
 	var reviewRef string
 	var expiresAt int64
 	var availableAt int64
+	var consumedAt sql.NullInt64
 	err = rs.db.QueryRow(`
-		SELECT review_ref, expires_at, available_at
+		SELECT review_ref, expires_at, available_at, consumed_at
 		FROM v2_review_entitlements
 		WHERE purchase_id = ? AND reviewer_side = 'helper'`,
 		purchaseID,
-	).Scan(&reviewRef, &expiresAt, &availableAt)
+	).Scan(&reviewRef, &expiresAt, &availableAt, &consumedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return HelperReviewCapabilityResult{}, ErrReviewCapabilityNotFound
 	}
@@ -457,6 +459,7 @@ func (rs *ReviewService) GetHelperReviewCapability(
 			NegativeCount: clientNegative,
 		},
 		ClientDisplayName: displayName,
+		ReviewSubmitted:   consumedAt.Valid,
 	}, nil
 }
 

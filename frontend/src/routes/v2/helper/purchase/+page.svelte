@@ -361,7 +361,8 @@
 			}
 			if (!res.ok) return;
 			const data = await res.json();
-			reviewToken = data.review_token || '';
+			reviewSubmitted = data.review_submitted === true;
+			reviewToken = reviewSubmitted ? '' : (data.review_token || '');
 			reviewClientReputation = data.client_reputation || null;
 			reviewClientName = data.client_display_name || '';
 			reviewAvailableAt = 0;

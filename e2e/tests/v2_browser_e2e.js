@@ -1364,6 +1364,13 @@ async function runOnce(runNumber) {
       // review-done is MANDATORY — if it fails, the test fails (no catch)
       await helperPage.waitForSelector('.review-done', { timeout: 10000 });
 
+      // Reload/return must preserve the consumed state and never show rating buttons again.
+      await helperPage.reload();
+      await helperPage.waitForLoadState('networkidle');
+      await helperPage.waitForSelector('.review-done', { timeout: 10000 });
+      assert(await helperPage.locator('button.review-btn').count() === 0,
+        'review buttons reappeared after reload even though the review was consumed');
+
       // Capture client aggregate BEFORE Telegram callback (helper UI review may have incremented it)
       const boardBefore = await fetch(`${frontendBase}/api/v2/board/tbilisi`);
       const boardDataBefore = await boardBefore.json();

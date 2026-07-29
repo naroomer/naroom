@@ -113,6 +113,7 @@ type helperReviewCapabilityResponse struct {
 	ExpiresAt         int64                `json:"expires_at"`
 	ClientReputation  clientReputationJSON `json:"client_reputation"`
 	ClientDisplayName string               `json:"client_display_name"`
+	ReviewSubmitted   bool                 `json:"review_submitted"`
 }
 
 func (h *HelperReviewHandler) handleCapability(w http.ResponseWriter, r *http.Request) {
@@ -184,6 +185,7 @@ func (h *HelperReviewHandler) handleCapability(w http.ResponseWriter, r *http.Re
 			NegativeCount: result.ClientReputation.NegativeCount,
 		},
 		ClientDisplayName: result.ClientDisplayName,
+		ReviewSubmitted:   result.ReviewSubmitted,
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(resp) //nolint:errcheck
