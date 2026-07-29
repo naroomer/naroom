@@ -98,6 +98,18 @@
 	onMount(() => {
 		fetchPubConfig();
 		fetchCities();
+
+		// Every explicit "create" link carries fresh=1. It means the user chose
+		// to start a new listing, so an older completed/hidden flow must not
+		// hijack that action. Remove the flag immediately: after a new intent is
+		// created, an ordinary refresh must continue that same payment.
+		const params = new URLSearchParams(window.location.search);
+		if (params.get('fresh') === '1') {
+			clearClientState();
+			window.history.replaceState(window.history.state, '', window.location.pathname + window.location.hash);
+			return;
+		}
+
 		const saved = sessionStorage.getItem('v2_client_state');
 		if (saved) {
 			try {

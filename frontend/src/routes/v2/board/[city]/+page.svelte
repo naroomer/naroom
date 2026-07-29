@@ -187,7 +187,7 @@
 	{:else}
 		<div class="grid">
 			<!-- CTA card -->
-			<a href="/v2/new" class="card cta">
+			<a href="/v2/new?fresh=1" class="card cta">
 				<div class="cta-inner">
 					<div class="cta-plus">+</div>
 					<div class="cta-text">{t('v2.board.i_need_help')}</div>
@@ -242,7 +242,7 @@
 		{#if listings.length === 0}
 			<div class="empty-state">
 				<p class="empty-state-text">{t('v2.board.empty_state')}</p>
-				<a href="/v2/new" class="btn-cta">{t('v2.board.empty_cta')}</a>
+				<a href="/v2/new?fresh=1" class="btn-cta">{t('v2.board.empty_cta')}</a>
 			</div>
 		{/if}
 

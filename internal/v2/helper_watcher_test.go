@@ -329,7 +329,6 @@ func TestHelperWatcher_ProviderOutageAndDuplicateCycles(t *testing.T) {
 
 // Test 17: Payment detected while listing visible; listing hidden later → confirm still works.
 func TestHelperWatcher_LateConfirmAfterListingHidden(t *testing.T) {
-	now := time.Now()
 	svc, db := newTestHelperService(t)
 
 	btcWallet := testBTCBech32Addr
@@ -338,13 +337,17 @@ func TestHelperWatcher_LateConfirmAfterListingHidden(t *testing.T) {
 
 	draft := HelperInvoiceDraft{PaymentAddress: "payaddr_late17", AmountAtomic: 100000, AmountUSDCents: helperInvoiceUSDCents}
 	_, view, _ := svc.CreatePurchase(newID(), listingID, currency, normalized, draft)
+	now := time.Now()
 
-	svc.RecordHelperDetection(view.PurchaseID, "txid_17", []string{btcWallet}, 100000, now) //nolint:errcheck
+	_, err := svc.RecordHelperDetection(view.PurchaseID, "txid_17", []string{btcWallet}, 100000, now)
+	if err != nil {
+		t.Fatalf("RecordHelperDetection: %v", err)
+	}
 
 	// Listing becomes hidden.
 	db.Exec(`UPDATE v2_listings SET state='hidden', visible_until=NULL, updated_at=? WHERE id=?`, now.Unix(), listingID) //nolint:errcheck
 
-	_, err := svc.ConfirmHelperPayment(view.PurchaseID, now)
+	_, err = svc.ConfirmHelperPayment(view.PurchaseID, now)
 	if err != nil {
 		t.Fatalf("ConfirmHelperPayment after listing hidden: %v", err)
 	}

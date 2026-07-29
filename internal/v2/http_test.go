@@ -533,6 +533,37 @@ func TestHTTPRestoreCorrect(t *testing.T) {
 	}
 }
 
+func TestHTTPRestoreAcceptsFormattedManagementCode(t *testing.T) {
+	issuer := &fakeIssuer{draft: btcDraft()}
+	h, _ := newTestHandler(t, issuer, &fakeBalance{}, nil)
+	router := h.Routes()
+
+	const wallet = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+	wCreate := postJSON(router, createPath, map[string]string{"wallet_address": wallet})
+	if wCreate.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d", wCreate.Code)
+	}
+	var created createResponse
+	decodeJSON(t, wCreate, &created)
+
+	mid := len(created.ManagementCode) / 2
+	formattedCode := " \n" + strings.ToUpper(created.ManagementCode[:mid]) +
+		" \t" + strings.ToUpper(created.ManagementCode[mid:]) + "\n "
+	wRestore := postJSON(router, restorePath, map[string]string{
+		"management_code": formattedCode,
+		"wallet_address":  wallet,
+	})
+	if wRestore.Code != http.StatusOK {
+		t.Fatalf("restore formatted code: expected 200, got %d: %s", wRestore.Code, wRestore.Body.String())
+	}
+
+	var restored restoreResponse
+	decodeJSON(t, wRestore, &restored)
+	if restored.FlowID != created.FlowID {
+		t.Errorf("flow_id mismatch: got %q, want %q", restored.FlowID, created.FlowID)
+	}
+}
+
 // ── Test 9: Restore response omits sensitive fields ───────────────────────────
 
 func TestHTTPRestoreNoSensitiveFields(t *testing.T) {

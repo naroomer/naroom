@@ -193,11 +193,18 @@ func (s *Service) walletFingerprint(currency, normalizedAddr string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-// codeHash returns HMAC-SHA256(key, "naroom:v2:management-code:"+rawCode).
+// normalizeManagementCode makes copied codes resilient to case changes and
+// whitespace introduced by wrapping or manual entry. Generated codes are
+// lowercase hexadecimal, so this remains compatible with every existing hash.
+func normalizeManagementCode(rawCode string) string {
+	return strings.ToLower(strings.Join(strings.Fields(rawCode), ""))
+}
+
+// codeHash returns HMAC-SHA256(key, "naroom:v2:management-code:"+normalizedCode).
 func (s *Service) codeHash(rawCode string) string {
 	mac := hmac.New(sha256.New, s.hmacKey)
 	mac.Write([]byte(codeDomain))
-	mac.Write([]byte(rawCode))
+	mac.Write([]byte(normalizeManagementCode(rawCode)))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 

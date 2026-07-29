@@ -617,22 +617,41 @@ async function runOnce(runNumber) {
       // External event: force listing to 'hidden' AND delete binding (binding TTL simulated)
       await devAPI(backendBase, 'POST', '/dev/listing/expire', { listing_id: listingId });
 
-      // Same wallet, listing now hidden (not visible) → /v2/new must NOT block a
-      // brand new paid flow (only an effectively VISIBLE listing blocks create).
-      await withIncognito(async (tempPage) => {
-        await tempPage.setViewportSize({ width: 390, height: 844 });
-        await tempPage.goto(`${frontendBase}/v2/new`);
-        await tempPage.waitForLoadState('networkidle');
-        await tempPage.waitForSelector('input[type="text"]', { timeout: 10000 });
-        await tempPage.fill('input[type="text"]', CLIENT_WALLET);
-        await tempPage.waitForTimeout(300);
-        await tempPage.click('button.btn-primary:not(:disabled)');
-        // A NEW payment intent must be created (code gate reached), not a wallet_already_visible error.
-        await tempPage.waitForSelector('.code-box', { timeout: 10000 });
-        const errCount = await tempPage.locator('.err').count();
-        assert(errCount === 0, 'hidden listing incorrectly blocked a brand-new paid create flow');
-        // Abandon this throwaway second flow deliberately — no payment, no publish.
-      });
+      // Reproduce the real browser condition: an old saved create flow remains
+      // in sessionStorage. Clicking the board "+" must explicitly start fresh,
+      // clear that marker, and must not reopen the old Telegram/payment step.
+      await clientPage.evaluate(({ code, wallet, oldFlowId }) => {
+        sessionStorage.setItem('v2_client_state', JSON.stringify({
+          managementCode: code,
+          walletAddress: wallet,
+          flowId: oldFlowId,
+        }));
+      }, { code: managementCode, wallet: CLIENT_WALLET, oldFlowId: flowId });
+
+      await clientPage.goto(`${frontendBase}/v2/board/tbilisi`);
+      await clientPage.waitForLoadState('networkidle');
+      const createLink = clientPage.locator('a.card.cta').first();
+      await createLink.waitFor({ timeout: 10000 });
+      assert((await createLink.getAttribute('href')) === '/v2/new?fresh=1',
+        'board create link must explicitly request a fresh create journey');
+      await createLink.click();
+      await clientPage.waitForURL('**/v2/new', { timeout: 10000 });
+      await clientPage.waitForSelector('input[type="text"]', { timeout: 10000 });
+
+      const staleState = await clientPage.evaluate(() => sessionStorage.getItem('v2_client_state'));
+      assert(staleState === null, 'fresh create link did not clear stale v2_client_state');
+      assert(await clientPage.locator('.code-box').count() === 0,
+        'fresh create incorrectly reopened the old paid flow');
+
+      await clientPage.fill('input[type="text"]', CLIENT_WALLET);
+      await clientPage.waitForTimeout(300);
+      await clientPage.click('button.btn-primary:not(:disabled)');
+      // A NEW payment intent must be created (code gate reached), not a
+      // wallet_already_visible error.
+      await clientPage.waitForSelector('.code-box', { timeout: 10000 });
+      const errCount = await clientPage.locator('.err').count();
+      assert(errCount === 0, 'hidden listing incorrectly blocked a brand-new paid create flow');
+      // Abandon this throwaway second flow deliberately — no payment, no publish.
 
       // Owner mode: Client's own browser revisits the (now hidden) listing.
       await clientPage.goto(`${frontendBase}/v2/listing/${listingId}`);
@@ -1366,11 +1385,14 @@ async function runOnce(runNumber) {
 
         await restorePage.screenshot({ path: join(SCREENSHOTS_DIR, `run${runNumber}_10_restore_error.png`) });
 
-        // Valid pair → owner mode on the listing page (never /v2/new).
+        // Valid pair remains valid after copy/paste wrapping and case changes,
+        // then opens owner mode on the listing page (never /v2/new).
+        const splitAt = Math.floor(managementCode.length / 2);
+        const formattedCode = ` \n${managementCode.slice(0, splitAt).toUpperCase()} \t${managementCode.slice(splitAt).toUpperCase()}\n `;
         await restorePage.goto(`${frontendBase}/v2/restore`);
         await restorePage.waitForLoadState('networkidle');
         await restorePage.fill('input[type="text"]', CLIENT_WALLET);
-        await restorePage.fill('input.code-input', managementCode);
+        await restorePage.fill('input.code-input', formattedCode);
         await restorePage.click('button.btn-primary:not(:disabled)');
         await restorePage.waitForURL(`**\/v2\/listing\/${listingId}`, { timeout: 10000 });
         await restorePage.waitForSelector('[data-testid="owner-mode"]', { timeout: 10000 });

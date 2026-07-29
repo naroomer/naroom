@@ -97,7 +97,7 @@
 		</section>
 
 		<div class="cta-row">
-			<a href="/v2/new" class="cta-btn">{t('v2.board.i_need_help')}</a>
+			<a href="/v2/new?fresh=1" class="cta-btn">{t('v2.board.i_need_help')}</a>
 		</div>
 	</div>
 </div>

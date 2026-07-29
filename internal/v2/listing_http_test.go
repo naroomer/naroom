@@ -420,6 +420,29 @@ func TestListingHTTPWrongCodeWrongWallet(t *testing.T) {
 	}
 }
 
+func TestListingHTTPRestoreAcceptsFormattedManagementCode(t *testing.T) {
+	h, _, svc, _, _ := newJourneyHandler(t, time.Now, nil)
+	mux := h.Routes()
+
+	rawCode, _, err := svc.CreatePaymentIntent(testBTCBech32Addr, "BTC", validDraft())
+	if err != nil {
+		t.Fatalf("CreatePaymentIntent: %v", err)
+	}
+	mid := len(rawCode) / 2
+	formattedCode := "\n " + strings.ToUpper(rawCode[:mid]) +
+		" \t" + strings.ToUpper(rawCode[mid:]) + " \n"
+
+	w := journeyPost(mux, "/v2/client/listings/restore",
+		capBody(formattedCode, testBTCBech32Addr))
+	if w.Code != http.StatusOK {
+		t.Fatalf("formatted management code: got %d, want 200: %s", w.Code, w.Body.String())
+	}
+	r := decodeRestoreNav(w.Body.Bytes())
+	if r.Phase != phaseAwaitingPayment {
+		t.Errorf("phase=%q, want %q", r.Phase, phaseAwaitingPayment)
+	}
+}
+
 // Test 5
 func TestListingHTTPRateLimitBuckets(t *testing.T) {
 	now := time.Unix(2_000_000, 0)

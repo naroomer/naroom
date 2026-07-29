@@ -448,7 +448,7 @@
 					</button>
 				{/if}
 			{:else if ownerView.state === 'finished'}
-				<a href="/v2/new" class="btn-primary btn-link">{t('v2.owner.state_finished')} · {t('back_to_board')}</a>
+				<a href="/v2/new?fresh=1" class="btn-primary btn-link">{t('v2.owner.state_finished')} · {t('back_to_board')}</a>
 			{/if}
 
 			<a href="/v2/board/{listing?.city || ownerView.city || 'tbilisi'}" class="btn-secondary" data-testid="owner-back-board">{t('v2.listing.back')}</a>
