@@ -387,9 +387,6 @@
 				<div class="listing-body">
 					<div class="listing-head">
 						<div class="dep">{t('dep.' + ownerView.dep_type)}</div>
-						<span class="urgency-tag" style="color: {urgencyColor(ownerView.urgency)}">
-							{t('urgency.' + ownerView.urgency)}
-						</span>
 					</div>
 					<div class="help">{t('help.' + ownerView.help_type)}</div>
 					<div class="meta-row">
@@ -465,9 +462,6 @@
 			<div class="listing-body">
 				<div class="listing-head">
 					<div class="dep">{t('dep.' + listing.dependency_type)}</div>
-					<span class="urgency-tag" style="color: {urgencyColor(listing.urgency)}">
-						{t('urgency.' + listing.urgency)}
-					</span>
 				</div>
 				<div class="help">{t('help.' + listing.help_type)}</div>
 				<div class="meta-row">
@@ -704,7 +698,6 @@
 	.listing-body { padding: 16px; display: flex; flex-direction: column; gap: 8px; }
 	.listing-head { display: flex; align-items: center; justify-content: space-between; }
 	.dep { font-size: 18px; font-weight: 700; color: var(--text); }
-	.urgency-tag { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
 	.help { font-size: 13px; color: var(--text-dim); }
 	.meta-row { display: flex; align-items: center; gap: 12px; margin-top: 4px; }
 	.langs { font-size: 11px; color: var(--text-faint); }

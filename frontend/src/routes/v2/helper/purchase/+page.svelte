@@ -1557,8 +1557,4 @@
 	}
 	.btn-text:hover { color: var(--text); }
 
-	/* ── Prevent document scroll — this page owns the full viewport ── */
-	:global(html), :global(body) {
-		overflow: hidden;
-	}
 </style>

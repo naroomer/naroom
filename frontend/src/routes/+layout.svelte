@@ -125,6 +125,8 @@
 		font-size: 14px;
 		line-height: 1.5;
 		min-height: 100vh;
+		overflow-x: hidden;
+		overflow-y: auto;
 	}
 
 	:global(a) {

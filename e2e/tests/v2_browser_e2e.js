@@ -516,6 +516,8 @@ async function runOnce(runNumber) {
         await tempPage.goto(`${frontendBase}/v2/listing/${listingId}`);
         await tempPage.waitForLoadState('networkidle');
         await tempPage.waitForSelector('input[type="text"]', { timeout: 10000 });
+        assert(await tempPage.locator('.urgency-tag').count() === 0,
+          'listing detail must not display the legacy urgency label');
 
         await tempPage.fill('input[type="text"]', HELPER_WALLET);
         await tempPage.waitForTimeout(300);
@@ -840,6 +842,37 @@ async function runOnce(runNumber) {
       await secondPage.screenshot({
         path: join(SCREENSHOTS_DIR, `run${runNumber}_6a_second_device.png`),
       });
+
+      // Loading the full-viewport purchase route must not leave document
+      // scrolling disabled after navigating to the taller listing form.
+      await secondPage.goto(`${frontendBase}/v2/helper/purchase`);
+      await secondPage.waitForLoadState('networkidle');
+      await secondPage.goto(`${frontendBase}/v2/new?fresh=1`);
+      await secondPage.waitForLoadState('networkidle');
+      await secondPage.waitForSelector('.section', { timeout: 10000 });
+      const mobileScroll = await secondPage.evaluate(async () => {
+        const probe = document.createElement('div');
+        probe.style.height = '200px';
+        probe.setAttribute('aria-hidden', 'true');
+        document.body.appendChild(probe);
+        const before = {
+          scrollHeight: document.documentElement.scrollHeight,
+          clientHeight: document.documentElement.clientHeight,
+          overflowY: getComputedStyle(document.body).overflowY,
+        };
+        window.scrollTo(0, document.documentElement.scrollHeight);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        const result = { ...before, scrollY: window.scrollY };
+        probe.remove();
+        return result;
+      });
+      assert(mobileScroll.scrollHeight > mobileScroll.clientHeight,
+        `mobile scroll probe did not extend document: ${mobileScroll.scrollHeight} <= ${mobileScroll.clientHeight}`);
+      assert(mobileScroll.overflowY !== 'hidden',
+        'mobile listing form inherits overflow-y:hidden after visiting purchase page');
+      assert(mobileScroll.scrollY > 0,
+        'mobile listing form cannot be scrolled after visiting purchase page');
+
       await secondPage.close();
       await secondDevice.close();
       scratchContexts.splice(scratchContexts.indexOf(secondDevice), 1);
