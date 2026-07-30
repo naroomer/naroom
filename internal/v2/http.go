@@ -21,7 +21,6 @@ import (
 	"errors"
 	"io"
 	"mime"
-	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -325,21 +324,11 @@ func (h *ClientHandler) Routes() http.Handler {
 	return mux
 }
 
-// clientKey derives a rate-limit bucket key from the request's remote IP.
-// The IP is extracted via net.SplitHostPort (with a safe fallback for bare
-// addresses) and canonicalized via net.ParseIP to collapse format variants.
-// The raw IP is never stored; only its HMAC digest enters the limiter map.
+// clientKey derives a rate-limit bucket key from the request's real client
+// IP (see RealClientIP for the trusted-proxy resolution model). The raw IP
+// is never stored; only its HMAC digest enters the limiter map.
 func (h *ClientHandler) clientKey(r *http.Request) string {
-	addr := r.RemoteAddr
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		// RemoteAddr without port — use as-is.
-		host = addr
-	}
-	// Canonicalize: collapse IPv4/IPv6 format variants (e.g. "::1" vs "0:0:…:1").
-	if ip := net.ParseIP(host); ip != nil {
-		host = ip.String()
-	}
+	host := RealClientIP(r)
 	mac := hmac.New(sha256.New, h.rateLimitKey)
 	mac.Write([]byte(rateLimitDomain))
 	mac.Write([]byte(host))

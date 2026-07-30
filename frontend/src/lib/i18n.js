@@ -500,6 +500,8 @@ en: {
 	// ── V2 helper purchase page ────────────────────────────────────────────────
 	'v2.helper.no_token':         'Missing purchase token. Please start from the listing page.',
 	'v2.helper.no_purchase':      'Purchase not found. Please start from the listing page.',
+	'v2.helper.restore_failed':   'Couldn\'t check your purchase status right now. Your purchase token is safe — please retry.',
+	'v2.helper.restore_blocked':  'This purchase can\'t be continued right now. Please start again from the listing page.',
 	'v2.helper.invoice_title':    'Send payment to unlock contact',
 	'v2.helper.contact_with':     'Contact for: {name}',
 	'v2.helper.balance_sub':      'Top up your wallet and check balance again.',
@@ -1070,6 +1072,8 @@ ru: {
 
 	'v2.helper.no_token':         'Токен покупки отсутствует. Начните со страницы объявления.',
 	'v2.helper.no_purchase':      'Покупка не найдена. Начните со страницы объявления.',
+	'v2.helper.restore_failed':   'Не удалось проверить статус покупки. Токен покупки сохранён — попробуйте ещё раз.',
+	'v2.helper.restore_blocked':  'Эту покупку сейчас нельзя продолжить. Начните заново со страницы объявления.',
 	'v2.helper.invoice_title':    'Отправьте платёж для получения контакта',
 	'v2.helper.contact_with':     'Контакт: {name}',
 	'v2.helper.balance_sub':      'Пополните кошелёк и проверьте баланс снова.',
@@ -1633,6 +1637,8 @@ es: {
 
 	'v2.helper.no_token':         'Token de compra faltante. Comienza desde la página del anuncio.',
 	'v2.helper.no_purchase':      'Compra no encontrada. Comienza desde la página del anuncio.',
+	'v2.helper.restore_failed':   'No se pudo verificar el estado de tu compra. Tu token de compra está a salvo — inténtalo de nuevo.',
+	'v2.helper.restore_blocked':  'No se puede continuar esta compra ahora. Empieza de nuevo desde la página del anuncio.',
 	'v2.helper.invoice_title':    'Enviar pago para desbloquear contacto',
 	'v2.helper.contact_with':     'Contacto para: {name}',
 	'v2.helper.balance_sub':      'Recarga tu billetera y verifica el saldo nuevamente.',
@@ -2197,6 +2203,8 @@ ka: {
 
 	'v2.helper.no_token':         'შეძენის ტოკენი მissing. დაიწყეთ განცხადების გვერდიდან.',
 	'v2.helper.no_purchase':      'შეძენა ვერ მოიძებნა. დაიწყეთ განცხადების გვერდიდან.',
+	'v2.helper.restore_failed':   'ვერ მოხერხდა შესყიდვის სტატუსის შემოწმება. თქვენი ტოკენი დაცულია — გთხოვთ სცადოთ თავიდან.',
+	'v2.helper.restore_blocked':  'ამ შესყიდვის გაგრძელება ამჟამად შეუძლებელია. დაიწყეთ თავიდან განცხადების გვერდიდან.',
 	'v2.helper.invoice_title':    'გაგზავნეთ გადახდა კონტაქტის გასახსნელად',
 	'v2.helper.contact_with':     'კონტაქტი: {name}',
 	'v2.helper.balance_sub':      'შეავსეთ საფულე და კვლავ შეამოწმეთ ბალანსი.',

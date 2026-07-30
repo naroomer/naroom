@@ -14,7 +14,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -95,16 +94,9 @@ func informerIPKeyHMAC(rateLimitKey []byte, host string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-// remoteHost extracts the canonical host from r.RemoteAddr.
+// remoteHost returns the request's real client IP (see RealClientIP).
 func remoteHost(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.String()
-	}
-	return host
+	return RealClientIP(r)
 }
 
 // handleAccess handles POST /v2/informer/access.

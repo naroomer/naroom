@@ -26,7 +26,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -266,17 +265,11 @@ func (h *ClientJourneyHandler) Routes() http.Handler {
 	return mux
 }
 
-// journeyKey derives a rate-limit bucket key from the request remote IP.
-// The raw IP is never stored; only the HMAC digest enters the limiter map.
+// journeyKey derives a rate-limit bucket key from the request's real client
+// IP (see RealClientIP). The raw IP is never stored; only the HMAC digest
+// enters the limiter map.
 func (h *ClientJourneyHandler) journeyKey(r *http.Request) string {
-	addr := r.RemoteAddr
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		host = addr
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		host = ip.String()
-	}
+	host := RealClientIP(r)
 	mac := hmac.New(sha256.New, h.rateLimitKey)
 	mac.Write([]byte(rateLimitDomain))
 	mac.Write([]byte(host))

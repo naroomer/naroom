@@ -8,7 +8,6 @@ package v2
 import (
 	"database/sql"
 	"encoding/json"
-	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -62,12 +61,8 @@ func (h *CitySummaryHandler) Routes() http.Handler {
 }
 
 func (h *CitySummaryHandler) handleCities(w http.ResponseWriter, r *http.Request) {
-	// Rate limit by remote IP — strip port before bucketing.
-	remoteAddr := r.RemoteAddr
-	host, _, err := net.SplitHostPort(remoteAddr)
-	if err != nil {
-		host = remoteAddr
-	}
+	// Rate limit by the request's real client IP (see RealClientIP).
+	host := RealClientIP(r)
 	if !h.lim.Allow(host) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")

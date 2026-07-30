@@ -11,7 +11,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -63,16 +62,10 @@ func (h *TelegramLinkHandler) Routes() http.Handler {
 	return mux
 }
 
-// telegramClientKey derives a rate-limit bucket key from the request's remote IP.
+// telegramClientKey derives a rate-limit bucket key from the request's real
+// client IP (see RealClientIP).
 func (h *TelegramLinkHandler) telegramClientKey(r *http.Request) string {
-	addr := r.RemoteAddr
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		host = addr
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		host = ip.String()
-	}
+	host := RealClientIP(r)
 	mac := hmac.New(sha256.New, h.rateLimitKey)
 	mac.Write([]byte(rateLimitDomain))
 	mac.Write([]byte(host))

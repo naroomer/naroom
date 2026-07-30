@@ -22,6 +22,11 @@
 	let step = $state('loading'); // loading | invoice | balance | contact | done
 	let loading = $state(true);
 	let error = $state('');
+	// True only when restorePurchase() itself failed to complete (network
+	// error, timeout, non-2xx, or a malformed response) — distinct from the
+	// "no token"/"no purchase" cases, which are not retryable the same way.
+	// Drives the Retry button in the step==='loading' && !loading branch.
+	let restoreFailed = $state(false);
 	let copyMsg = $state('');
 
 	// Purchase data
@@ -175,29 +180,86 @@
 		}
 	});
 
+	// Status codes treated as transient/retryable when restore itself cannot
+	// be classified more specifically from the response body. 408 (request
+	// timeout) and 429 (rate limited) join the 5xx range — none of these mean
+	// the purchase is actually gone, unlike a genuine 404 purchase_not_found.
+	function isTransientRestoreStatus(status) {
+		return status === 408 || status === 429 || (status >= 500 && status < 600);
+	}
+
 	async function restorePurchase() {
 		loading = true;
 		error = '';
+		restoreFailed = false;
 		try {
 			const ctrl = new AbortController();
 			const tid = setTimeout(() => ctrl.abort(), 10000);
-			const res = await fetch('/api/v2/helper/contact-purchases/restore', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					purchase_token: purchaseToken,
-					wallet_address: walletAddress,
-				}),
-				signal: ctrl.signal,
-			});
-			clearTimeout(tid);
-			const data = await res.json();
-			if (!res.ok) { error = data.error || `HTTP ${res.status}`; loading = false; return; }
+			let res;
+			try {
+				res = await fetch('/api/v2/helper/contact-purchases/restore', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						purchase_token: purchaseToken,
+						wallet_address: walletAddress,
+					}),
+					signal: ctrl.signal,
+				});
+			} finally {
+				clearTimeout(tid);
+			}
+
+			let data;
+			try {
+				data = await res.json();
+			} catch {
+				// Malformed/non-JSON body — never surface the raw parse error or
+				// response text. Treated as transient: the purchase token/wallet
+				// in storage are left untouched, so Retry resumes the same purchase.
+				error = t('v2.helper.restore_failed');
+				restoreFailed = true;
+				providerStatus = 'degraded';
+				return;
+			}
+
+			if (!res.ok) {
+				if (res.status === 404 && data && data.code === 'purchase_not_found') {
+					// Not transient — this purchase_token/wallet combination does
+					// not (or no longer) correspond to any purchase. Retrying the
+					// same request will never succeed. Use the existing
+					// no_purchase message and the existing terminal cleanup
+					// helper (same one routeByPhase already uses for
+					// failed/receipt_expired) so a reload does not loop back into
+					// the same dead end.
+					error = t('v2.helper.no_purchase');
+					restoreFailed = false;
+					clearHelperPurchaseState(listingId, purchaseToken);
+					step = 'done';
+					return;
+				}
+				if (isTransientRestoreStatus(res.status)) {
+					// Network/server-side hiccup (408/429/5xx) — never raw backend
+					// text. Purchase token/wallet in storage are left untouched.
+					error = t('v2.helper.restore_failed');
+					restoreFailed = true;
+					return;
+				}
+				// Any other 4xx: not retryable, but also not confirmed gone the
+				// way purchase_not_found is — show a safe generic message, no
+				// Retry, no cleanup, no raw backend body/error, no new invoice.
+				error = t('v2.helper.restore_blocked');
+				restoreFailed = false;
+				return;
+			}
 
 			applyRestoreData(data);
 			routeByPhase(data);
 		} catch (e) {
-			if (e.name !== 'AbortError') error = e.message;
+			// Network failure or timeout (AbortError) — never surface e.message.
+			// Purchase token/wallet in storage are left untouched.
+			error = t('v2.helper.restore_failed');
+			restoreFailed = true;
 			providerStatus = 'degraded';
 		} finally {
 			loading = false;
@@ -591,6 +653,28 @@
 
 		{#if loading && step === 'loading'}
 			<div class="center-msg">{t('v2.loading')}</div>
+
+		{:else if step === 'loading' && !loading}
+			<!-- Restore never advanced past its initial phase: either there is
+			     nothing to restore (no_token/no_purchase — not retryable, go back
+			     via the topbar links), or restorePurchase() itself failed
+			     (network/timeout/non-2xx/malformed — retryable in place). Either
+			     way this must never render as a blank page. -->
+			<div class="step-center" data-testid="restore-error-state">
+				<div class="step-inner">
+					{#if error}<div class="err">{error}</div>{/if}
+					{#if restoreFailed}
+						<button
+							class="btn-primary"
+							data-testid="restore-retry-btn"
+							onclick={restorePurchase}
+							disabled={loading}
+						>
+							{t('v2.retry')}
+						</button>
+					{/if}
+				</div>
+			</div>
 
 		{:else if step === 'handoff_wallet'}
 			<div class="step-center" data-testid="handoff-redeem-form">
