@@ -8,30 +8,20 @@
 	let boardCity = $state(FALLBACK_CITY_ID);
 	let boardUrl = $derived('/v2/board/' + boardCity);
 
-	// ── Public config ──────────────────────────────────────────────────────────────
-	const DEFAULT_CONFIG = { client_public_min_usd: 150, helper_post_payment_min_usd: 1000, informer_min_usd: 1000 };
-	let pubConfig = $state({ ...DEFAULT_CONFIG });
+	const CLIENT_MIN_USD = '$150';
+	const HELPER_MIN_USD = '$1,000';
+	const INFORMER_MIN_USD = '$1,000';
 
 	onMount(async () => {
-		await Promise.all([
-			(async () => {
-				try {
-					const r = await fetch('/api/v2/public-config');
-					if (r.ok) pubConfig = { ...DEFAULT_CONFIG, ...(await r.json()) };
-				} catch {}
-			})(),
-			(async () => {
-				try {
-					const r = await fetch('/api/v2/board/cities');
-					if (!r.ok) return;
-					const cities = await r.json();
-					if (Array.isArray(cities) && cities.length > 0) {
-						const fallbackEnabled = cities.some((city) => city.id === FALLBACK_CITY_ID);
-						boardCity = fallbackEnabled ? FALLBACK_CITY_ID : cities[0].id;
-					}
-				} catch {}
-			})(),
-		]);
+		try {
+			const r = await fetch('/api/v2/board/cities');
+			if (!r.ok) return;
+			const cities = await r.json();
+			if (Array.isArray(cities) && cities.length > 0) {
+				const fallbackEnabled = cities.some((city) => city.id === FALLBACK_CITY_ID);
+				boardCity = fallbackEnabled ? FALLBACK_CITY_ID : cities[0].id;
+			}
+		} catch {}
 	});
 </script>
 
@@ -49,50 +39,42 @@
 		<section>
 			<h2>{t('v2.hiw.client.title')}</h2>
 			<ul>
-				<li>{t('v2.hiw.client.cost')}</li>
-				<li>{t('v2.hiw.client.payment')}</li>
-				<li>{t('v2.hiw.client.code')}</li>
-				<li>{t('v2.hiw.client.entitlement')}</li>
-				<li>{t('v2.hiw.client.visibility')}</li>
-				<li>{t('v2.hiw.client.reactivate')}</li>
-				<li>{t('v2.hiw.client.reactivate_detail')}</li>
-				<li>{t('v2.hiw.client.balance', { min: '$' + pubConfig.client_public_min_usd })}</li>
-				<li>{t('v2.hiw.client.contact')}</li>
-				<li>{t('v2.hiw.client.board')}</li>
+				<li>{t('v2.hiw.client.step1')}</li>
+				<li>{t('v2.hiw.client.step2', { min: CLIENT_MIN_USD })}</li>
+				<li>{t('v2.hiw.client.step3')}</li>
+				<li>{t('v2.hiw.client.step4')}</li>
+				<li>{t('v2.hiw.client.step5', { min: CLIENT_MIN_USD })}</li>
+				<li>{t('v2.hiw.client.step6')}</li>
 			</ul>
 		</section>
 
 		<section>
 			<h2>{t('v2.hiw.helper.title')}</h2>
 			<ul>
-				<li>{t('v2.hiw.helper.no_chat')}</li>
-				<li>{t('v2.hiw.helper.cost')}</li>
-				<li>{t('v2.hiw.helper.multi')}</li>
-				<li>{t('v2.hiw.helper.no_refund')}</li>
-				<li>{t('v2.hiw.helper.balance', { min: '$' + pubConfig.helper_post_payment_min_usd })}</li>
-				<li>{t('v2.hiw.helper.country')}</li>
-				<li>{t('v2.hiw.helper.contact_reveal')}</li>
-				<li>{t('v2.hiw.helper.reputation')}</li>
-				<li>{t('v2.hiw.helper.review')}</li>
+				<li>{t('v2.hiw.helper.step1', { min: HELPER_MIN_USD })}</li>
+				<li>{t('v2.hiw.helper.step2')}</li>
+				<li>{t('v2.hiw.helper.step3', { min: HELPER_MIN_USD })}</li>
+				<li>{t('v2.hiw.helper.step4')}</li>
+				<li>{t('v2.hiw.helper.step5')}</li>
+				<li>{t('v2.hiw.helper.step6')}</li>
 			</ul>
 		</section>
 
 		<section>
 			<h2>{t('v2.hiw.informer.title')}</h2>
 			<ul>
-				<li>{t('v2.hiw.informer.desc')}</li>
-				<li>{t('v2.hiw.informer.balance', { min: '$' + pubConfig.informer_min_usd })}</li>
-				<li>{t('v2.hiw.informer.not_helper')}</li>
+				<li>{t('v2.hiw.informer.step1', { min: INFORMER_MIN_USD })}</li>
+				<li>{t('v2.hiw.informer.step2')}</li>
+				<li>{t('v2.hiw.informer.step3')}</li>
 			</ul>
 		</section>
 
 		<section>
 			<h2>{t('v2.hiw.privacy.title')}</h2>
 			<ul>
-				<li>{t('v2.hiw.privacy.no_accounts')}</li>
-				<li>{t('v2.hiw.privacy.wallet_id')}</li>
-				<li>{t('v2.hiw.privacy.contact_hide')}</li>
-				<li>{t('v2.hiw.privacy.no_chat')}</li>
+				<li>{t('v2.hiw.privacy.step1')}</li>
+				<li>{t('v2.hiw.privacy.step2')}</li>
+				<li>{t('v2.hiw.privacy.step3')}</li>
 			</ul>
 		</section>
 
