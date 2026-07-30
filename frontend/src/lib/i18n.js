@@ -339,7 +339,7 @@ en: {
 	'v2.hiw.client.step2': 'Enter a BTC or LTC wallet with at least ${min}. The wallet is checked; no funds are moved.',
 	'v2.hiw.client.step3': 'Save the management code, then pay $5 from that wallet. One blockchain confirmation is required.',
 	'v2.hiw.client.step4': 'Connect Telegram for notifications, add a Telegram or Signal contact, and publish.',
-	'v2.hiw.client.step5': 'The listing is visible for 24 hours. For 5 calendar days, you can reactivate it free with the same wallet and code; the ${min} balance is checked again.',
+	'v2.hiw.client.step5': 'The listing is visible for 24 hours and must be reactivated after each 24-hour display period. For 5 calendar days, reactivation is free with the same wallet and code; the ${min} balance is checked each time.',
 	'v2.hiw.client.step6': 'When a Helper buys your contact, Telegram shows their nickname and rating. After 1 hour, you can rate them 👍 or 👎.',
 
 	'v2.hiw.helper.title': 'I can help',
@@ -920,7 +920,7 @@ ru: {
 	'v2.hiw.client.step2': 'Введите BTC- или LTC-кошелёк с балансом от ${min}. Система только проверит баланс — деньги не списываются.',
 	'v2.hiw.client.step3': 'Получите и сохраните код управления, затем оплатите $5 с указанного кошелька. Требуется 1 подтверждение сети.',
 	'v2.hiw.client.step4': 'Подключите Telegram для уведомлений, укажите Telegram или Signal для связи и опубликуйте объявление.',
-	'v2.hiw.client.step5': 'Объявление видно 24 часа. В течение 5 календарных дней его можно бесплатно активировать снова тем же кошельком и кодом; баланс ${min} проверяется заново.',
+	'v2.hiw.client.step5': 'Объявление видно 24 часа, и после каждых 24 часов показа его нужно активировать заново. В течение 5 календарных дней повторная активация бесплатна: используются тот же кошелёк и код, а баланс ${min} проверяется каждый раз.',
 	'v2.hiw.client.step6': 'Когда Helper купит контакт, в Telegram придут его псевдоним и рейтинг. Через 1 час можно поставить 👍 или 👎.',
 
 	'v2.hiw.helper.title': 'Я могу помочь',
@@ -1483,7 +1483,7 @@ es: {
 	'v2.hiw.client.step2': 'Introduce una billetera BTC o LTC con al menos ${min}. Solo se comprueba el saldo; no se mueven fondos.',
 	'v2.hiw.client.step3': 'Guarda el código de gestión y luego paga $5 desde esa billetera. Se requiere 1 confirmación de la red.',
 	'v2.hiw.client.step4': 'Conecta Telegram para avisos, añade un contacto de Telegram o Signal y publica.',
-	'v2.hiw.client.step5': 'El anuncio es visible durante 24 horas. Durante 5 días calendario puedes reactivarlo gratis con la misma billetera y código; el saldo de ${min} se comprueba de nuevo.',
+	'v2.hiw.client.step5': 'El anuncio es visible durante 24 horas y debe reactivarse después de cada período de 24 horas. Durante 5 días calendario, la reactivación es gratuita con la misma billetera y código; el saldo de ${min} se comprueba cada vez.',
 	'v2.hiw.client.step6': 'Cuando un Helper compra tu contacto, Telegram muestra su alias y valoración. Después de 1 hora puedes marcar 👍 o 👎.',
 
 	'v2.hiw.helper.title': 'Puedo ayudar',
@@ -2047,7 +2047,7 @@ ka: {
 	'v2.hiw.client.step2': 'შეიყვანეთ BTC ან LTC საფულე მინიმუმ ${min} ბალანსით. მოწმდება მხოლოდ ბალანსი; თანხა არ გადაირიცხება.',
 	'v2.hiw.client.step3': 'შეინახეთ მართვის კოდი და შემდეგ გადაიხადეთ $5 ამ საფულიდან. საჭიროა ქსელის 1 დადასტურება.',
 	'v2.hiw.client.step4': 'შეტყობინებებისთვის დაუკავშირეთ Telegram, დაამატეთ Telegram ან Signal კონტაქტი და გამოაქვეყნეთ.',
-	'v2.hiw.client.step5': 'განცხადება ჩანს 24 საათი. 5 კალენდარული დღის განმავლობაში შეგიძლიათ უფასოდ გაააქტიუროთ იგივე საფულითა და კოდით; ${min} ბალანსი ხელახლა მოწმდება.',
+	'v2.hiw.client.step5': 'განცხადება ჩანს 24 საათი და ყოველი 24-საათიანი ჩვენების შემდეგ ხელახლა უნდა გაააქტიუროთ. 5 კალენდარული დღის განმავლობაში ხელახალი გააქტიურება უფასოა იმავე საფულითა და კოდით; ${min} ბალანსი ყოველ ჯერზე მოწმდება.',
 	'v2.hiw.client.step6': 'როდესაც Helper კონტაქტს იყიდის, Telegram-ში გამოჩნდება მისი ფსევდონიმი და რეიტინგი. 1 საათის შემდეგ შეგიძლიათ შეაფასოთ 👍 ან 👎.',
 
 	'v2.hiw.helper.title': 'შემიძლია დახმარება',
