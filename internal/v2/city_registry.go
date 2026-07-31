@@ -44,13 +44,13 @@ var AllCities = []City{
 	{ID: "phuket", Label: "Phuket", CountryCode: "TH", SortOrder: 120, Enabled: true},
 	{ID: "hanoi", Label: "Hanoi", CountryCode: "VN", SortOrder: 130, Enabled: true},
 	{ID: "ho_chi_minh_city", Label: "Ho Chi Minh City", CountryCode: "VN", SortOrder: 140, Enabled: true},
-	{ID: "istanbul", Label: "Istanbul", CountryCode: "TR", SortOrder: 150, Enabled: true},
+	{ID: "istanbul", Label: "Istanbul", CountryCode: "TR", SortOrder: 150, Enabled: false},
 	{ID: "antalya", Label: "Antalya", CountryCode: "TR", SortOrder: 160, Enabled: true},
-	{ID: "dubai", Label: "Dubai", CountryCode: "AE", SortOrder: 170, Enabled: true},
+	{ID: "dubai", Label: "Dubai", CountryCode: "AE", SortOrder: 170, Enabled: false},
 	{ID: "bali", Label: "Bali", CountryCode: "ID", SortOrder: 180, Enabled: true},
-	{ID: "lisbon", Label: "Lisbon", CountryCode: "PT", SortOrder: 190, Enabled: true},
-	{ID: "valencia", Label: "Valencia", CountryCode: "ES", SortOrder: 200, Enabled: true},
-	{ID: "malaga", Label: "Malaga", CountryCode: "ES", SortOrder: 210, Enabled: true},
+	{ID: "lisbon", Label: "Lisbon", CountryCode: "PT", SortOrder: 190, Enabled: false},
+	{ID: "valencia", Label: "Valencia", CountryCode: "ES", SortOrder: 200, Enabled: false},
+	{ID: "malaga", Label: "Malaga", CountryCode: "ES", SortOrder: 210, Enabled: false},
 }
 
 // CityByID returns the City for the given ID, or (City{}, false) if not found/disabled.

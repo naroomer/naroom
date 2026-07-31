@@ -20,8 +20,8 @@ func TestCityRegistry_AllOriginalCitiesPresent(t *testing.T) {
 	}
 }
 
-// TestCityRegistry_NewCitiesPresent verifies all 12 new cities from wave 1 are present.
-func TestCityRegistry_NewCitiesPresent(t *testing.T) {
+// TestCityRegistry_EnabledWaveCitiesPresent verifies the enabled wave 1 cities.
+func TestCityRegistry_EnabledWaveCitiesPresent(t *testing.T) {
 	newCities := []struct {
 		id          string
 		countryCode string
@@ -31,13 +31,8 @@ func TestCityRegistry_NewCitiesPresent(t *testing.T) {
 		{"phuket", "TH"},
 		{"hanoi", "VN"},
 		{"ho_chi_minh_city", "VN"},
-		{"istanbul", "TR"},
 		{"antalya", "TR"},
-		{"dubai", "AE"},
 		{"bali", "ID"},
-		{"lisbon", "PT"},
-		{"valencia", "ES"},
-		{"malaga", "ES"},
 	}
 	for _, tc := range newCities {
 		c, ok := CityByID(tc.id)
@@ -47,6 +42,15 @@ func TestCityRegistry_NewCitiesPresent(t *testing.T) {
 		}
 		if c.CountryCode != tc.countryCode {
 			t.Errorf("city %q: country_code = %q, want %q", tc.id, c.CountryCode, tc.countryCode)
+		}
+	}
+}
+
+func TestCityRegistry_RemovedDestinationsDisabled(t *testing.T) {
+	disabled := []string{"istanbul", "dubai", "lisbon", "valencia", "malaga"}
+	for _, id := range disabled {
+		if _, ok := CityByID(id); ok {
+			t.Errorf("removed destination %q must not be available", id)
 		}
 	}
 }
@@ -61,11 +65,11 @@ func TestCityRegistry_UnknownCityNotFound(t *testing.T) {
 	}
 }
 
-// TestCityRegistry_TotalCount verifies exactly 21 enabled cities.
+// TestCityRegistry_TotalCount verifies exactly 16 enabled cities.
 func TestCityRegistry_TotalCount(t *testing.T) {
 	enabled := EnabledCities()
-	if len(enabled) != 21 {
-		t.Errorf("EnabledCities: got %d, want 21", len(enabled))
+	if len(enabled) != 16 {
+		t.Errorf("EnabledCities: got %d, want 16", len(enabled))
 	}
 }
 
@@ -75,8 +79,6 @@ func TestCityRegistry_SameCountryAllowed(t *testing.T) {
 		{"tbilisi", "batumi"},     // GE
 		{"nha_trang", "da_nang"},  // VN
 		{"bangkok", "chiang_mai"}, // TH
-		{"istanbul", "antalya"},   // TR
-		{"valencia", "malaga"},    // ES
 	}
 	for _, pair := range samePairs {
 		c1, ok1 := CityByID(pair[0])
@@ -96,7 +98,7 @@ func TestCityRegistry_CrossCountryDifferent(t *testing.T) {
 	crossPairs := [][2]string{
 		{"tbilisi", "buenos_aires"}, // GE vs AR
 		{"bangkok", "tbilisi"},      // TH vs GE
-		{"istanbul", "bali"},        // TR vs ID
+		{"antalya", "bali"},         // TR vs ID
 	}
 	for _, pair := range crossPairs {
 		c1, ok1 := CityByID(pair[0])

@@ -2,7 +2,7 @@ package v2
 
 // TestFrontend_NoDuplicateV2CityRegistry statically proves that no V2 frontend
 // route imports the full static CITIES array from frontend/src/lib/cities.js.
-// internal/v2/city_registry.go (AllCities, 21 entries) is the single authoritative
+// internal/v2/city_registry.go is the single authoritative
 // registry; V2 pages must fetch /api/v2/board/cities instead of duplicating it.
 //
 // frontend/src/lib/cities.js is intentionally allowed to keep its full CITIES
@@ -86,11 +86,10 @@ func TestFrontend_NoDuplicateV2CityRegistry(t *testing.T) {
 		t.Fatal("citiesImportRe sanity check failed to match a known-bad import — test is not effective")
 	}
 
-	// Cross-check: the backend registry must have exactly 21 enabled cities,
-	// matching the product's stated 9+12 rollout, so a future silent shrink of
-	// AllCities doesn't go unnoticed alongside this consolidation.
+	// Cross-check the approved public destination set so registry drift does
+	// not go unnoticed alongside this consolidation.
 	enabled := EnabledCities()
-	if len(enabled) != 21 {
-		t.Errorf("internal/v2/city_registry.go AllCities: want 21 enabled cities, got %d", len(enabled))
+	if len(enabled) != 16 {
+		t.Errorf("internal/v2/city_registry.go AllCities: want 16 enabled cities, got %d", len(enabled))
 	}
 }

@@ -359,6 +359,7 @@ en: {
 	'v2.hiw.privacy.step1': 'There are no email/password accounts and no built-in chat.',
 	'v2.hiw.privacy.step2': 'The wallet creates a permanent platform nickname and reputation; the wallet address is not shown on the board.',
 	'v2.hiw.privacy.step3': 'A client contact is never public. It opens only to a Helper after confirmed payment and the final balance check.',
+	'v2.hiw.privacy.step4': 'NA Room operates automatically. There is no customer support or manual service.',
 
 	// ── V2 reputation age ──────────────────────────────────────────────────────
 	'v2.rep.days':   '{n}d on platform',
@@ -942,6 +943,7 @@ ru: {
 	'v2.hiw.privacy.step1': 'Нет аккаунтов с email и паролем, нет встроенного чата.',
 	'v2.hiw.privacy.step2': 'Кошелёк создаёт постоянный псевдоним и рейтинг на площадке; сам адрес кошелька на доске не показывается.',
 	'v2.hiw.privacy.step3': 'Контакт клиента не публикуется. Он открывается только Helper после подтверждённой оплаты и итоговой проверки баланса.',
+	'v2.hiw.privacy.step4': 'NA Room работает автоматически. Службы поддержки и ручного обслуживания нет.',
 
 	'v2.rep.days':   '{n}д на платформе',
 	'v2.rep.weeks':  '{n}н на платформе',
@@ -1507,6 +1509,7 @@ es: {
 	'v2.hiw.privacy.step1': 'No hay cuentas con email y contraseña ni chat integrado.',
 	'v2.hiw.privacy.step2': 'La billetera crea un alias y una reputación permanentes; su dirección no aparece en el tablero.',
 	'v2.hiw.privacy.step3': 'El contacto del cliente nunca es público. Solo se abre al Helper tras el pago confirmado y la comprobación final del saldo.',
+	'v2.hiw.privacy.step4': 'NA Room funciona automáticamente. No hay atención al cliente ni servicio manual.',
 
 	'v2.rep.days':   '{n}d en la plataforma',
 	'v2.rep.weeks':  '{n}s en la plataforma',
@@ -2073,6 +2076,7 @@ ka: {
 	'v2.hiw.privacy.step1': 'არ არის email/პაროლის ანგარიშები და ჩაშენებული ჩატი.',
 	'v2.hiw.privacy.step2': 'საფულე ქმნის მუდმივ ფსევდონიმსა და რეპუტაციას; საფულის მისამართი დაფაზე არ ჩანს.',
 	'v2.hiw.privacy.step3': 'კლიენტის კონტაქტი საჯარო არ არის. ის Helper-ს მხოლოდ დადასტურებული გადახდისა და საბოლოო ბალანსის შემოწმების შემდეგ ეხსნება.',
+	'v2.hiw.privacy.step4': 'NA Room ავტომატურად მუშაობს. მომხმარებელთა მხარდაჭერა და ხელით მომსახურება არ არის.',
 
 	'v2.rep.days':   '{n}დ პლატფორმაზე',
 	'v2.rep.weeks':  '{n}კვ პლატფორმაზე',

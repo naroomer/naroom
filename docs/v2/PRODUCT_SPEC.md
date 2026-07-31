@@ -82,6 +82,15 @@ Current product position:
 - Telegram user/chat ID is only a delivery destination for the selected-city Informer subscription.
 - Exact rules for changing the selected city or subscribing to more than one city remain unresolved.
 
+### 3.5 Autonomous operation
+
+`FIXED`
+
+- NA Room operates automatically.
+- There is no customer support, help desk, dispute-resolution team, or manual service.
+- Public explanations must state this plainly and must not imply that an operator manually reviews, approves, mediates, or resolves individual cases.
+- Autonomous operation does not remove mandatory legal obligations such as receiving valid legal notices or handling applicable data-rights requests.
+
 ## 4. Removed V1 Functionality
 
 `OUT OF SCOPE`
@@ -792,12 +801,12 @@ Helper is not given a user-facing purchase recovery code and is not promised cro
   (2) Review lifecycle moved to `first_revealed_at`: `available_at = first_revealed_at + 3600`, `expires_at = first_revealed_at + 86400`; review blocked until `available_at`; existing consumed rows preserved.
   (3) Receipt window: `receipt_expires_at = first_revealed_at + 24 h` (unchanged from Task 05-FIX; clarified as anchored to first reveal).
   (4) Country lock: locked at first successful purchase; same-country additional cities allowed; different-country blocked before invoice.
-  (5) City registry unified: single `AllCities` Go registry for all 21 destinations (9 original + 12 new: Bangkok, Chiang Mai, Phuket, Hanoi, Ho Chi Minh City, Istanbul, Antalya, Dubai, Bali, Lisbon, Valencia, Malaga); listing validation, country lock, and Informer all use this registry; frontend gets city list from `GET /v2/board/cities`.
+  (5) City registry unified: single `AllCities` Go registry; listing validation, country lock, and Informer all use this registry; frontend gets the 16 enabled destinations from `GET /v2/board/cities`. Istanbul, Dubai, Lisbon, Valencia, and Malaga remain disabled registry records and are unavailable in every V2 flow.
   (6) Cross-device handoff: `POST /v2/helper/handoff/create` + `POST /v2/helper/handoff/redeem`; one-time HMAC token, 15 min TTL; redeem rotates browser_token_hash; old capability revoked; raw token never stored.
   (7) Client Telegram: immediate purchase notice (no review buttons) on `contact_ready`; delayed review prompt at `available_at`; encrypted chat destination snapshot; dedup/cleanup enforced.
   (8) Optional Helper Telegram review reminder: one-time deep link, 15 min TTL, isolated from Informer identity.
   (9) Payment observability: `last_check_attempt_at`, `last_successful_chain_check_at`, `provider_status`, `confirmations` in restore response; degraded state shown to user.
-  (10) Board discovery: honest `active_count` (sample cards excluded); exactly 2 sample cards per city (non-purchasable); automatic empty state when `active_count=0`; grouped city selector with 21 cities; reputation shows "today"/"both counters"/"Platform nickname" label.
+  (10) Board discovery: honest `active_count` (sample cards excluded); exactly 3 sample cards per enabled city, clearly marked as examples and non-purchasable; automatic empty state when `active_count=0`; grouped selector with 16 enabled cities; reputation shows "today"/"both counters"/"Platform nickname" label.
   (11) My Purchases page: `GET /v2/helper/purchases` reads local index; restore-checks each; shows phase/deadline/action; terminal entries cleared locally.
   (12) All new endpoints: Cache-Control no-store, body limits 4096, rate limits; tokens/fingerprints never in logs or error bodies.
   — Resolved from UNRESOLVED: item 3 (contact visible on restore/reveal until receipt_expires_at); item 2 (purchase restores from localStorage token after close/reopen at any phase).

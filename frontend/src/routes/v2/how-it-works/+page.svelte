@@ -75,6 +75,7 @@
 				<li>{t('v2.hiw.privacy.step1')}</li>
 				<li>{t('v2.hiw.privacy.step2')}</li>
 				<li>{t('v2.hiw.privacy.step3')}</li>
+				<li>{t('v2.hiw.privacy.step4')}</li>
 			</ul>
 		</section>
 
