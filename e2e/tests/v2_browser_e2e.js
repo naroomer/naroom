@@ -471,16 +471,42 @@ async function runOnce(runNumber) {
       assert(!boardHTML.includes('@testv2e2erun'), 'contact value visible on board — security violation');
       assert(!boardHTML.includes('management_code'), 'management_code visible on board — security violation');
 
-      const samples = clientPage.locator('.grid > article.card.listing.sample');
+      const samples = clientPage.locator('.grid > a.card.listing.sample');
       assert(await samples.count() === 3, `board must contain exactly 3 samples, got ${await samples.count()}`);
       assert(await clientPage.locator('section.examples').count() === 0,
         'samples must be part of the common board grid, not a separate section');
-      assert(await clientPage.locator('a.sample').count() === 0,
-        'sample cards must not be clickable purchase links');
       assert(await samples.locator('.example-badge').count() === 3,
         'each sample card must have its own visible Example badge');
       assert(await clientPage.locator('.card.listing .time').count() === 0,
         'board cards must not show a remaining-time row');
+
+      // A sample follows the real listing UI through the wallet form, then
+      // stops locally before any purchase API call or browser capability write.
+      await withIncognito(async (samplePage) => {
+        const mutatingAPIRequests = [];
+        samplePage.on('request', request => {
+          if (request.method() !== 'GET' && request.url().includes('/api/v2/')) {
+            mutatingAPIRequests.push(`${request.method()} ${request.url()}`);
+          }
+        });
+        await samplePage.goto(`${frontendBase}/v2/listing/sample_cannabis?city=tbilisi`);
+        await samplePage.waitForLoadState('networkidle');
+        assert(await samplePage.locator('.listing-card .example-badge').count() === 1,
+          'sample listing must keep a visible Example badge');
+        await samplePage.fill('input[type="text"]', HELPER_WALLET);
+        await samplePage.click('button.btn-primary:not(:disabled)');
+        await samplePage.waitForSelector('[data-testid="sample-stop"]', { timeout: 5000 });
+        assert(mutatingAPIRequests.length === 0,
+          `sample flow must not mutate API state: ${mutatingAPIRequests.join(', ')}`);
+        assert(!samplePage.url().includes('/v2/helper/purchase'),
+          'sample flow must not navigate to the purchase page');
+        const storedKeys = await samplePage.evaluate(() => ({
+          local: Object.keys(localStorage).filter(key => key.startsWith('v2_')),
+          session: Object.keys(sessionStorage).filter(key => key.startsWith('v2_')),
+        }));
+        assert(storedKeys.local.length === 0 && storedKeys.session.length === 0,
+          `sample flow wrote purchase capability to storage: ${JSON.stringify(storedKeys)}`);
+      });
 
       await clientPage.screenshot({ path: join(SCREENSHOTS_DIR, `run${runNumber}_05_board_desktop.png`) });
 

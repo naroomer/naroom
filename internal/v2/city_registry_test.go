@@ -26,9 +26,6 @@ func TestCityRegistry_EnabledWaveCitiesPresent(t *testing.T) {
 		id          string
 		countryCode string
 	}{
-		{"bangkok", "TH"},
-		{"chiang_mai", "TH"},
-		{"phuket", "TH"},
 		{"hanoi", "VN"},
 		{"ho_chi_minh_city", "VN"},
 		{"antalya", "TR"},
@@ -47,7 +44,7 @@ func TestCityRegistry_EnabledWaveCitiesPresent(t *testing.T) {
 }
 
 func TestCityRegistry_RemovedDestinationsDisabled(t *testing.T) {
-	disabled := []string{"istanbul", "dubai", "lisbon", "valencia", "malaga"}
+	disabled := []string{"bangkok", "chiang_mai", "phuket", "istanbul", "dubai", "lisbon", "valencia", "malaga"}
 	for _, id := range disabled {
 		if _, ok := CityByID(id); ok {
 			t.Errorf("removed destination %q must not be available", id)
@@ -65,20 +62,20 @@ func TestCityRegistry_UnknownCityNotFound(t *testing.T) {
 	}
 }
 
-// TestCityRegistry_TotalCount verifies exactly 16 enabled cities.
+// TestCityRegistry_TotalCount verifies exactly 13 enabled cities.
 func TestCityRegistry_TotalCount(t *testing.T) {
 	enabled := EnabledCities()
-	if len(enabled) != 16 {
-		t.Errorf("EnabledCities: got %d, want 16", len(enabled))
+	if len(enabled) != 13 {
+		t.Errorf("EnabledCities: got %d, want 13", len(enabled))
 	}
 }
 
 // TestCityRegistry_SameCountryAllowed verifies same-country cities all map to the same code.
 func TestCityRegistry_SameCountryAllowed(t *testing.T) {
 	samePairs := [][2]string{
-		{"tbilisi", "batumi"},     // GE
-		{"nha_trang", "da_nang"},  // VN
-		{"bangkok", "chiang_mai"}, // TH
+		{"tbilisi", "batumi"},         // GE
+		{"nha_trang", "da_nang"},      // VN
+		{"hanoi", "ho_chi_minh_city"}, // VN
 	}
 	for _, pair := range samePairs {
 		c1, ok1 := CityByID(pair[0])
@@ -97,7 +94,7 @@ func TestCityRegistry_SameCountryAllowed(t *testing.T) {
 func TestCityRegistry_CrossCountryDifferent(t *testing.T) {
 	crossPairs := [][2]string{
 		{"tbilisi", "buenos_aires"}, // GE vs AR
-		{"bangkok", "tbilisi"},      // TH vs GE
+		{"hanoi", "tbilisi"},        // VN vs GE
 		{"antalya", "bali"},         // TR vs ID
 	}
 	for _, pair := range crossPairs {
@@ -120,7 +117,7 @@ func TestCityRegistry_CityCountryCodeHelper(t *testing.T) {
 		want string
 	}{
 		{"tbilisi", "GE"},
-		{"bangkok", "TH"},
+		{"bangkok", ""},
 		{"unknown_city", ""},
 	}
 	for _, tc := range tests {

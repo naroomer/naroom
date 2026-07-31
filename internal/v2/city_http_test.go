@@ -119,7 +119,7 @@ func TestCitySummaryHandlerScanErrorNoStoreAndNoCache(t *testing.T) {
 	if scripted.queries != 2 {
 		t.Fatalf("failed partial result was cached: query count=%d, want 2", scripted.queries)
 	}
-	if body := retried.Body.String(); !containsAll(body, `"country_label":"Georgia"`, `"active_count":2`) {
+	if body := retried.Body.String(); !containsAll(body, `"country_label":"Georgia"`, `"active_count":2`, `"sample_count":3`) {
 		t.Fatalf("successful response missing backend country label/count: %s", body)
 	}
 }

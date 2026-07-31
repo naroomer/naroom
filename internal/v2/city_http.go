@@ -15,7 +15,7 @@ import (
 
 const (
 	cityCacheTTL = 30 * time.Second
-	sampleCount  = 2 // always 2 sample cards per city
+	sampleCount  = 3 // matches the three isolated board sample journeys
 )
 
 type cityCacheEntry struct {

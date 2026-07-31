@@ -89,7 +89,7 @@ func TestFrontend_NoDuplicateV2CityRegistry(t *testing.T) {
 	// Cross-check the approved public destination set so registry drift does
 	// not go unnoticed alongside this consolidation.
 	enabled := EnabledCities()
-	if len(enabled) != 16 {
-		t.Errorf("internal/v2/city_registry.go AllCities: want 16 enabled cities, got %d", len(enabled))
+	if len(enabled) != 13 {
+		t.Errorf("internal/v2/city_registry.go AllCities: want 13 enabled cities, got %d", len(enabled))
 	}
 }

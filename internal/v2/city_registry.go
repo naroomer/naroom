@@ -39,9 +39,9 @@ var AllCities = []City{
 	{ID: "yerevan", Label: "Yerevan", CountryCode: "AM", SortOrder: 80, Enabled: true},
 	{ID: "moscow", Label: "Moscow", CountryCode: "RU", SortOrder: 90, Enabled: true},
 	// New wave 1 (12 cities)
-	{ID: "bangkok", Label: "Bangkok", CountryCode: "TH", SortOrder: 100, Enabled: true},
-	{ID: "chiang_mai", Label: "Chiang Mai", CountryCode: "TH", SortOrder: 110, Enabled: true},
-	{ID: "phuket", Label: "Phuket", CountryCode: "TH", SortOrder: 120, Enabled: true},
+	{ID: "bangkok", Label: "Bangkok", CountryCode: "TH", SortOrder: 100, Enabled: false},
+	{ID: "chiang_mai", Label: "Chiang Mai", CountryCode: "TH", SortOrder: 110, Enabled: false},
+	{ID: "phuket", Label: "Phuket", CountryCode: "TH", SortOrder: 120, Enabled: false},
 	{ID: "hanoi", Label: "Hanoi", CountryCode: "VN", SortOrder: 130, Enabled: true},
 	{ID: "ho_chi_minh_city", Label: "Ho Chi Minh City", CountryCode: "VN", SortOrder: 140, Enabled: true},
 	{ID: "istanbul", Label: "Istanbul", CountryCode: "TR", SortOrder: 150, Enabled: false},

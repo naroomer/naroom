@@ -2,13 +2,17 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { page } from '$app/state';
 	import { lang, t as tFn } from '$lib/i18n.js';
+	import { sampleListing } from '$lib/v2Samples.js';
 
 	let t = $derived((key, params) => tFn($lang, key, params));
 
 	let id = $derived(page.params.id);
+	let sampleCity = $derived(page.url.searchParams.get('city') || 'tbilisi');
+	let isSample = $derived(id.startsWith('sample_'));
 	let listing = $state(null);
 	let loading = $state(true);
 	let error = $state('');
+	let sampleStopped = $state(false);
 
 	// Helper purchase initiation
 	let purchaseToken = $state('');
@@ -40,6 +44,7 @@
 	let ownerCountdownTimer = null;
 
 	async function checkOwnerCapability() {
+		if (isSample) { ownerChecking = false; return; }
 		let saved = null;
 		try { saved = JSON.parse(localStorage.getItem(`v2_mgmt_${id}`) || 'null'); } catch {}
 		if (!saved?.code || !saved?.wallet) { ownerChecking = false; return; }
@@ -200,6 +205,12 @@
 	async function loadListing() {
 		loading = true;
 		error = '';
+		if (isSample) {
+			listing = sampleListing(id, sampleCity);
+			if (!listing) error = t('v2.listing.not_found');
+			loading = false;
+			return;
+		}
 		try {
 			const res = await fetch(`/api/v2/listings/${id}`);
 			if (res.status === 404) { error = t('v2.listing.not_found'); return; }
@@ -222,6 +233,7 @@
 	// Generate or load purchase_token for this listing, and restore any saved purchase state.
 	onMount(async () => {
 		fetchPubConfig();
+		if (isSample) return;
 
 		const storageKey = `v2_pt_${id}`;
 		let pt = '';
@@ -299,6 +311,11 @@
 
 	async function startHelperPurchase() {
 		if (!helperWallet.trim()) return;
+		if (isSample) {
+			sampleStopped = true;
+			helperError = '';
+			return;
+		}
 		helperLoading = true;
 		helperError = '';
 		try {
@@ -462,6 +479,7 @@
 			<div class="listing-body">
 				<div class="listing-head">
 					<div class="dep">{t('dep.' + listing.dependency_type)}</div>
+					{#if isSample}<span class="example-badge">{t('v2.board.example_badge')}</span>{/if}
 				</div>
 				<div class="help">{t('help.' + listing.help_type)}</div>
 				<div class="meta-row">
@@ -566,6 +584,12 @@
 				<div class="state-box info">
 					<div class="state-title">{t('v2.helper.continue_hint')}</div>
 					<a href="/v2/helper/purchase" class="btn-primary btn-link">{t('v2.helper.continue_purchase')}</a>
+				</div>
+			{:else if sampleStopped}
+				<div class="state-box warn" data-testid="sample-stop">
+					<div class="state-title">{t('v2.sample.stop_title')}</div>
+					<div class="hint">{t('v2.sample.stop_body')}</div>
+					<a href="/v2/board/{listing.city}" class="btn-secondary btn-link">{t('v2.sample.back')}</a>
 				</div>
 			{:else}
 				<!-- Initial purchase form -->
@@ -697,6 +721,16 @@
 	.urgency-strip { height: 4px; width: 100%; }
 	.listing-body { padding: 16px; display: flex; flex-direction: column; gap: 8px; }
 	.listing-head { display: flex; align-items: center; justify-content: space-between; }
+	.example-badge {
+		background: var(--warn);
+		color: var(--bg);
+		border-radius: 4px;
+		padding: 3px 7px;
+		font-size: 9px;
+		font-weight: 700;
+		letter-spacing: 0.8px;
+		text-transform: uppercase;
+	}
 	.dep { font-size: 18px; font-weight: 700; color: var(--text); }
 	.help { font-size: 13px; color: var(--text-dim); }
 	.meta-row { display: flex; align-items: center; gap: 12px; margin-top: 4px; }

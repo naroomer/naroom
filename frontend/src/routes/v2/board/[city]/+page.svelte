@@ -3,6 +3,7 @@
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
 	import { lang, t as tFn } from '$lib/i18n.js';
+	import { V2_SAMPLES } from '$lib/v2Samples.js';
 
 	let t = $derived((key, params) => tFn($lang, key, params));
 
@@ -12,11 +13,7 @@
 	let loading = $state(true);
 	let error = $state('');
 	let savedListingIds = $state(new Set());
-	const samples = [
-		{ dependency_type: 'cannabis', help_type: 'crisis', languages: ['EN', 'RU'], display_name: 'Quiet Harbor · A7KM', age_key: 'v2.rep.days_short', age_n: 12, positive_count: 0, negative_count: 0 },
-		{ dependency_type: 'cocaine', help_type: 'just_talk', languages: ['EN', 'ES'], display_name: 'Clear Path · R4NX', age_key: 'v2.rep.months_short', age_n: 3, positive_count: 2, negative_count: 0 },
-		{ dependency_type: 'alcohol', help_type: 'relapse_prevention', languages: ['EN', 'KA'], display_name: 'Still River · K9TW', age_key: 'v2.rep.weeks_short', age_n: 5, positive_count: 1, negative_count: 0 }
-	];
+	const samples = V2_SAMPLES;
 
 	function urgencyColor(u) {
 		if (u === 'urgent')   return 'var(--urgent)';
@@ -143,7 +140,11 @@
 			{/each}
 
 			{#each samples as sample}
-				<article class="card listing sample" aria-label={t('v2.board.example_badge')}>
+				<a
+					href="/v2/listing/{sample.id}?city={city}"
+					class="card listing sample"
+					aria-label={t('v2.board.example_badge')}
+				>
 					<div class="urgency-strip" style="background: var(--can-wait)"></div>
 					<div class="card-body">
 						<div class="dep">{t('dep.' + sample.dependency_type)}</div>
@@ -164,7 +165,7 @@
 						</div>
 						<span class="example-badge">{t('v2.board.example_badge')}</span>
 					</div>
-				</article>
+				</a>
 			{/each}
 		</div>
 
@@ -336,7 +337,6 @@
 	.empty-note span { font-size: 12px; color: var(--text-dim); }
 	.empty-note a { font-size: 12px; color: var(--accent); }
 
-	.sample { pointer-events: none; }
 	.example-badge {
 		align-self: flex-end;
 		margin-top: auto;
