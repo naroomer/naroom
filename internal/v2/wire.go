@@ -31,6 +31,11 @@ type V2BotConfig struct {
 	ClientWebhookSecret   []byte
 	InformerBotName       string
 	InformerWebhookSecret []byte
+	// PublicBaseURL is the absolute origin (e.g. "https://naroom.net", no
+	// trailing slash) used to build the Informer "Open listing" button URL.
+	// Optional: an empty value leaves the button URL relative, which
+	// production wiring must not do — see cmd/naroom/v2wire.go.
+	PublicBaseURL string
 }
 
 // V2Adapters holds injectable chain/price/allocation/Telegram adapters.
@@ -144,6 +149,7 @@ func WireV2System(db *sql.DB, keys V2Keys, bots V2BotConfig, adapters V2Adapters
 		return nil, fmt.Errorf("v2: WireV2System: informer service: %w", err)
 	}
 	informerSvc.SetPolicy(policy)
+	informerSvc.SetPublicBaseURL(bots.PublicBaseURL)
 	listingSvc.SetInformerNotifier(informerSvc)
 
 	// ── Telegram client transport ──────────────────────────────────────────────

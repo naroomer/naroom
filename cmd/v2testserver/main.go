@@ -128,8 +128,10 @@ func (s *recordingBotSender) promptsForChat(chatID int64) []capturedReviewPrompt
 // ── Recording: InformerBotSender ─────────────────────────────────────────────
 
 type capturedInformerMsg struct {
-	ChatID int64  `json:"chat_id"`
-	Text   string `json:"text"`
+	ChatID     int64  `json:"chat_id"`
+	Text       string `json:"text"`
+	ButtonText string `json:"button_text"`
+	ButtonURL  string `json:"button_url"`
 }
 
 type recordingInformerSender struct {
@@ -137,10 +139,10 @@ type recordingInformerSender struct {
 	msgs []capturedInformerMsg
 }
 
-func (s *recordingInformerSender) SendInformerNotification(_ context.Context, chatID int64, text string) error {
+func (s *recordingInformerSender) SendInformerNotification(_ context.Context, chatID int64, n v2.InformerNotification) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.msgs = append(s.msgs, capturedInformerMsg{ChatID: chatID, Text: text})
+	s.msgs = append(s.msgs, capturedInformerMsg{ChatID: chatID, Text: n.Text, ButtonText: n.ButtonText, ButtonURL: n.ButtonURL})
 	return nil
 }
 
@@ -388,6 +390,7 @@ func main() {
 			ClientWebhookSecret:   []byte("testwebhooksecret12345678901234"),
 			InformerBotName:       "v2testinformerbot",
 			InformerWebhookSecret: []byte("testinformersecret1234567890123"),
+			PublicBaseURL:         "http://localhost:5173",
 		},
 		v2.V2Adapters{
 			BTCChain:       &fakeAutoChain{},

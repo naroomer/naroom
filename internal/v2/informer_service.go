@@ -57,9 +57,19 @@ var (
 	ErrInformerLostClaim = errors.New("v2: informer outbox claim lost")
 )
 
-// InformerBotSender sends a text notification to a Telegram chat.
+// InformerNotification is a structured Informer notification: short visible
+// text plus an optional single button (ButtonURL == "" means no button).
+// Keeping the long listing_id/URL out of Text and only in ButtonURL is what
+// keeps the visible Telegram message short and free of internal identifiers.
+type InformerNotification struct {
+	Text       string
+	ButtonText string
+	ButtonURL  string
+}
+
+// InformerBotSender sends a structured notification to a Telegram chat.
 type InformerBotSender interface {
-	SendInformerNotification(ctx context.Context, chatID int64, text string) error
+	SendInformerNotification(ctx context.Context, chatID int64, notification InformerNotification) error
 }
 
 // InformerOutboxEntry is a public view of one outbox row.
@@ -83,12 +93,24 @@ type InformerOutboxEntry struct {
 // InformerService manages subscription lifecycle and outbox events.
 // It implements InformerTxEnqueuer so it can be passed to ListingService.SetInformerNotifier.
 type InformerService struct {
-	db          *sql.DB
-	hmacKey     []byte
-	tokenSecret []byte
-	destCipher  *DestinationCipher
-	now         func() time.Time
-	policy      V2BalancePolicy
+	db            *sql.DB
+	hmacKey       []byte
+	tokenSecret   []byte
+	destCipher    *DestinationCipher
+	now           func() time.Time
+	policy        V2BalancePolicy
+	publicBaseURL string // e.g. "https://naroom.net"; used only to build absolute
+	// Telegram button URLs at send time. Stored listing_url values remain
+	// relative ("/v2/listing/<id>") so changing this later needs no migration.
+}
+
+// SetPublicBaseURL sets the absolute origin (e.g. "https://naroom.net", no
+// trailing slash) prepended to the relative listing_url when building the
+// Informer notification's "Open listing" button. Optional: if never called,
+// button URLs stay relative, which production wiring must avoid — see
+// cmd/naroom/v2wire.go.
+func (s *InformerService) SetPublicBaseURL(base string) {
+	s.publicBaseURL = base
 }
 
 // NewInformerService creates an InformerService.
@@ -1036,8 +1058,13 @@ func (w *InformerWorker) processEntry(ctx context.Context, e *InformerOutboxEntr
 		return fmt.Errorf("v2: processEntry: load pending recipients: %w", err)
 	}
 
-	text := fmt.Sprintf("New listing in %s\n%s · %s · %s\n%s",
-		e.City, e.DisplayName, e.HelpType, e.Urgency, e.ListingURL)
+	// Visible text intentionally omits the listing_id/URL — that stays only in
+	// the button below, never in the Telegram message body itself.
+	notification := InformerNotification{
+		Text:       fmt.Sprintf("New listing in %s\n%s · %s · %s", e.City, e.DisplayName, e.HelpType, e.Urgency),
+		ButtonText: "Open listing",
+		ButtonURL:  w.svc.publicBaseURL + e.ListingURL,
+	}
 
 	for _, ref := range pendingRefs {
 		if ctx.Err() != nil {
@@ -1069,7 +1096,7 @@ func (w *InformerWorker) processEntry(ctx context.Context, e *InformerOutboxEntr
 			continue
 		}
 
-		sendErr := w.sender.SendInformerNotification(ctx, chatID, text)
+		sendErr := w.sender.SendInformerNotification(ctx, chatID, notification)
 		if sendErr == nil {
 			ok, dbErr := w.svc.MarkRecipientDelivered(e.ID, ref, claimToken)
 			if dbErr != nil {

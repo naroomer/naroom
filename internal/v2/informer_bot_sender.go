@@ -59,7 +59,10 @@ func newTelegramInformerBotSenderForTest(token, baseURL string, client *http.Cli
 	return &TelegramInformerBotSender{token: token, baseURL: baseURL, httpClient: client}, nil
 }
 
-// SendInformerNotification sends text to the given Telegram private chat.
+// SendInformerNotification sends a structured notification to the given
+// Telegram private chat. When notification.ButtonURL is non-empty, the
+// message includes a single inline keyboard button (ButtonText, ButtonURL)
+// instead of the URL appearing in the visible text.
 //
 // Error classification:
 //   - nil              → delivered
@@ -67,13 +70,22 @@ func newTelegramInformerBotSenderForTest(token, baseURL string, client *http.Cli
 //   - ErrInformerNotificationPermanent (wrapped) → permanent (4xx except 429)
 //
 // The raw token, chat_id, and response body are never included in errors.
-func (s *TelegramInformerBotSender) SendInformerNotification(ctx context.Context, chatID int64, text string) error {
+func (s *TelegramInformerBotSender) SendInformerNotification(ctx context.Context, chatID int64, notification InformerNotification) error {
 	apiURL := s.baseURL + "/bot" + s.token + "/sendMessage"
 
-	payload, err := json.Marshal(map[string]any{
+	body := map[string]any{
 		"chat_id": chatID,
-		"text":    text,
-	})
+		"text":    notification.Text,
+	}
+	if notification.ButtonURL != "" {
+		body["reply_markup"] = map[string]any{
+			"inline_keyboard": [][]map[string]string{
+				{{"text": notification.ButtonText, "url": notification.ButtonURL}},
+			},
+		}
+	}
+
+	payload, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("v2: TelegramInformerBotSender: marshal: [internal]")
 	}

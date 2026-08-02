@@ -63,10 +63,12 @@ func NewInformerTransport(
 // Must be called before the first webhook is processed.
 func (t *InformerTransport) SetSender(s InformerBotSender) { t.sender = s }
 
-// send is a nil-safe helper: sends text if sender is configured.
+// send is a nil-safe helper: sends a plain-text confirmation (no button) if
+// sender is configured. This is the /start webhook reply, unrelated to the
+// listing-notification button built in informer_service.go's processEntry.
 func (t *InformerTransport) send(ctx context.Context, chatID int64, text string) {
 	if t.sender != nil {
-		_ = t.sender.SendInformerNotification(ctx, chatID, text)
+		_ = t.sender.SendInformerNotification(ctx, chatID, InformerNotification{Text: text})
 	}
 }
 

@@ -58,6 +58,10 @@ var (
 	e2eDestKey    = makeTestKey(0xCC)
 )
 
+// e2ePublicBaseURL is the fixed origin used to build Informer "Open listing"
+// button URLs in tests — lets assertions check the exact absolute URL.
+const e2ePublicBaseURL = "https://e2e.test"
+
 func makeTestKey(b byte) []byte {
 	k := make([]byte, 32)
 	for i := range k {
@@ -109,17 +113,20 @@ func (v *e2eContactValidator) ValidateContact(_, rawContact string) (string, err
 	return rawContact, nil
 }
 
-// e2eInformerSender: records deliveries; can be configured to fail on one chatID.
+// e2eInformerSender: records deliveries (full notification, for tests that
+// assert on Text/ButtonURL); can be configured to fail on one chatID.
 type e2eInformerSender struct {
 	calls      []int64
+	notifs     []InformerNotification
 	failChatID int64
 }
 
-func (s *e2eInformerSender) SendInformerNotification(_ context.Context, chatID int64, _ string) error {
+func (s *e2eInformerSender) SendInformerNotification(_ context.Context, chatID int64, n InformerNotification) error {
 	if s.failChatID != 0 && chatID == s.failChatID {
 		return fmt.Errorf("v2: transient error for chatID %d: [internal]", chatID)
 	}
 	s.calls = append(s.calls, chatID)
+	s.notifs = append(s.notifs, n)
 	return nil
 }
 
@@ -221,6 +228,7 @@ func newE2EComp(t *testing.T) *e2eComp {
 			ClientWebhookSecret:   []byte("webhooksecret"),
 			InformerBotName:       "informerbot",
 			InformerWebhookSecret: []byte("informersecret"),
+			PublicBaseURL:         e2ePublicBaseURL,
 		},
 		V2Adapters{
 			BTCChain:       &e2eChainStub{},
@@ -610,7 +618,7 @@ func TestReleaseR06_InformerSubscribeAndDeliver(t *testing.T) {
 	}
 
 	// Publish listing in yerevan to trigger outbox enqueue.
-	c.e2ePublishListing(t, "btcaddr_r06", "BTC", "yerevan")
+	lv := c.e2ePublishListing(t, "btcaddr_r06", "BTC", "yerevan")
 
 	sender := &e2eInformerSender{}
 	worker := NewInformerWorker(c.informerSvc, sender)
@@ -619,6 +627,26 @@ func TestReleaseR06_InformerSubscribeAndDeliver(t *testing.T) {
 	}
 	if len(sender.calls) != 1 || sender.calls[0] != 100 {
 		t.Fatalf("want delivery to chatID 100, got %v", sender.calls)
+	}
+
+	// Regression: button URL must be byte-identical to this real listing's
+	// URL, and the visible text must never contain the listing_id or a URL.
+	if len(sender.notifs) != 1 {
+		t.Fatalf("want exactly one recorded notification, got %d", len(sender.notifs))
+	}
+	notif := sender.notifs[0]
+	wantURL := e2ePublicBaseURL + "/v2/listing/" + lv.ID
+	if notif.ButtonURL != wantURL {
+		t.Errorf("button url = %q, want byte-identical %q", notif.ButtonURL, wantURL)
+	}
+	if notif.ButtonText != "Open listing" {
+		t.Errorf("button text = %q, want %q", notif.ButtonText, "Open listing")
+	}
+	if strings.Contains(notif.Text, lv.ID) {
+		t.Errorf("visible text leaks the raw listing_id: %q", notif.Text)
+	}
+	if strings.Contains(notif.Text, "http://") || strings.Contains(notif.Text, "https://") {
+		t.Errorf("visible text leaks a URL: %q", notif.Text)
 	}
 }
 

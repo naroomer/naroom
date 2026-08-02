@@ -78,8 +78,10 @@ const devInformerFakeChatID int64 = 987654321
 // ── Stub: dev InformerBotSender ───────────────────────────────────────────────
 
 type devInformerMessage struct {
-	ChatID int64  `json:"chat_id"`
-	Text   string `json:"text"`
+	ChatID     int64  `json:"chat_id"`
+	Text       string `json:"text"`
+	ButtonText string `json:"button_text"`
+	ButtonURL  string `json:"button_url"`
 }
 
 type devInformerSender struct {
@@ -87,11 +89,11 @@ type devInformerSender struct {
 	msgs []devInformerMessage
 }
 
-func (s *devInformerSender) SendInformerNotification(_ context.Context, chatID int64, text string) error {
+func (s *devInformerSender) SendInformerNotification(_ context.Context, chatID int64, n v2.InformerNotification) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.msgs = append(s.msgs, devInformerMessage{ChatID: chatID, Text: text})
-	log.Printf("[dev-informer] notification to chat %d: %q", chatID, truncate(text, 80))
+	s.msgs = append(s.msgs, devInformerMessage{ChatID: chatID, Text: n.Text, ButtonText: n.ButtonText, ButtonURL: n.ButtonURL})
+	log.Printf("[dev-informer] notification to chat %d: %q button=%q", chatID, truncate(n.Text, 80), n.ButtonURL)
 	return nil
 }
 
@@ -443,6 +445,14 @@ func buildDevServer(db *sql.DB) (*devServer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("NewInformerService: %w", err)
 	}
+	// DEV_PUBLIC_BASE_URL lets the E2E harness point the Informer "Open
+	// listing" button at the actual dynamic frontend port for this run;
+	// falls back to the conventional local `npm run dev` port otherwise.
+	devPublicBaseURL := os.Getenv("DEV_PUBLIC_BASE_URL")
+	if devPublicBaseURL == "" {
+		devPublicBaseURL = "http://localhost:5173"
+	}
+	informerSvc.SetPublicBaseURL(devPublicBaseURL)
 	ds.informerSvc = informerSvc
 
 	informerTransport, err := v2.NewInformerTransport(informerSvc, devInformerWebhookSecret, devInformerBotUsername, time.Now)

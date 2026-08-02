@@ -158,6 +158,7 @@ func wireV2(
 			ClientWebhookSecret:   []byte(cfg.V2ClientWebhookSecret),
 			InformerBotName:       cfg.V2InformerBotName,
 			InformerWebhookSecret: []byte(cfg.V2InformerWebhookSecret),
+			PublicBaseURL:         cfg.PublicBaseURL,
 		},
 		v2.V2Adapters{
 			BTCChain:       btcChain,

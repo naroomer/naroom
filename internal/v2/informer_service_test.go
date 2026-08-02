@@ -416,7 +416,7 @@ type fakeInformerSender struct {
 	msgs []int64
 }
 
-func (f *fakeInformerSender) SendInformerNotification(_ context.Context, chatID int64, _ string) error {
+func (f *fakeInformerSender) SendInformerNotification(_ context.Context, chatID int64, _ v2.InformerNotification) error {
 	f.msgs = append(f.msgs, chatID)
 	return nil
 }
@@ -468,7 +468,7 @@ func TestInformerWorker_NonMatchingCity(t *testing.T) {
 
 type failingInformerSender struct{}
 
-func (f *failingInformerSender) SendInformerNotification(_ context.Context, _ int64, _ string) error {
+func (f *failingInformerSender) SendInformerNotification(_ context.Context, _ int64, _ v2.InformerNotification) error {
 	return errors.New("telegram delivery failed")
 }
 
@@ -491,7 +491,7 @@ func TestInformerWorker_PublishIndependentOfDelivery(t *testing.T) {
 // permanentInformerSender always returns ErrInformerNotificationPermanent.
 type permanentInformerSender struct{}
 
-func (p *permanentInformerSender) SendInformerNotification(_ context.Context, _ int64, _ string) error {
+func (p *permanentInformerSender) SendInformerNotification(_ context.Context, _ int64, _ v2.InformerNotification) error {
 	return v2.ErrInformerNotificationPermanent
 }
 
@@ -636,11 +636,11 @@ func TestInformerMaxAttemptsTerminal(t *testing.T) {
 
 // funcSender is a test helper InformerBotSender backed by a closure.
 type funcSender struct {
-	fn func(ctx context.Context, chatID int64, text string) error
+	fn func(ctx context.Context, chatID int64, notification v2.InformerNotification) error
 }
 
-func (s *funcSender) SendInformerNotification(ctx context.Context, chatID int64, text string) error {
-	return s.fn(ctx, chatID, text)
+func (s *funcSender) SendInformerNotification(ctx context.Context, chatID int64, notification v2.InformerNotification) error {
+	return s.fn(ctx, chatID, notification)
 }
 
 // TestInformerConcurrentWorkers_ExactlyOneSend proves that two concurrent workers
@@ -655,7 +655,7 @@ func TestInformerConcurrentWorkers_ExactlyOneSend(t *testing.T) {
 
 	var mu sync.Mutex
 	var sendCount int
-	sender := &funcSender{fn: func(_ context.Context, _ int64, _ string) error {
+	sender := &funcSender{fn: func(_ context.Context, _ int64, _ v2.InformerNotification) error {
 		mu.Lock()
 		sendCount++
 		mu.Unlock()
@@ -687,7 +687,7 @@ type perChatSender struct {
 	delivered []int64
 }
 
-func (s *perChatSender) SendInformerNotification(_ context.Context, chatID int64, _ string) error {
+func (s *perChatSender) SendInformerNotification(_ context.Context, chatID int64, _ v2.InformerNotification) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.permFail[chatID] {
@@ -765,7 +765,7 @@ func TestInformerSuccessfulRecipientNotRetransmittedOnRetry(t *testing.T) {
 	var mu sync.Mutex
 	var calls []int64
 	var failNext bool = true // first send to 3005 fails
-	sender := &funcSender{fn: func(_ context.Context, chatID int64, _ string) error {
+	sender := &funcSender{fn: func(_ context.Context, chatID int64, _ v2.InformerNotification) error {
 		mu.Lock()
 		defer mu.Unlock()
 		if chatID == 3005 && failNext {
@@ -870,7 +870,7 @@ func TestInformerCancellationReleasesActiveClaim(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var once sync.Once
 
-	sender := &funcSender{fn: func(_ context.Context, _ int64, _ string) error {
+	sender := &funcSender{fn: func(_ context.Context, _ int64, _ v2.InformerNotification) error {
 		// Cancel context on the very first send; return retryable error.
 		once.Do(cancel)
 		return errors.New("retryable error")
@@ -888,7 +888,7 @@ func TestInformerCancellationReleasesActiveClaim(t *testing.T) {
 	// A second worker with a fresh context must be able to claim and process the entry.
 	var mu2 sync.Mutex
 	var sent []int64
-	successSender := &funcSender{fn: func(_ context.Context, chatID int64, _ string) error {
+	successSender := &funcSender{fn: func(_ context.Context, chatID int64, _ v2.InformerNotification) error {
 		mu2.Lock()
 		sent = append(sent, chatID)
 		mu2.Unlock()
@@ -935,7 +935,7 @@ type mixedSender struct {
 	retryAll  map[int64]bool // always retryable (exhausts per-recipient budget)
 }
 
-func (s *mixedSender) SendInformerNotification(_ context.Context, chatID int64, _ string) error {
+func (s *mixedSender) SendInformerNotification(_ context.Context, chatID int64, _ v2.InformerNotification) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls[chatID]++
@@ -1541,7 +1541,7 @@ func TestInformer_CrashWindow_DocumentedOnly(t *testing.T) {
 	_ = svc.NotifyFirstPublish("listing-crashwindow-01", "batumi", "W", "crisis", "alcohol", "urgent", time.Now())
 
 	var sendCount int
-	sender := &funcSender{fn: func(_ context.Context, _ int64, _ string) error {
+	sender := &funcSender{fn: func(_ context.Context, _ int64, _ v2.InformerNotification) error {
 		sendCount++
 		return nil
 	}}
@@ -1581,11 +1581,11 @@ type capturingSender struct {
 	}
 }
 
-func (c *capturingSender) SendInformerNotification(_ context.Context, chatID int64, text string) error {
+func (c *capturingSender) SendInformerNotification(_ context.Context, chatID int64, n v2.InformerNotification) error {
 	c.msgs = append(c.msgs, struct {
 		ChatID int64
 		Text   string
-	}{chatID, text})
+	}{chatID, n.Text})
 	return nil
 }
 
