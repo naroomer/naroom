@@ -12,7 +12,7 @@ export const V2_SAMPLES = [
 	},
 	{
 		id: 'sample_cocaine',
-		dependency_type: 'cocaine',
+		dependency_type: 'cannabis',
 		help_type: 'just_talk',
 		languages: ['EN', 'ES'],
 		display_name: 'Clear Path · R4NX',
@@ -23,7 +23,7 @@ export const V2_SAMPLES = [
 	},
 	{
 		id: 'sample_alcohol',
-		dependency_type: 'alcohol',
+		dependency_type: 'cannabis',
 		help_type: 'relapse_prevention',
 		languages: ['EN', 'KA'],
 		display_name: 'Still River · K9TW',

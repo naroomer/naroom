@@ -3,6 +3,7 @@
 	import { page } from '$app/state';
 	import { lang, t as tFn } from '$lib/i18n.js';
 	import { sampleListing } from '$lib/v2Samples.js';
+	import { LAUNCH_CURRENCY, detectLaunchCurrency, isLaunchListing } from '$lib/v2LaunchPolicy.js';
 
 	let t = $derived((key, params) => tFn($lang, key, params));
 
@@ -192,15 +193,9 @@
 		return t('v2.rep.years_short', { n: Math.floor(days / 365) });
 	}
 
-	function detectCurrency(addr) {
-		const a = (addr || '').trim();
-		if (!a) return null;
-		if (/^ltc1/i.test(a) || /^[LM]/.test(a)) return 'LTC';
-		if (/^bc1/i.test(a) || /^[13]/.test(a)) return 'BTC';
-		return null;
-	}
+	const detectCurrency = detectLaunchCurrency;
 
-	let detectedCurrency = $derived(detectCurrency(helperWallet) || 'BTC');
+	let detectedCurrency = $derived(detectCurrency(helperWallet) || LAUNCH_CURRENCY);
 
 	async function loadListing() {
 		loading = true;
@@ -215,7 +210,12 @@
 			const res = await fetch(`/api/v2/listings/${id}`);
 			if (res.status === 404) { error = t('v2.listing.not_found'); return; }
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
-			listing = await res.json();
+			const data = await res.json();
+			if (!isLaunchListing(data)) {
+				error = t('v2.listing.not_found');
+				return;
+			}
+			listing = data;
 		} catch (e) {
 			error = e.message;
 		} finally {
@@ -310,7 +310,7 @@
 	});
 
 	async function startHelperPurchase() {
-		if (!helperWallet.trim()) return;
+		if (detectCurrency(helperWallet) !== LAUNCH_CURRENCY) return;
 		if (isSample) {
 			sampleStopped = true;
 			helperError = '';
@@ -632,7 +632,7 @@
 				<button
 					class="btn-primary"
 					onclick={startHelperPurchase}
-					disabled={helperLoading || !helperWallet.trim() || balanceOutage}
+					disabled={helperLoading || detectCurrency(helperWallet) !== LAUNCH_CURRENCY || balanceOutage}
 				>
 					{helperLoading ? t('v2.loading') : t('v2.listing.helper_btn')}
 				</button>

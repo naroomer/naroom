@@ -1,6 +1,7 @@
 <script>
 	import { onMount, onDestroy } from 'svelte';
 	import { lang, t as tFn } from '$lib/i18n.js';
+	import { LAUNCH_CURRENCY, detectLaunchCurrency } from '$lib/v2LaunchPolicy.js';
 	// Cities loaded from API — no static registry in V2 frontend.
 	let citiesData = $state([]);
 
@@ -40,15 +41,9 @@
 	let pollTimer = null;
 
 	// ── Currency detection ─────────────────────────────────────────────────────
-	function detectCurrency(addr) {
-		const a = (addr || '').trim();
-		if (!a) return null;
-		if (/^ltc1/i.test(a) || /^[LM]/.test(a)) return 'LTC';
-		if (/^bc1/i.test(a) || /^[13]/.test(a)) return 'BTC';
-		return null;
-	}
+	const detectCurrency = detectLaunchCurrency;
 
-	let detectedCurrency = $derived(detectCurrency(walletAddress) || 'BTC');
+	let detectedCurrency = $derived(detectCurrency(walletAddress) || LAUNCH_CURRENCY);
 
 	// ── Error code → i18n key ──────────────────────────────────────────────────
 	const ERROR_CODE_KEY = {
@@ -61,7 +56,7 @@
 
 	// ── Step 1: Call /access ───────────────────────────────────────────────────
 	async function checkAccess() {
-		if (!walletAddress.trim() || !city) return;
+		if (detectCurrency(walletAddress) !== LAUNCH_CURRENCY || !city) return;
 		loading = true;
 		error = '';
 		try {
@@ -185,7 +180,7 @@
 			<button
 				class="btn-primary"
 				onclick={checkAccess}
-				disabled={loading || !walletAddress.trim()}
+				disabled={loading || detectCurrency(walletAddress) !== LAUNCH_CURRENCY}
 			>
 				{loading ? t('v2.inf.checking') : t('v2.inf.check_btn')}
 			</button>

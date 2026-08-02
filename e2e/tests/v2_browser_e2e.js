@@ -119,10 +119,11 @@ function assert(cond, msg) {
   if (!cond) throw new Error(msg);
 }
 
-// Valid mainnet BTC bech32 P2WPKH (checksum-valid per btcutil)
+// Valid mainnet LTC P2PKH addresses (checksum-valid per btcutil).
 // CLIENT and HELPER use different wallets to avoid balance/state collisions.
-const CLIENT_WALLET = 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq';
-const HELPER_WALLET = 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4';
+const CLIENT_WALLET = 'LLnCCHbSzfwWquEdaS5TF2Yt7uz5Qb1SZ1';
+const HELPER_WALLET = 'LNLS8Mt4ugdyRzn6yjAcD3312cbsX8R7xv';
+const HIDDEN_BTC_WALLET = 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4';
 
 // ── Process management ─────────────────────────────────────────────────────────
 
@@ -272,6 +273,13 @@ async function runOnce(runNumber) {
       // iOS Safari zooms the whole page when a focused form control is below
       // 16px. Verify the wallet field remains mobile-safe with a full address.
       await clientPage.setViewportSize({ width: 390, height: 844 });
+
+      // Launch policy: BTC remains dormant for legacy compatibility but cannot
+      // start a new public flow.
+      await clientPage.fill('input[type="text"]', HIDDEN_BTC_WALLET);
+      assert(await clientPage.locator('button.btn-primary:not(:disabled)').count() === 0,
+        'BTC wallet unexpectedly enabled a new public Client flow');
+
       await clientPage.fill('input[type="text"]', CLIENT_WALLET);
       await clientPage.locator('input[type="text"]').focus();
       await clientPage.waitForTimeout(400);
@@ -477,6 +485,9 @@ async function runOnce(runNumber) {
         'samples must be part of the common board grid, not a separate section');
       assert(await samples.locator('.example-badge').count() === 3,
         'each sample card must have its own visible Example badge');
+      const sampleDependencies = await samples.locator('.dep').allTextContents();
+      assert(sampleDependencies.every(value => value.trim() === 'Cannabis'),
+        `launch board exposed a non-Cannabis sample: ${sampleDependencies.join(', ')}`);
       assert(await clientPage.locator('.card.listing .time').count() === 0,
         'board cards must not show a remaining-time row');
 
@@ -1514,7 +1525,7 @@ async function runOnce(runNumber) {
         const errWrongWallet = await tryRestore(HELPER_WALLET, managementCode);
         // Mixed pair from two different real listings (still both "unknown" together): use a
         // syntactically-valid but entirely unrelated wallet + unrelated code.
-        const errUnknown = await tryRestore('bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh', 'totally-unknown-code-000000');
+		const errUnknown = await tryRestore('LPtg4SAgphLS26KaP2FmB3X7wKDfiqYLJ5', 'totally-unknown-code-000000');
 
         assert(errWrongCode.length > 0 && errWrongCode === errWrongWallet && errWrongWallet === errUnknown,
           `restore errors must be byte-identical: wrongCode="${errWrongCode}" wrongWallet="${errWrongWallet}" unknown="${errUnknown}"`);

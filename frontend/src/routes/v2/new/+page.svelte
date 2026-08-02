@@ -3,6 +3,7 @@
 	import { lang, t as tFn } from '$lib/i18n.js';
 	import { FALLBACK_CITY_ID } from '$lib/cities.js';
 	import V2QR from '$lib/V2QR.svelte';
+	import { LAUNCH_DEPENDENCIES, LAUNCH_DEPENDENCY, LAUNCH_CURRENCY, detectLaunchCurrency } from '$lib/v2LaunchPolicy.js';
 
 	// Cities come solely from the backend registry (/api/v2/board/cities), never
 	// from a duplicated frontend array. FALLBACK_CITY_ID is the only static value
@@ -44,7 +45,7 @@
 	// Form fields
 	let walletAddress = $state('');
 	let city = $state(FALLBACK_CITY_ID);
-	let depType = $state('');
+	let depType = $state(LAUNCH_DEPENDENCY);
 	let helpType = $state('');
 	// The public flow no longer asks the client to rank urgency. Keep a neutral
 	// value for the existing backend contract and previously created flows.
@@ -57,7 +58,7 @@
 	let managementCode = $state('');
 	let flowId = $state('');
 	let invoiceId = $state('');
-	let currency = $state('BTC');
+	let currency = $state(LAUNCH_CURRENCY);
 	let invoice = $state(null);
 	let balanceUSD = $state(null);
 	let listingId = $state('');
@@ -79,15 +80,9 @@
 	let submitting = $state(false);
 
 	// ── Currency detection ─────────────────────────────────────────────────────
-	function detectCurrency(addr) {
-		const a = (addr || '').trim();
-		if (!a) return null;
-		if (/^ltc1/i.test(a) || /^[LM]/.test(a)) return 'LTC';
-		if (/^bc1/i.test(a) || /^[13]/.test(a)) return 'BTC';
-		return null;
-	}
+	const detectCurrency = detectLaunchCurrency;
 
-	let detectedCurrency = $derived(detectCurrency(walletAddress) || 'BTC');
+	let detectedCurrency = $derived(detectCurrency(walletAddress) || LAUNCH_CURRENCY);
 
 	// ── Computed progress step ─────────────────────────────────────────────────
 	let progressStep = $derived(
@@ -121,9 +116,9 @@
 				walletAddress = s.walletAddress || '';
 				flowId = s.flowId || '';
 				invoiceId = s.invoiceId || '';
-				currency = s.currency || 'BTC';
+				currency = s.currency || LAUNCH_CURRENCY;
 				city = s.city || FALLBACK_CITY_ID;
-				depType = s.depType || '';
+				depType = s.depType || LAUNCH_DEPENDENCY;
 				helpType = s.helpType || '';
 				urgency = s.urgency || 'can_wait';
 				languages = Array.isArray(s.languages) ? s.languages : [];
@@ -137,7 +132,7 @@
 				try {
 					const d = JSON.parse(draft);
 					city = d.city || FALLBACK_CITY_ID;
-					depType = d.depType || '';
+					depType = d.depType || LAUNCH_DEPENDENCY;
 					helpType = d.helpType || '';
 					urgency = d.urgency || 'can_wait';
 					languages = Array.isArray(d.languages) ? d.languages : [];
@@ -215,7 +210,7 @@
 
 	// ── Step: create payment intent ────────────────────────────────────────────
 	async function createIntent() {
-		if (!walletAddress.trim()) return;
+		if (detectCurrency(walletAddress) !== LAUNCH_CURRENCY) return;
 		loading = true;
 		error = '';
 		try {
@@ -516,7 +511,7 @@
 		else languages = [...languages, v];
 	}
 
-	const DEP_VALUES  = ['alcohol','opioids','stimulants','cannabis','cocaine','mephedrone','benzodiazepines','polysubstance','gambling'];
+	const DEP_VALUES = LAUNCH_DEPENDENCIES;
 	const HELP_VALUES = ['crisis','relapse_prevention','motivation','just_talk','recovery_plan'];
 	const LANG_VALUES = ['en','ru','ka','es'];
 
@@ -634,7 +629,7 @@
 				<div class="err">{error}</div>
 			{/if}
 
-			<button class="btn-primary" onclick={createIntent} disabled={loading || !walletAddress.trim()}>
+			<button class="btn-primary" onclick={createIntent} disabled={loading || detectCurrency(walletAddress) !== LAUNCH_CURRENCY}>
 				{loading ? t('v2.loading') : t('v2.client.create_intent')}
 			</button>
 

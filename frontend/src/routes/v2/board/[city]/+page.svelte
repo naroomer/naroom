@@ -4,6 +4,7 @@
 	import { goto } from '$app/navigation';
 	import { lang, t as tFn } from '$lib/i18n.js';
 	import { V2_SAMPLES } from '$lib/v2Samples.js';
+	import { isLaunchListing } from '$lib/v2LaunchPolicy.js';
 
 	let t = $derived((key, params) => tFn($lang, key, params));
 
@@ -38,7 +39,8 @@
 			const res = await fetch(`/api/v2/board/${city}`);
 			if (res.status === 404) { listings = []; return; }
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
-			listings = await res.json();
+			const data = await res.json();
+			listings = Array.isArray(data) ? data.filter(isLaunchListing) : [];
 		} catch (e) {
 			error = e.message;
 		} finally {
