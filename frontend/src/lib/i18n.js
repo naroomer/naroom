@@ -560,6 +560,7 @@ en: {
 	'v2.inf.token_expired':   'Link expired (15 min). Please start again.',
 	'v2.inf.eligibility_verified': 'Wallet eligibility verified. This address meets the ${min} balance requirement.',
 	'v2.inf.privacy_note':    'Your wallet address is used only for balance verification and is not stored. One subscription per Telegram account.',
+	'v2.inf.wallet_hint':     'Minimum {min} balance required. Only used to verify — no funds moved.',
 
 	// ── V2 reputation (H) ─────────────────────────────────────────────────────
 	'v2.rep.today':        'today',
@@ -1135,6 +1136,7 @@ ru: {
 	'v2.inf.token_expired':   'Ссылка истекла (15 мин). Начните заново.',
 	'v2.inf.eligibility_verified': 'Eligibility подтверждена. Адрес соответствует требованию минимального баланса ${min}.',
 	'v2.inf.privacy_note':    'Адрес кошелька используется только для проверки баланса и не сохраняется. Одна подписка на аккаунт Telegram.',
+	'v2.inf.wallet_hint':     'Требуется минимальный баланс {min}. Только для проверки — средства не переводятся.',
 
 	// ── V2 reputation (H) ─────────────────────────────────────────────────────
 	'v2.rep.today':        'сегодня',
@@ -1704,6 +1706,7 @@ es: {
 	'v2.inf.token_expired':   'Enlace expirado (15 min). Empieza de nuevo.',
 	'v2.inf.eligibility_verified': 'Elegibilidad verificada. Esta dirección cumple el requisito de saldo mínimo de ${min}.',
 	'v2.inf.privacy_note':    'Tu dirección solo se usa para verificar el saldo y no se almacena. Una suscripción por cuenta de Telegram.',
+	'v2.inf.wallet_hint':     'Se requiere un saldo mínimo de {min}. Solo para verificación — no se mueven fondos.',
 
 	// ── V2 reputation (H) ─────────────────────────────────────────────────────
 	'v2.rep.today':        'hoy',
@@ -2274,6 +2277,7 @@ ka: {
 	'v2.inf.token_expired':       'ბმული ამოიწურა. გადაიტვირთეთ გვერდი და სცადეთ ხელახლა.',
 	'v2.inf.eligibility_verified':    'Eligibility დადასტურებულია. ეს მისამართი აკმაყოფილებს ${min} მინიმალური ბალანსის მოთხოვნას.',
 	'v2.inf.privacy_note':        'მისამართი გამოიყენება მხოლოდ ბალანსის შესამოწმებლად. ჩვენ მას არ ვინახავთ.',
+	'v2.inf.wallet_hint':         'საჭიროა მინიმუმ {min} ბალანსი. მხოლოდ ვერიფიკაციისთვის — თანხა არ გადაირიცხება.',
 
 	// ── V2 reputation (H) ─────────────────────────────────────────────────────
 	'v2.rep.today':        'დღეს',

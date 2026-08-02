@@ -3,7 +3,7 @@
 	import { lang, t as tFn } from '$lib/i18n.js';
 	import { FALLBACK_CITY_ID } from '$lib/cities.js';
 	import V2QR from '$lib/V2QR.svelte';
-	import { LAUNCH_DEPENDENCIES, LAUNCH_DEPENDENCY, LAUNCH_CURRENCY, detectLaunchCurrency } from '$lib/v2LaunchPolicy.js';
+	import { LAUNCH_DEPENDENCIES, LAUNCH_DEPENDENCY, LAUNCH_CURRENCY, LAUNCH_DISPLAY_LIMITS, detectLaunchCurrency } from '$lib/v2LaunchPolicy.js';
 
 	// Cities come solely from the backend registry (/api/v2/board/cities), never
 	// from a duplicated frontend array. FALLBACK_CITY_ID is the only static value
@@ -716,9 +716,9 @@
 			<h2>{t('v2.balance.title')}</h2>
 			{#if balanceUSD !== null && balanceUSD < pubConfig.client_hard_floor_usd}
 				<div class="balance-box low">
-					<p>{t('v2.balance.low', { balance: balanceUSD.toFixed(0), min: '$' + pubConfig.client_hard_floor_usd })}</p>
+					<p>{t('v2.balance.low', { balance: balanceUSD.toFixed(0), min: '$' + LAUNCH_DISPLAY_LIMITS.clientHardFloorUSD })}</p>
 					<p class="inv-note">{t('v2.balance.low_note')}</p>
-					<p class="inv-note">{t('v2.balance.floor_applied', { floor: '$' + pubConfig.client_hard_floor_usd })}</p>
+					<p class="inv-note">{t('v2.balance.floor_applied', { floor: '$' + LAUNCH_DISPLAY_LIMITS.clientHardFloorUSD })}</p>
 				</div>
 				<button class="btn-secondary" onclick={recheckBalance} disabled={loading}>
 					{loading ? t('v2.loading') : t('v2.balance.recheck')}

@@ -3,7 +3,7 @@
 	import { page } from '$app/state';
 	import { lang, t as tFn } from '$lib/i18n.js';
 	import { sampleListing } from '$lib/v2Samples.js';
-	import { LAUNCH_CURRENCY, detectLaunchCurrency, isLaunchListing } from '$lib/v2LaunchPolicy.js';
+	import { LAUNCH_CURRENCY, LAUNCH_DISPLAY_LIMITS, detectLaunchCurrency, isLaunchListing } from '$lib/v2LaunchPolicy.js';
 
 	let t = $derived((key, params) => tFn($lang, key, params));
 
@@ -598,7 +598,7 @@
 					<ul class="notice-list">
 						<li>{t('v2.helper.notice_country')}</li>
 						<li>{t('v2.helper.notice_wallet')}</li>
-						<li>{t('v2.helper.notice_balance', { post_min: '$' + Math.round(pubConfig.helper_post_payment_min_usd) })}</li>
+						<li>{t('v2.helper.notice_balance', { post_min: '$' + LAUNCH_DISPLAY_LIMITS.helperPostPaymentMinUSD })}</li>
 						<li>{t('v2.helper.notice_no_refund')}</li>
 					</ul>
 				</div>
@@ -616,7 +616,7 @@
 					{#if detectCurrency(helperWallet)}
 						<div class="currency-tag">{detectCurrency(helperWallet)} {t('v2.client.detected')}</div>
 					{/if}
-					<p class="hint">{t('v2.listing.helper_wallet_hint', { min: '$' + Math.round(pubConfig.helper_pre_invoice_min_usd) })}</p>
+					<p class="hint">{t('v2.listing.helper_wallet_hint', { min: '$' + LAUNCH_DISPLAY_LIMITS.helperPreInvoiceMinUSD })}</p>
 				</div>
 
 				{#if helperError}

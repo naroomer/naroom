@@ -1,7 +1,7 @@
 <script>
 	import { onMount, onDestroy } from 'svelte';
 	import { lang, t as tFn } from '$lib/i18n.js';
-	import { LAUNCH_CURRENCY, detectLaunchCurrency } from '$lib/v2LaunchPolicy.js';
+	import { LAUNCH_CURRENCY, LAUNCH_DISPLAY_LIMITS, detectLaunchCurrency } from '$lib/v2LaunchPolicy.js';
 	// Cities loaded from API — no static registry in V2 frontend.
 	let citiesData = $state([]);
 
@@ -9,19 +9,6 @@
 	let cityLabel = $derived(citiesData.find(c => c.id === city)?.label ?? city);
 
 	let t = $derived((key, params) => tFn($lang, key, params));
-
-	// ── Public config ──────────────────────────────────────────────────────────────
-	const DEFAULT_CONFIG = { informer_min_usd: 1000 };
-	let pubConfig = $state({ ...DEFAULT_CONFIG });
-	let configLoaded = $state(false);
-
-	async function fetchPubConfig() {
-		try {
-			const r = await fetch('/api/v2/public-config');
-			if (r.ok) pubConfig = { ...DEFAULT_CONFIG, ...(await r.json()) };
-		} catch {}
-		configLoaded = true;
-	}
 
 	// ── State ──────────────────────────────────────────────────────────────────
 	let step = $state('wallet');   // wallet | waiting | connected | error
@@ -71,7 +58,7 @@
 			const data = await res.json();
 			if (!res.ok) {
 				const key = ERROR_CODE_KEY[data.code] ?? '';
-				error = key ? t(key, { min: '$' + pubConfig.informer_min_usd }) : (data.error || `HTTP ${res.status}`);
+				error = key ? t(key, { min: '$' + LAUNCH_DISPLAY_LIMITS.informerMinUSD }) : (data.error || `HTTP ${res.status}`);
 				return;
 			}
 			botUrl    = data.bot_url;
@@ -133,7 +120,7 @@
 		} catch {}
 	}
 
-	onMount(() => { fetchPubConfig(); fetchCities(); });
+	onMount(fetchCities);
 
 	onDestroy(() => {
 		stopPoll();
@@ -162,6 +149,7 @@
 				{#if detectCurrency(walletAddress)}
 					<div class="currency-tag">{detectedCurrency}</div>
 				{/if}
+				<p class="fine-print">{t('v2.inf.wallet_hint', { min: '$' + LAUNCH_DISPLAY_LIMITS.informerMinUSD })}</p>
 			</div>
 
 			<div class="field">
@@ -193,7 +181,7 @@
 		<div class="section">
 			{#if eligibilityVerified}
 				<div class="eligibility-badge" data-testid="eligibility-badge">
-					{t('v2.inf.eligibility_verified', { min: pubConfig.informer_min_usd })}
+					{t('v2.inf.eligibility_verified', { min: LAUNCH_DISPLAY_LIMITS.informerMinUSD })}
 				</div>
 			{/if}
 
@@ -218,7 +206,7 @@
 			<div class="done-icon">✓</div>
 			{#if eligibilityVerified}
 				<p class="eligibility-confirm" data-testid="eligibility-confirm">
-					{t('v2.inf.eligibility_verified', { min: pubConfig.informer_min_usd })}
+					{t('v2.inf.eligibility_verified', { min: LAUNCH_DISPLAY_LIMITS.informerMinUSD })}
 				</p>
 			{/if}
 			<h2 data-testid="connected-msg">{t('v2.inf.connected', { city: cityLabel })}</h2>

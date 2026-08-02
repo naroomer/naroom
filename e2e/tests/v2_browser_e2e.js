@@ -270,6 +270,20 @@ async function runOnce(runNumber) {
       // A new Client first sees what can be published, before entering a wallet.
       await fillClientListingDetails(clientPage);
 
+      // Acceptance backend limits are intentionally lower, but public launch
+      // requirements must remain stable in the UI.
+      const clientHint = await clientPage.locator('.hint').first().textContent();
+      assert(clientHint.includes('150'),
+        `Client launch requirement is not $150: "${clientHint}"`);
+
+      const informerPage = await context.newPage();
+      await informerPage.goto(`${frontendBase}/v2/informer`);
+      await informerPage.waitForLoadState('networkidle');
+      const informerHint = await informerPage.locator('.field .fine-print').first().textContent();
+      assert(informerHint.includes('1000'),
+        `Informer launch requirement is not $1000: "${informerHint}"`);
+      await informerPage.close();
+
       // iOS Safari zooms the whole page when a focused form control is below
       // 16px. Verify the wallet field remains mobile-safe with a full address.
       await clientPage.setViewportSize({ width: 390, height: 844 });
@@ -769,10 +783,11 @@ async function runOnce(runNumber) {
 
     // ── Step 6: Helper purchase → no ?pt= → invoice → clipboard ──────────────
     await step('6: Listing detail → helper wallet → purchase → URL has no ?pt= → invoice + clipboard', async () => {
-      // Pre-set balance above dev helper floor ($60 pre-invoice, $50 post-payment)
+      // Exactly the cheap acceptance floor must pass while the UI continues to
+      // show the future public launch requirements ($1010 before, $1000 after).
       await devAPI(backendBase, 'POST', '/dev/balance/set', {
         wallet_address: HELPER_WALLET,
-        balance_usd: 2000.0,
+        balance_usd: 60.0,
       });
 
       // Helper persona lives in its OWN browser context — never shares the
@@ -792,10 +807,14 @@ async function runOnce(runNumber) {
       const noticeCount = await helperPage.locator('.notice-box, .notice-title').count();
       assert(noticeCount > 0, 'informational notice not shown on listing page');
 
-      // Threshold hint must reflect public-config values (dev policy: pre-invoice = $60)
+      const noticeText = await helperPage.locator('.notice-box').textContent();
+      assert(noticeText.includes('1000'),
+        `Helper post-payment launch requirement is not $1000: "${noticeText}"`);
+
+      // Displayed threshold is deliberately separate from the cheaper dev gate.
       const hintText = (await helperPage.locator('.hint').first().textContent().catch(() => ''));
-      assert(hintText.includes('60') || hintText.includes('$60'),
-        `threshold hint does not show dev pre-invoice min ($60): "${hintText}"`);
+      assert(hintText.includes('1010'),
+        `Helper pre-invoice launch requirement is not $1010: "${hintText}"`);
 
       // Fill helper wallet
       await helperPage.fill('input[type="text"]', HELPER_WALLET);

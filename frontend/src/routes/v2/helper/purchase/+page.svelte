@@ -2,19 +2,9 @@
 	import { onMount } from 'svelte';
 	import { lang, t as tFn } from '$lib/i18n.js';
 	import V2QR from '$lib/V2QR.svelte';
+	import { LAUNCH_DISPLAY_LIMITS } from '$lib/v2LaunchPolicy.js';
 
 	let t = $derived((key, params) => tFn($lang, key, params));
-
-	// ── Public config ──────────────────────────────────────────────────────────────
-	const DEFAULT_CONFIG = { helper_pre_invoice_min_usd: 1010, helper_post_payment_min_usd: 1000 };
-	let pubConfig = $state({ ...DEFAULT_CONFIG });
-
-	async function fetchPubConfig() {
-		try {
-			const r = await fetch('/api/v2/public-config');
-			if (r.ok) pubConfig = { ...DEFAULT_CONFIG, ...(await r.json()) };
-		} catch {}
-	}
 
 	// purchase_token from sessionStorage only — never exposed in URL/history
 	let purchaseToken = $state('');
@@ -110,8 +100,6 @@
 	}
 
 	onMount(async () => {
-		fetchPubConfig();
-
 		// Cross-device handoff: the token travels ONLY in the URL fragment
 		// (#handoff=...), never as a query param, and never with the wallet.
 		// Fragments are not sent to the server, so this never appears in access
@@ -840,7 +828,7 @@
 				<div class="step-inner">
 					<h2>{t('v2.balance.title')}</h2>
 					{#if lastBalanceUSD !== null}
-						<div class="err">{t('v2.balance.low', { balance: lastBalanceUSD.toFixed(0), min: '$' + pubConfig.helper_post_payment_min_usd })}</div>
+						<div class="err">{t('v2.balance.low', { balance: lastBalanceUSD.toFixed(0), min: '$' + LAUNCH_DISPLAY_LIMITS.helperPostPaymentMinUSD })}</div>
 					{/if}
 					<p class="sub">{t('v2.helper.balance_sub')}</p>
 					<button class="btn-secondary" onclick={restorePurchase} disabled={loading}>
