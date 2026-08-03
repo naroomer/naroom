@@ -333,7 +333,7 @@ en: {
 	// ── V2 how-it-works ────────────────────────────────────────────────────────
 	'v2.hiw.title': 'How it works',
 	'v2.hiw.back':  '← Back to board',
-	'v2.hiw.intro': 'NA Room is an anonymous peer-support service for people dealing with cannabis dependence. A person can post a request for support, and someone with lived experience can find it and contact them directly through Telegram. The site does not provide medical services and operates automatically, without accounts, operators, or customer support.',
+	'v2.hiw.intro': 'NA Room is an anonymous peer-support service for people dealing with cannabis dependence. A person can post a request for support, and someone with lived experience can find it and contact them directly through Telegram or Signal. The site does not provide medical services and operates automatically, without accounts, operators, or customer support.',
 
 	'v2.hiw.client.title': 'I need help',
 	'v2.hiw.client.step1': 'Choose a city and describe the support you need.',
@@ -924,7 +924,7 @@ ru: {
 
 	'v2.hiw.title': 'Как это работает',
 	'v2.hiw.back':  '← На доску',
-	'v2.hiw.intro': 'NA Room — сервис анонимной взаимопомощи для людей с зависимостью от каннабиса. Здесь человек может разместить просьбу о поддержке, а другой человек с личным опытом — найти её и связаться с ним напрямую через Telegram. Сайт не оказывает медицинские услуги и работает автоматически, без аккаунтов, операторов и службы поддержки.',
+	'v2.hiw.intro': 'NA Room — сервис анонимной взаимопомощи для людей с зависимостью от каннабиса. Здесь человек может разместить просьбу о поддержке, а другой человек с личным опытом — найти её и связаться с ним напрямую через Telegram или Signal. Сайт не оказывает медицинские услуги и работает автоматически, без аккаунтов, операторов и службы поддержки.',
 
 	'v2.hiw.client.title': 'Мне нужна помощь',
 	'v2.hiw.client.step1': 'Выберите город и укажите, какая поддержка вам нужна.',
@@ -1497,7 +1497,7 @@ es: {
 
 	'v2.hiw.title': 'Cómo funciona',
 	'v2.hiw.back':  '← Volver al tablero',
-	'v2.hiw.intro': 'NA Room es un servicio anónimo de apoyo entre personas para quienes afrontan dependencia del cannabis. Una persona puede publicar una solicitud de apoyo, y alguien con experiencia personal puede encontrarla y contactarla directamente por Telegram. El sitio no presta servicios médicos y funciona automáticamente, sin cuentas, operadores ni servicio de atención al cliente.',
+	'v2.hiw.intro': 'NA Room es un servicio anónimo de apoyo entre personas para quienes afrontan dependencia del cannabis. Una persona puede publicar una solicitud de apoyo, y alguien con experiencia personal puede encontrarla y contactarla directamente por Telegram o Signal. El sitio no presta servicios médicos y funciona automáticamente, sin cuentas, operadores ni servicio de atención al cliente.',
 
 	'v2.hiw.client.title': 'Necesito ayuda',
 	'v2.hiw.client.step1': 'Elige una ciudad e indica qué tipo de apoyo necesitas.',
@@ -2071,7 +2071,7 @@ ka: {
 
 	'v2.hiw.title': 'როგორ მუშაობს',
 	'v2.hiw.back':  '← დაფაზე დაბრუნება',
-	'v2.hiw.intro': 'NA Room არის ანონიმური ურთიერთდახმარების სერვისი კანაფზე დამოკიდებულების მქონე ადამიანებისთვის. ადამიანს შეუძლია გამოაქვეყნოს მხარდაჭერის მოთხოვნა, ხოლო პირადი გამოცდილების მქონე სხვა ადამიანს შეუძლია იპოვოს ის და პირდაპირ Telegram-ის მეშვეობით დაუკავშირდეს. საიტი არ უზრუნველყოფს სამედიცინო მომსახურებას და მუშაობს ავტომატურად, ანგარიშების, ოპერატორებისა და მომხმარებელთა მხარდაჭერის გარეშე.',
+	'v2.hiw.intro': 'NA Room არის ანონიმური ურთიერთდახმარების სერვისი კანაფზე დამოკიდებულების მქონე ადამიანებისთვის. ადამიანს შეუძლია გამოაქვეყნოს მხარდაჭერის მოთხოვნა, ხოლო პირადი გამოცდილების მქონე სხვა ადამიანს შეუძლია იპოვოს ის და პირდაპირ Telegram-ის ან Signal-ის მეშვეობით დაუკავშირდეს. საიტი არ უზრუნველყოფს სამედიცინო მომსახურებას და მუშაობს ავტომატურად, ანგარიშების, ოპერატორებისა და მომხმარებელთა მხარდაჭერის გარეშე.',
 
 	'v2.hiw.client.title': 'დახმარება მჭირდება',
 	'v2.hiw.client.step1': 'აირჩიეთ ქალაქი და მიუთითეთ, რა სახის მხარდაჭერა გჭირდებათ.',
