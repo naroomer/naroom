@@ -464,6 +464,58 @@ func TestInformerWorker_NonMatchingCity(t *testing.T) {
 	}
 }
 
+// notifCapturingSender records the full InformerNotification (Text, ButtonText,
+// ButtonURL) per delivery, unlike fakeInformerSender which only tracks chatIDs.
+type notifCapturingSender struct {
+	notifs []v2.InformerNotification
+}
+
+func (n *notifCapturingSender) SendInformerNotification(_ context.Context, _ int64, notif v2.InformerNotification) error {
+	n.notifs = append(n.notifs, notif)
+	return nil
+}
+
+// TestInformerNotificationText_ExcludesUrgencyAndID is a narrow, direct-worker
+// regression test (no full release-E2E lifecycle needed) proving the visible
+// Telegram text carries only city/nickname/help-type — never urgency, the raw
+// listing ID, or a URL — while the "Open listing" button still carries the
+// full listing link.
+func TestInformerNotificationText_ExcludesUrgencyAndID(t *testing.T) {
+	svc := newInformerTestSvc(t, nil)
+
+	tok, _, _ := svc.CreateAccess("tbilisi", 2000.0)
+	_ = svc.Subscribe(3001, tok)
+
+	const listingID = "listing-clean-msg-01"
+	_ = svc.NotifyFirstPublish(listingID, "tbilisi", "Nadia", "crisis", "alcohol", "urgent", time.Now())
+
+	sender := &notifCapturingSender{}
+	worker := v2.NewInformerWorker(svc, sender)
+	if err := worker.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(sender.notifs) != 1 {
+		t.Fatalf("expected exactly 1 notification, got %d", len(sender.notifs))
+	}
+	notif := sender.notifs[0]
+
+	for _, forbidden := range []string{"urgent", "can_wait", listingID, "http://", "https://"} {
+		if strings.Contains(notif.Text, forbidden) {
+			t.Errorf("visible text must not contain %q, got: %q", forbidden, notif.Text)
+		}
+	}
+	const wantText = "New listing in tbilisi\nNadia · crisis"
+	if notif.Text != wantText {
+		t.Errorf("text = %q, want %q", notif.Text, wantText)
+	}
+	if notif.ButtonText != "Open listing" {
+		t.Errorf("button text = %q, want %q", notif.ButtonText, "Open listing")
+	}
+	if !strings.HasSuffix(notif.ButtonURL, "/v2/listing/"+listingID) {
+		t.Errorf("button URL = %q, want suffix %q", notif.ButtonURL, "/v2/listing/"+listingID)
+	}
+}
+
 // ── 18. Publish commit independent of Telegram delivery ──────────────────────
 
 type failingInformerSender struct{}

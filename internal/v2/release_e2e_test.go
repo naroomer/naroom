@@ -648,6 +648,12 @@ func TestReleaseR06_InformerSubscribeAndDeliver(t *testing.T) {
 	if strings.Contains(notif.Text, "http://") || strings.Contains(notif.Text, "https://") {
 		t.Errorf("visible text leaks a URL: %q", notif.Text)
 	}
+	if strings.Contains(notif.Text, "urgent") || strings.Contains(notif.Text, "can_wait") {
+		t.Errorf("visible text exposes urgency: %q", notif.Text)
+	}
+	if wantText := "New listing in yerevan\n" + lv.DisplayName + " · crisis"; notif.Text != wantText {
+		t.Errorf("visible text = %q, want %q", notif.Text, wantText)
+	}
 }
 
 // ── R07: Informer per-recipient retry — no duplicate on second run ────────────

@@ -8,9 +8,10 @@
 	let boardCity = $state(FALLBACK_CITY_ID);
 	let boardUrl = $derived('/v2/board/' + boardCity);
 
-	const CLIENT_MIN_USD = '$150';
-	const HELPER_MIN_USD = '$1,000';
-	const INFORMER_MIN_USD = '$1,000';
+	const CLIENT_MIN_USD = '150';
+	const HELPER_PRE_MIN_USD = '1,010';
+	const HELPER_POST_MIN_USD = '1,000';
+	const INFORMER_MIN_USD = '1,000';
 
 	onMount(async () => {
 		try {
@@ -35,6 +36,7 @@
 
 	<div class="content">
 		<h1 class="page-title">{t('v2.hiw.title')}</h1>
+		<p>{t('v2.hiw.intro')}</p>
 
 		<section>
 			<h2>{t('v2.hiw.client.title')}</h2>
@@ -51,9 +53,9 @@
 		<section>
 			<h2>{t('v2.hiw.helper.title')}</h2>
 			<ul>
-				<li>{t('v2.hiw.helper.step1', { min: HELPER_MIN_USD })}</li>
+				<li>{t('v2.hiw.helper.step1', { min: HELPER_PRE_MIN_USD })}</li>
 				<li>{t('v2.hiw.helper.step2')}</li>
-				<li>{t('v2.hiw.helper.step3', { min: HELPER_MIN_USD })}</li>
+				<li>{t('v2.hiw.helper.step3', { min: HELPER_POST_MIN_USD })}</li>
 				<li>{t('v2.hiw.helper.step4')}</li>
 				<li>{t('v2.hiw.helper.step5')}</li>
 				<li>{t('v2.hiw.helper.step6')}</li>

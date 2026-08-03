@@ -1061,7 +1061,7 @@ func (w *InformerWorker) processEntry(ctx context.Context, e *InformerOutboxEntr
 	// Visible text intentionally omits the listing_id/URL — that stays only in
 	// the button below, never in the Telegram message body itself.
 	notification := InformerNotification{
-		Text:       fmt.Sprintf("New listing in %s\n%s · %s · %s", e.City, e.DisplayName, e.HelpType, e.Urgency),
+		Text:       fmt.Sprintf("New listing in %s\n%s · %s", e.City, e.DisplayName, e.HelpType),
 		ButtonText: "Open listing",
 		ButtonURL:  w.svc.publicBaseURL + e.ListingURL,
 	}

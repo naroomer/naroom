@@ -1239,9 +1239,17 @@ func TestListingHTTPReactivateLowBalanceBindingPreserved(t *testing.T) {
 	h, transport, svc, _, _ := newJourneyHandler(t, nowFn, bal)
 	mux := h.Routes()
 
-	rawCode, _, _ := fullSetupPublish(t, svc, transport, mux, testBTCBech32Addr)
+	rawCode, listingID, _ := fullSetupPublish(t, svc, transport, mux, testBTCBech32Addr)
 	advanced := now.Add(25 * time.Hour)
 	h.ls.NormalizeExpired(advanced) //nolint:errcheck
+
+	// Snapshot listing state/activation_count before the failed reactivation.
+	var stateBefore string
+	var activationBefore int
+	if err := svc.db.QueryRow(`SELECT state, activation_count FROM v2_listings WHERE id = ?`, listingID).
+		Scan(&stateBefore, &activationBefore); err != nil {
+		t.Fatalf("snapshot listing before: %v", err)
+	}
 
 	h2, _ := NewClientJourneyHandler(svc, h.ls, transport, bal, []byte("rl-bind-pres"), func() time.Time { return advanced })
 	mux2 := h2.Routes()
@@ -1262,6 +1270,20 @@ func TestListingHTTPReactivateLowBalanceBindingPreserved(t *testing.T) {
 	}
 	if status != "ready" {
 		t.Errorf("after low_balance: binding status=%s, want ready", status)
+	}
+
+	// Listing itself must be untouched — no partial activation on rejection.
+	var stateAfter string
+	var activationAfter int
+	if err := svc.db.QueryRow(`SELECT state, activation_count FROM v2_listings WHERE id = ?`, listingID).
+		Scan(&stateAfter, &activationAfter); err != nil {
+		t.Fatalf("snapshot listing after: %v", err)
+	}
+	if stateAfter != stateBefore {
+		t.Errorf("after low_balance: listing state=%s, want unchanged %s", stateAfter, stateBefore)
+	}
+	if activationAfter != activationBefore {
+		t.Errorf("after low_balance: activation_count=%d, want unchanged %d", activationAfter, activationBefore)
 	}
 }
 

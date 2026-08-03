@@ -143,7 +143,9 @@
 			});
 			const data = await res.json();
 			if (!res.ok) {
-				ownerError = data.error || `HTTP ${res.status}`;
+				ownerError = data.code === 'low_balance'
+					? t('v2.owner.reactivate_low_balance')
+					: (data.error || `HTTP ${res.status}`);
 				return;
 			}
 			await checkOwnerCapability();
@@ -336,6 +338,9 @@
 				} else if (data.code === 'duplicate_active_purchase') {
 					balanceOutage = false;
 					helperError = t('v2.helper.duplicate_active_help');
+				} else if (data.code === 'insufficient_pre_balance') {
+					balanceOutage = false;
+					helperError = t('v2.helper.insufficient_pre_balance');
 				} else {
 					balanceOutage = false;
 					helperError = data.error || `HTTP ${res.status}`;

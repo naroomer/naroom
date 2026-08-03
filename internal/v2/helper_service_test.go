@@ -2,6 +2,7 @@ package v2
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -456,11 +457,28 @@ func TestHelperCreate_InsufficientBalance(t *testing.T) {
 		t.Errorf("1009.99 balance: got status %d, want 402", rr.Code)
 	}
 
+	// Machine-readable code must be codeInsufficientBalance — this is the exact
+	// contract the frontend keys off to show its localized "$1010 required" text.
+	var body struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response body: %v", err)
+	}
+	if body.Code != codeInsufficientBalance {
+		t.Errorf("code = %q, want %q", body.Code, codeInsufficientBalance)
+	}
+
 	// No purchase row created.
 	var count int
 	db.QueryRow(`SELECT COUNT(*) FROM v2_helper_purchases`).Scan(&count) //nolint:errcheck
 	if count != 0 {
 		t.Errorf("expected 0 purchases after failed balance check, got %d", count)
+	}
+	// No invoice row created either.
+	db.QueryRow(`SELECT COUNT(*) FROM v2_helper_invoices`).Scan(&count) //nolint:errcheck
+	if count != 0 {
+		t.Errorf("expected 0 invoices after failed balance check, got %d", count)
 	}
 
 	// Provider outage → 503.
