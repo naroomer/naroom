@@ -1,8 +1,10 @@
 <script>
 	import { onMount, onDestroy } from 'svelte';
+	import { page } from '$app/state';
 	import { lang, t as tFn } from '$lib/i18n.js';
 	import { FALLBACK_CITY_ID } from '$lib/cities.js';
 	import V2QR from '$lib/V2QR.svelte';
+	import SeoHead from '$lib/SeoHead.svelte';
 	import { LAUNCH_DEPENDENCIES, LAUNCH_DEPENDENCY, LAUNCH_CURRENCY, LAUNCH_DISPLAY_LIMITS, detectLaunchCurrency } from '$lib/v2LaunchPolicy.js';
 
 	// Cities come solely from the backend registry (/api/v2/board/cities), never
@@ -524,6 +526,8 @@
 		return addr;
 	}
 </script>
+
+<SeoHead robots="noindex, nofollow, noarchive" canonicalUrl={page.url.origin + page.url.pathname} />
 
 <div class="page">
 	<a href="/v2/board/{city || 'tbilisi'}" class="back">← {t('back_to_board')}</a>

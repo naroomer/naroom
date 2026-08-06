@@ -1,64 +1,45 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-
   <url>
-    <loc>https://naroom.net/how-it-works</loc>
-    <changefreq>monthly</changefreq>
-    <priority>1.0</priority>
+    <loc>https://naroom.net/v2/how-it-works</loc>
   </url>
-
   <url>
-    <loc>https://naroom.net/board/buenos_aires</loc>
-    <changefreq>hourly</changefreq>
-    <priority>0.8</priority>
+    <loc>https://naroom.net/v2/board/buenos_aires</loc>
   </url>
-
   <url>
-    <loc>https://naroom.net/board/sao_paulo</loc>
-    <changefreq>hourly</changefreq>
-    <priority>0.8</priority>
+    <loc>https://naroom.net/v2/board/sao_paulo</loc>
   </url>
-
   <url>
-    <loc>https://naroom.net/board/nha_trang</loc>
-    <changefreq>hourly</changefreq>
-    <priority>0.8</priority>
+    <loc>https://naroom.net/v2/board/nha_trang</loc>
   </url>
-
   <url>
-    <loc>https://naroom.net/board/da_nang</loc>
-    <changefreq>hourly</changefreq>
-    <priority>0.8</priority>
+    <loc>https://naroom.net/v2/board/da_nang</loc>
   </url>
-
   <url>
-    <loc>https://naroom.net/board/tbilisi</loc>
-    <changefreq>hourly</changefreq>
-    <priority>0.8</priority>
+    <loc>https://naroom.net/v2/board/tbilisi</loc>
   </url>
-
   <url>
-    <loc>https://naroom.net/board/batumi</loc>
-    <changefreq>hourly</changefreq>
-    <priority>0.7</priority>
+    <loc>https://naroom.net/v2/board/batumi</loc>
   </url>
-
   <url>
-    <loc>https://naroom.net/board/almaty</loc>
-    <changefreq>hourly</changefreq>
-    <priority>0.7</priority>
+    <loc>https://naroom.net/v2/board/almaty</loc>
   </url>
-
   <url>
-    <loc>https://naroom.net/board/yerevan</loc>
-    <changefreq>hourly</changefreq>
-    <priority>0.7</priority>
+    <loc>https://naroom.net/v2/board/yerevan</loc>
   </url>
-
   <url>
-    <loc>https://naroom.net/board/moscow</loc>
-    <changefreq>hourly</changefreq>
-    <priority>0.7</priority>
+    <loc>https://naroom.net/v2/board/moscow</loc>
   </url>
-
+  <url>
+    <loc>https://naroom.net/v2/board/hanoi</loc>
+  </url>
+  <url>
+    <loc>https://naroom.net/v2/board/ho_chi_minh_city</loc>
+  </url>
+  <url>
+    <loc>https://naroom.net/v2/board/antalya</loc>
+  </url>
+  <url>
+    <loc>https://naroom.net/v2/board/bali</loc>
+  </url>
 </urlset>

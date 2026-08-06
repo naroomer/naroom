@@ -1,4 +1,30 @@
+# NA Room — robots.txt
+#
+# Only /v2/* is the current product surface. Legacy top-level paths
+# (/board/, /chat/, /helper, /listing/, /new, /resume, /how-it-works) are
+# permanent redirects into /v2/* and carry no indexable content of their own.
+#
+# Indexable: /v2/how-it-works, /v2/board/{city}.
+# Every other HTML page under /v2/ (wallet, payment, recovery-code, purchase,
+# review flows) is deliberately NOT Disallowed here — a crawler must be able
+# to fetch the page to see its own noindex/nofollow/noarchive directive (meta
+# tag + X-Robots-Tag). Blocking it in robots.txt instead would keep the
+# crawler from ever seeing that directive, which is the opposite of what we
+# want for an already-linked private URL (Google explicitly documents this:
+# combining Disallow with noindex on the same page is self-defeating).
+#
+# /api/* is different: it is JSON, never carries a noindex meta tag or an
+# X-Robots-Tag a crawler would see (in production /api/* is served directly
+# by the Go backend via Caddy — this frontend process, and any header it
+# sets, is never in that request path). Disallow: /api/ is the actual and
+# sufficient mechanism there.
+
 User-agent: *
+Allow: /v2/
+Disallow: /api/
+
+# Legacy V1 top-level paths — unchanged, kept disallowed (they only ever
+# 308-redirect into /v2/*, so there is nothing here worth crawling directly).
 Disallow: /chat/
 Disallow: /listing/
 Disallow: /new
@@ -6,6 +32,11 @@ Disallow: /helper
 Disallow: /resume
 Disallow: /review
 Disallow: /invoice
+
+# OAI-SearchBot (OpenAI's search crawler) — explicitly allowed on the same
+# public surface as every other crawler; no separate/looser policy.
+User-agent: OAI-SearchBot
+Allow: /v2/
 Disallow: /api/
 
 Sitemap: https://naroom.net/sitemap.xml

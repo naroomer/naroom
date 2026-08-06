@@ -1,15 +1,33 @@
 <script>
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
+	import { goto } from '$app/navigation';
 	import { env } from '$env/dynamic/public';
 	import { lang, initLang, setLang, SUPPORTED_LANGS } from '$lib/i18n.js';
 	import { isAnalyticsRoute } from '$lib/analytics.js';
+	import { SEO_MANAGED_ROUTE_IDS, langFromUrl, langQuery } from '$lib/seoConfig.js';
 
 	const PUBLIC_GOATCOUNTER_CODE = env.PUBLIC_GOATCOUNTER_CODE ?? '';
 
 	let { children } = $props();
 
 	onMount(initLang);
+
+	// On the two SEO-managed routes, the URL's ?lang= is authoritative (see
+	// $lib/seoConfig.js) — the switcher must update the URL there, not just
+	// the shared store, and the active button must reflect the URL too, not
+	// the browser/localStorage language, or clicking would appear to do
+	// nothing when they briefly disagree.
+	let isSeoManagedRoute = $derived(SEO_MANAGED_ROUTE_IDS.includes(page.route.id));
+	let activeLangCode = $derived(isSeoManagedRoute ? langFromUrl(page.url) : $lang);
+
+	function selectLang(code) {
+		setLang(code);
+		if (!isSeoManagedRoute) return;
+		const url = new URL(page.url);
+		url.search = langQuery(code);
+		goto(url.pathname + url.search, { replaceState: true, noScroll: true, keepFocus: true });
+	}
 
 	// ── Analytics (GoatCounter, public pages only) ──────────────────────────────
 	// Script injected once on first public page; SPA navigations call count() manually.
@@ -36,25 +54,29 @@
 
 	const LANG_LABEL = { en: 'EN', ru: 'RU', es: 'ES', ka: 'ქარ' };
 
+	// Fallback <title>/<meta description> shown when a page does not override
+	// them via <SeoHead>. Kept accurate (Cannabis, Telegram or Signal) so even
+	// noindex pages that inherit this default never show stale marketing copy
+	// in the browser tab.
 	const META = {
 		en: {
-			title:       'NA Room — Anonymous Peer Support for Addiction',
-			description: 'Anonymous peer support for people dealing with addiction. No accounts, no identity. Contact helpers directly via Telegram.',
+			title:       'NA Room — Private Cannabis Peer Support',
+			description: 'Privacy-focused peer support for people concerned about cannabis use. No account required. Connect with a peer through Telegram or Signal.',
 			locale:      'en_US',
 		},
 		ru: {
-			title:       'NA Room — Анонимная поддержка при зависимости',
-			description: 'Анонимная поддержка для людей с зависимостью. Без аккаунтов, без личных данных. Связь через Telegram.',
+			title:       'NA Room — приватная поддержка при каннабисе',
+			description: 'Приватная поддержка для тех, кто обеспокоен употреблением каннабиса. Аккаунт не нужен. Связь через Telegram или Signal.',
 			locale:      'ru_RU',
 		},
 		es: {
-			title:       'NA Room — Peer Support Anónimo para Adicciones',
-			description: 'Peer support anónimo para personas con adicciones. Sin cuentas, sin identidad. Contacto directo por Telegram.',
+			title:       'NA Room — apoyo privado sobre cannabis',
+			description: 'Apoyo entre personas para quienes están preocupados por el consumo de cannabis. No se requiere cuenta. Contacto por Telegram o Signal.',
 			locale:      'es_ES',
 		},
 		ka: {
-			title:       'NA Room — ანონიმური Peer Support დამოკიდებულებისთვის',
-			description: 'ანონიმური Peer support დამოკიდებულებასთან მებრძოლი ადამიანებისთვის. ანგარიშების გარეშე. კავშირი Telegram-ის გზით.',
+			title:       'NA Room — პირადი მხარდაჭერა კანაფის საკითხში',
+			description: 'მხარდაჭერა იმათთვის, ვინც შეშფოთებულია კანაფის მოხმარებით. ანგარიში არ არის საჭირო. კავშირი Telegram-ით ან Signal-ით.',
 			locale:      'ka_GE',
 		},
 	};
@@ -63,22 +85,37 @@
 </script>
 
 <svelte:head>
-	<title>{meta.title}</title>
 	<meta name="viewport" content="width=device-width, initial-scale=1" />
-	<meta name="description" content={meta.description} />
-	<meta name="robots" content="index, follow" />
+	{#if !isSeoManagedRoute}
+		<!--
+			This fallback title/description/OG/Twitter block is for every route
+			EXCEPT the two SEO-managed ones (how-it-works, board/[city]) — those
+			render their own complete set via <SeoHead>, and this block must stay
+			suppressed there so exactly one <title>/description/OG/Twitter ever
+			renders, never two. See $lib/seoConfig.js: SEO_MANAGED_ROUTE_IDS.
+		-->
+		<title>{meta.title}</title>
+		<meta name="description" content={meta.description} />
+		<!--
+			No global <meta name="robots"> here: every route sets its own via
+			<SeoHead> (index,follow + canonical on the 2 public V2 pages;
+			noindex,nofollow,noarchive + self-canonical on private V2 pages), so
+			exactly one robots directive ever renders per page — never a
+			layout-level default that could conflict with a page's own tag.
+		-->
 
-	<!-- Open Graph -->
-	<meta property="og:type"        content="website" />
-	<meta property="og:site_name"   content="NA Room" />
-	<meta property="og:title"       content={meta.title} />
-	<meta property="og:description" content={meta.description} />
-	<meta property="og:locale"      content={meta.locale} />
+		<!-- Open Graph -->
+		<meta property="og:type"        content="website" />
+		<meta property="og:site_name"   content="NA Room" />
+		<meta property="og:title"       content={meta.title} />
+		<meta property="og:description" content={meta.description} />
+		<meta property="og:locale"      content={meta.locale} />
 
-	<!-- Twitter / X -->
-	<meta name="twitter:card"        content="summary" />
-	<meta name="twitter:title"       content={meta.title} />
-	<meta name="twitter:description" content={meta.description} />
+		<!-- Twitter / X -->
+		<meta name="twitter:card"        content="summary" />
+		<meta name="twitter:title"       content={meta.title} />
+		<meta name="twitter:description" content={meta.description} />
+	{/if}
 </svelte:head>
 
 {@render children()}
@@ -88,8 +125,8 @@
 	{#each SUPPORTED_LANGS as code}
 		<button
 			class="lang-btn"
-			class:active={$lang === code}
-			onclick={() => setLang(code)}
+			class:active={activeLangCode === code}
+			onclick={() => selectLang(code)}
 		>{LANG_LABEL[code] ?? code.toUpperCase()}</button>
 	{/each}
 </div>

@@ -1,17 +1,49 @@
 <script>
 	import { onMount } from 'svelte';
-	import { lang, t as tFn } from '$lib/i18n.js';
+	import { page } from '$app/state';
+	import { t as tFn } from '$lib/i18n.js';
+	import SeoHead from '$lib/SeoHead.svelte';
 	import { FALLBACK_CITY_ID } from '$lib/cities.js';
+	import { SITE_ORIGIN, SUPPORTED_SEO_LANGS, langFromUrl, langQuery } from '$lib/seoConfig.js';
 
-	let t = $derived((key, params) => tFn($lang, key, params));
+	// The URL's ?lang= is authoritative on this page — during SSR and after
+	// hydration alike, since both read the same page.url. It never flips to
+	// the browser/localStorage language post-hydration; the global switcher
+	// (in +layout.svelte) updates this same URL instead when used here.
+	let effectiveLang = $derived(langFromUrl(page.url));
+	let t = $derived((key, params) => tFn(effectiveLang, key, params));
 
 	let boardCity = $state(FALLBACK_CITY_ID);
-	let boardUrl = $derived('/v2/board/' + boardCity);
+	let boardUrl = $derived('/v2/board/' + boardCity + langQuery(effectiveLang));
 
 	const CLIENT_MIN_USD = '150';
 	const HELPER_PRE_MIN_USD = '1,010';
 	const HELPER_POST_MIN_USD = '1,000';
 	const INFORMER_MIN_USD = '1,000';
+
+	let canonicalUrl = $derived(SITE_ORIGIN + page.url.pathname + langQuery(effectiveLang));
+	let hreflangs = $derived(
+		SUPPORTED_SEO_LANGS.map((l) => ({
+			lang: l,
+			href: SITE_ORIGIN + page.url.pathname + langQuery(l),
+		})).concat([{ lang: 'x-default', href: SITE_ORIGIN + page.url.pathname }])
+	);
+	let jsonLd = $derived([
+		{
+			'@context': 'https://schema.org',
+			'@type': 'WebSite',
+			name: 'NA Room',
+			url: SITE_ORIGIN + '/v2/how-it-works',
+		},
+		{
+			'@context': 'https://schema.org',
+			'@type': 'WebPage',
+			name: t('v2.seo.hiw.title'),
+			description: t('v2.seo.hiw.description'),
+			url: canonicalUrl,
+			inLanguage: effectiveLang,
+		},
+	]);
 
 	onMount(async () => {
 		try {
@@ -25,6 +57,17 @@
 		} catch {}
 	});
 </script>
+
+<SeoHead
+	title={t('v2.seo.hiw.title')}
+	description={t('v2.seo.hiw.description')}
+	robots="index, follow"
+	canonicalUrl={canonicalUrl}
+	lang={effectiveLang}
+	ogImageUrl={SITE_ORIGIN + '/og-preview.png'}
+	hreflangs={hreflangs}
+	jsonLd={jsonLd}
+/>
 
 <div class="page">
 	<header>

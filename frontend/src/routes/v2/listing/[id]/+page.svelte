@@ -2,6 +2,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { page } from '$app/state';
 	import { lang, t as tFn } from '$lib/i18n.js';
+	import SeoHead from '$lib/SeoHead.svelte';
 	import { sampleListing } from '$lib/v2Samples.js';
 	import { LAUNCH_CURRENCY, LAUNCH_DISPLAY_LIMITS, detectLaunchCurrency, isLaunchListing } from '$lib/v2LaunchPolicy.js';
 
@@ -378,6 +379,8 @@
 	}
 
 </script>
+
+<SeoHead robots="noindex, nofollow, noarchive" canonicalUrl={page.url.origin + page.url.pathname} />
 
 <div class="page">
 	<header>

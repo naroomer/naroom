@@ -1,46 +1,68 @@
 # NA Room
 
-> Anonymous peer-to-peer support platform for people dealing with addiction.
+> Anonymous peer-support platform for people concerned about cannabis use.
 
-NA Room connects people who need help (clients) with peers who have lived experience with addiction and want to support others. No professional credentials required — this is peer support, not medical care.
+NA Room connects people who want support around cannabis use with peers who
+have lived experience and are willing to help. There are no accounts, no
+professional credentials, and no operators — it is peer support, not a
+medical, therapeutic, or emergency service, and not a marketplace for buying,
+selling, or trading cannabis or any other substance.
 
 ## What it is
 
-- Anonymous by design: no accounts, no email, no phone number
-- End-to-end encrypted chat
-- Crypto wallet used only for identity verification (no funds collected from users beyond listing/chat fees)
-- Works on Tor (.onion address available)
-- Open source: https://github.com/naroomer/naroom
+- No account is required — no account credentials such as email or phone
+  number are needed to use the platform
+- A Litecoin (LTC) wallet address is used for eligibility (balance) checks
+  and to receive payment — it is not treated as an account or an identity
+- When a helper opens a client's contact, the client is notified with the
+  helper's platform nickname and rating; the helper, after payment, receives
+  the client's Telegram or Signal contact handle. That contact handle is
+  stored encrypted and available only for a limited time — there is no
+  built-in chat on the platform
+- Runs autonomously: no operators, no customer support, no manual review
 
 ## What it is not
 
-- Not a medical service
-- Not a crisis hotline
-- Not therapy or treatment
-- Not a substitute for emergency services
+- Not a medical service, and not therapy or treatment
+- Not a crisis line or emergency service
+- Not a marketplace for buying, selling, or trading cannabis or any
+  substance — NA Room does not facilitate or encourage use
 
 ## How it works
 
-**For clients (people seeking help):**
-1. Verify a BTC or LTC wallet with $150+ balance (no funds moved — balance check only)
-2. Post an anonymous listing for $5 — visible for 24 hours
-3. Browse responses from peers
-4. Accept one peer — a $15 invoice is created for the peer to pay
-5. Once peer pays, an end-to-end encrypted chat opens (up to 24 hours)
-6. All messages permanently deleted when session closes
+**For clients (people seeking support):**
+1. Enter a Litecoin wallet (recommended balance: $150) and describe the
+   support needed — balance is only checked, never charged beyond the fee below
+2. Pay $5 to publish the listing; it is visible on the public board for 24 hours
+3. Reactivate for free once per day for 5 calendar days total, from the same
+   wallet, with a fresh balance check each time
+4. When a helper opens the contact, its Telegram or Signal nickname and
+   rating appear; the client may rate the helper starting 1 hour after
+   contact opens
 
-**For peers (people who want to help):**
-1. Verify a BTC or LTC wallet with $1,000+ balance
-   - $1,000 = 2 active response slots; each additional $1,000 adds 2 more
-2. Browse the board anonymously — no account needed
-3. Respond to listings for free
-4. If accepted, pay $15 to open the chat
-5. Build anonymous reputation through client ratings (👍 / 👎)
+**For helpers (people offering support):**
+1. Open a real listing and enter a Litecoin wallet with at least $1,010
+   before an invoice is issued
+2. Pay the $10 invoice from that same wallet; the invoice is valid for 60
+   minutes, and paying within the first 40 minutes is recommended
+3. After payment confirms, at least $1,000 must remain on the wallet — the
+   contact (Telegram or Signal) then opens and stays available for 24 hours
+4. The helper may rate the client starting 1 hour after the contact opens;
+   the rating window closes 24 hours after the contact first opened
+
+**Informer (optional notifications, not a chat and not a helper signup):**
+A Litecoin wallet with at least $1,000 can subscribe to Telegram
+notifications for new listings in one city. It only sends notifications —
+it does not open contacts or register anyone as a helper.
 
 ## Fees
 
-- Client: $5 to post a listing (24 hours); renewal is free while fewer than 2 paid chats have opened (no 30-day cutoff; early renewal allowed only during the final hour or after expiry)
-- Peer: $15 to open a chat after being accepted
+- Client: $5 to publish a listing
+- Helper: $10 to open a contact
+
+## Currency
+
+Litecoin (LTC) only during the current launch.
 
 ## Languages
 
@@ -48,27 +70,28 @@ English, Russian, Spanish, Georgian
 
 ## Cities
 
-Buenos Aires, São Paulo, Nha Trang, Da Nang, Tbilisi, Batumi, Almaty, Yerevan, Moscow
-
-## Analytics
-
-Public informational pages (/how-it-works, /board/*) use privacy-respecting analytics (anonymous visit counts only, no personal profile, no cross-site tracking). Chat, payment, listing, wallet, and review flows have no analytics.
+Buenos Aires, São Paulo, Nha Trang, Da Nang, Tbilisi, Batumi, Almaty,
+Yerevan, Moscow, Hanoi, Ho Chi Minh City, Antalya, Bali
 
 ## Public pages (indexed)
 
-- /how-it-works — full guide with role switcher (client / peer) and FAQ
-- /board/{city} — browse listings by city (replace {city} with a city slug above)
+- /v2/how-it-works — how the platform works, in each supported language
+- /v2/board/{city} — browse listings by city (replace {city} with a slug above)
 
-## Private / non-indexed flows (not crawled)
+## Private pages (not indexed, not crawled)
 
-- /new — post a listing (requires wallet verification)
-- /helper — peer notification sign-up
-- /resume — return to an active chat session
-- /chat/{room_id} — end-to-end encrypted chat room
-- /listing/{id} — listing detail and accept flow
-- /invoice/{id} — payment invoice
-- /review/{id} — post-session rating
+- /v2/new — post a listing (requires wallet verification)
+- /v2/restore — return to an existing listing with its recovery code
+- /v2/informer — notification sign-up
+- /v2/listing/{id} — listing detail and contact-purchase flow
+- /v2/helper/purchase, /v2/helper/purchases — helper contact-purchase flow
+- /api/* — application programming interface, not a page
+
+## Source
+
+Open source: https://github.com/naroomer/naroom
 
 ## Emergency
 
-NA Room is not an emergency service. For immediate danger: Georgia/Russia: 112 · Vietnam: 113/115 · Argentina/Brazil: 112
+NA Room is not an emergency service. If you or someone else is in immediate
+danger, contact local emergency services directly.

@@ -329,10 +329,14 @@ en: {
 
 	// ── V2 board ───────────────────────────────────────────────────────────────
 	'v2.board.i_need_help': 'I need help',
+	'v2.seo.board.title': 'NA Room — Cannabis Peer Support in {city}',
+	'v2.seo.board.description': 'Anonymous peer support for people concerned about cannabis use in {city}. No account required. Connect through Telegram or Signal. Not medical or emergency care.',
 
 	// ── V2 how-it-works ────────────────────────────────────────────────────────
 	'v2.hiw.title': 'How it works',
 	'v2.hiw.back':  '← Back to board',
+	'v2.seo.hiw.title': 'NA Room — Private Cannabis Peer Support',
+	'v2.seo.hiw.description': 'Privacy-focused peer support for people concerned about cannabis use. No account required. Connect with a peer through Telegram or Signal. Not medical or emergency care.',
 	'v2.hiw.intro': 'NA Room is an anonymous peer-support service for people dealing with cannabis dependence. A person can post a request for support, and someone with lived experience can find it and contact them directly through Telegram or Signal. The site does not provide medical services and operates automatically, without accounts, operators, or customer support.',
 
 	'v2.hiw.client.title': 'I need help',
@@ -921,9 +925,13 @@ ru: {
 	'v2.nav.how_it_works': 'Как это работает',
 
 	'v2.board.i_need_help': 'Мне нужна помощь',
+	'v2.seo.board.title': 'NA Room — поддержка при каннабисе в {city}',
+	'v2.seo.board.description': 'Анонимная поддержка для тех, кто обеспокоен употреблением каннабиса, в {city}. Аккаунт не нужен. Связь через Telegram или Signal. Не медицинская и не экстренная помощь.',
 
 	'v2.hiw.title': 'Как это работает',
 	'v2.hiw.back':  '← На доску',
+	'v2.seo.hiw.title': 'NA Room — приватная поддержка при каннабисе',
+	'v2.seo.hiw.description': 'Приватная поддержка для тех, кто обеспокоен употреблением каннабиса. Аккаунт не нужен. Связь с равным через Telegram или Signal. Не медицинская и не экстренная помощь.',
 	'v2.hiw.intro': 'NA Room — сервис анонимной взаимопомощи для людей с зависимостью от каннабиса. Здесь человек может разместить просьбу о поддержке, а другой человек с личным опытом — найти её и связаться с ним напрямую через Telegram или Signal. Сайт не оказывает медицинские услуги и работает автоматически, без аккаунтов, операторов и службы поддержки.',
 
 	'v2.hiw.client.title': 'Мне нужна помощь',
@@ -1494,9 +1502,13 @@ es: {
 	'v2.nav.how_it_works': 'Cómo funciona',
 
 	'v2.board.i_need_help': 'Necesito ayuda',
+	'v2.seo.board.title': 'NA Room — apoyo sobre cannabis en {city}',
+	'v2.seo.board.description': 'Apoyo anónimo entre personas para quienes están preocupados por el consumo de cannabis en {city}. No se requiere cuenta. Contacto por Telegram o Signal. No es atención médica ni de emergencia.',
 
 	'v2.hiw.title': 'Cómo funciona',
 	'v2.hiw.back':  '← Volver al tablero',
+	'v2.seo.hiw.title': 'NA Room — apoyo privado sobre cannabis',
+	'v2.seo.hiw.description': 'Apoyo entre personas para quienes están preocupados por el consumo de cannabis. No se requiere cuenta. Contacta con un par por Telegram o Signal. No es atención médica ni de emergencia.',
 	'v2.hiw.intro': 'NA Room es un servicio anónimo de apoyo entre personas para quienes afrontan dependencia del cannabis. Una persona puede publicar una solicitud de apoyo, y alguien con experiencia personal puede encontrarla y contactarla directamente por Telegram o Signal. El sitio no presta servicios médicos y funciona automáticamente, sin cuentas, operadores ni servicio de atención al cliente.',
 
 	'v2.hiw.client.title': 'Necesito ayuda',
@@ -2068,9 +2080,13 @@ ka: {
 	'v2.nav.how_it_works': 'როგორ მუშაობს',
 
 	'v2.board.i_need_help': 'მჭირდება დახმარება',
+	'v2.seo.board.title': 'NA Room — მხარდაჭერა კანაფის საკითხში {city}-ში',
+	'v2.seo.board.description': 'ანონიმური მხარდაჭერა იმათთვის, ვინც შეშფოთებულია კანაფის მოხმარებით {city}-ში. ანგარიში არ არის საჭირო. კავშირი Telegram-ით ან Signal-ით. არ არის სამედიცინო ან საგანგებო დახმარება.',
 
 	'v2.hiw.title': 'როგორ მუშაობს',
 	'v2.hiw.back':  '← დაფაზე დაბრუნება',
+	'v2.seo.hiw.title': 'NA Room — პირადი მხარდაჭერა კანაფის საკითხში',
+	'v2.seo.hiw.description': 'მხარდაჭერა იმათთვის, ვინც შეშფოთებულია კანაფის მოხმარებით. ანგარიში არ არის საჭირო. დაუკავშირდით თანასწორს Telegram-ით ან Signal-ით. არ არის სამედიცინო ან საგანგებო დახმარება.',
 	'v2.hiw.intro': 'NA Room არის ანონიმური ურთიერთდახმარების სერვისი კანაფზე დამოკიდებულების მქონე ადამიანებისთვის. ადამიანს შეუძლია გამოაქვეყნოს მხარდაჭერის მოთხოვნა, ხოლო პირადი გამოცდილების მქონე სხვა ადამიანს შეუძლია იპოვოს ის და პირდაპირ Telegram-ის ან Signal-ის მეშვეობით დაუკავშირდეს. საიტი არ უზრუნველყოფს სამედიცინო მომსახურებას და მუშაობს ავტომატურად, ანგარიშების, ოპერატორებისა და მომხმარებელთა მხარდაჭერის გარეშე.',
 
 	'v2.hiw.client.title': 'დახმარება მჭირდება',

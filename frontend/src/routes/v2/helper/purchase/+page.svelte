@@ -1,6 +1,8 @@
 <script>
 	import { onMount } from 'svelte';
+	import { page } from '$app/state';
 	import { lang, t as tFn } from '$lib/i18n.js';
+	import SeoHead from '$lib/SeoHead.svelte';
 	import V2QR from '$lib/V2QR.svelte';
 	import { LAUNCH_DISPLAY_LIMITS } from '$lib/v2LaunchPolicy.js';
 
@@ -610,6 +612,8 @@
 	let backToListingHref = $derived(listingId ? `/v2/listing/${listingId}` : '');
 	let backToBoardHref   = $derived(city ? `/v2/board/${city}` : '/v2/board/tbilisi');
 </script>
+
+<SeoHead robots="noindex, nofollow, noarchive" canonicalUrl={page.url.origin + page.url.pathname} />
 
 <div class="layout">
 	<!-- ── Topbar ── -->

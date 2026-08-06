@@ -1,5 +1,7 @@
 <script>
+	import { page } from '$app/state';
 	import { lang, t as tFn } from '$lib/i18n.js';
+	import SeoHead from '$lib/SeoHead.svelte';
 
 	let t = $derived((key, params) => tFn($lang, key, params));
 
@@ -62,6 +64,8 @@
 		}
 	}
 </script>
+
+<SeoHead robots="noindex, nofollow, noarchive" canonicalUrl={page.url.origin + page.url.pathname} />
 
 <div class="page">
 	<header>

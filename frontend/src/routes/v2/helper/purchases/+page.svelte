@@ -1,6 +1,8 @@
 <script>
 	import { onMount } from 'svelte';
+	import { page } from '$app/state';
 	import { lang, t as tFn } from '$lib/i18n.js';
+	import SeoHead from '$lib/SeoHead.svelte';
 	// Cities loaded from API — no static registry in V2 frontend.
 	let citiesData = $state([]);
 
@@ -149,6 +151,8 @@
 		return new Date(unix * 1000).toLocaleString();
 	}
 </script>
+
+<SeoHead robots="noindex, nofollow, noarchive" canonicalUrl={page.url.origin + page.url.pathname} />
 
 <div class="page">
 	<header>

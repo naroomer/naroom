@@ -1,20 +1,53 @@
 <script>
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
-	import { lang, t as tFn } from '$lib/i18n.js';
+	import { t as tFn } from '$lib/i18n.js';
+	import SeoHead from '$lib/SeoHead.svelte';
 	import { V2_SAMPLES } from '$lib/v2Samples.js';
 	import { isLaunchListing } from '$lib/v2LaunchPolicy.js';
+	import { SITE_ORIGIN, SUPPORTED_SEO_LANGS, langFromUrl, langQuery } from '$lib/seoConfig.js';
 
-	let t = $derived((key, params) => tFn($lang, key, params));
+	let { data } = $props();
+
+	// The URL's ?lang= is authoritative on this page — during SSR and after
+	// hydration alike, since both read the same page.url. It never flips to
+	// the browser/localStorage language post-hydration; the global switcher
+	// (in +layout.svelte) updates this same URL instead when used here.
+	let effectiveLang = $derived(langFromUrl(page.url));
+	let t = $derived((key, params) => tFn(effectiveLang, key, params));
 
 	let city = $derived(page.params.city);
-	let cities = $state([]);
-	let listings = $state([]);
-	let loading = $state(true);
+	// Seeded once from the server load's initial value on purpose (SSR-safe
+	// board data) — untrack() makes that intent explicit instead of relying
+	// on $state's default one-time-read behavior, which the compiler
+	// otherwise flags as a possible mistake (see task point 10).
+	let cities = $state(untrack(() => data.cities) ?? []);
+	let listings = $state(untrack(() => data.listings) ?? []);
+	let loading = $state(false);
 	let error = $state('');
 	let savedListingIds = $state(new Set());
 	const samples = V2_SAMPLES;
+
+	let cityLabel = $derived(cities.find((c) => c.id === city)?.label ?? city);
+	let canonicalUrl = $derived(SITE_ORIGIN + page.url.pathname + langQuery(effectiveLang));
+	let hreflangs = $derived(
+		SUPPORTED_SEO_LANGS.map((l) => ({
+			lang: l,
+			href: SITE_ORIGIN + page.url.pathname + langQuery(l),
+		})).concat([{ lang: 'x-default', href: SITE_ORIGIN + page.url.pathname }])
+	);
+	let jsonLd = $derived([
+		{
+			'@context': 'https://schema.org',
+			'@type': 'WebPage',
+			name: tFn(effectiveLang, 'v2.seo.board.title', { city: cityLabel }),
+			description: tFn(effectiveLang, 'v2.seo.board.description', { city: cityLabel }),
+			url: canonicalUrl,
+			inLanguage: effectiveLang,
+			isPartOf: { '@type': 'WebSite', name: 'NA Room', url: SITE_ORIGIN + '/v2/how-it-works' },
+		},
+	]);
 
 	function urgencyColor(u) {
 		if (u === 'urgent')   return 'var(--urgent)';
@@ -76,20 +109,31 @@
 	$effect(() => { city; loadBoard(); });
 </script>
 
+<SeoHead
+	title={t('v2.seo.board.title', { city: cityLabel })}
+	description={t('v2.seo.board.description', { city: cityLabel })}
+	robots="index, follow"
+	canonicalUrl={canonicalUrl}
+	lang={effectiveLang}
+	ogImageUrl={SITE_ORIGIN + '/og-preview.png'}
+	hreflangs={hreflangs}
+	jsonLd={jsonLd}
+/>
+
 <div class="page">
 	<header>
 		<div class="logo">NA Room <span class="v2-badge">V2</span></div>
 		<nav>
 			<a href="/v2/restore">{t('v2.nav.restore')}</a>
 			<a href="/v2/informer">{t('v2.nav.informer')}</a>
-			<a href="/v2/how-it-works">{t('v2.nav.how_it_works')}</a>
+			<a href="/v2/how-it-works{langQuery(effectiveLang)}">{t('v2.nav.how_it_works')}</a>
 		</nav>
 	</header>
 
 	<div class="tabs">
 		{#each cities as c}
 			<a
-				href="/v2/board/{c.id}"
+				href="/v2/board/{c.id}{langQuery(effectiveLang)}"
 				class="tab"
 				class:active={c.id === city}
 			>{c.label}</a>

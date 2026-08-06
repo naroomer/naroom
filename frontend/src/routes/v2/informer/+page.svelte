@@ -1,6 +1,8 @@
 <script>
 	import { onMount, onDestroy } from 'svelte';
+	import { page } from '$app/state';
 	import { lang, t as tFn } from '$lib/i18n.js';
+	import SeoHead from '$lib/SeoHead.svelte';
 	import { LAUNCH_CURRENCY, LAUNCH_DISPLAY_LIMITS, detectLaunchCurrency } from '$lib/v2LaunchPolicy.js';
 	// Cities loaded from API — no static registry in V2 frontend.
 	let citiesData = $state([]);
@@ -126,6 +128,8 @@
 		stopPoll();
 	});
 </script>
+
+<SeoHead robots="noindex, nofollow, noarchive" canonicalUrl={page.url.origin + page.url.pathname} />
 
 <div class="page">
 	<a href="/v2/board/{city || 'tbilisi'}" class="back">← {t('back_to_board')}</a>
