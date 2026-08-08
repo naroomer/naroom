@@ -7,6 +7,7 @@
 	import { V2_SAMPLES } from '$lib/v2Samples.js';
 	import { isLaunchListing } from '$lib/v2LaunchPolicy.js';
 	import { SITE_ORIGIN, SUPPORTED_SEO_LANGS, langFromUrl, langQuery } from '$lib/seoConfig.js';
+	import { buildBoardShareUrl, isKnownCity } from '$lib/shareLinks.js';
 
 	let { data } = $props();
 
@@ -48,6 +49,77 @@
 			isPartOf: { '@type': 'WebSite', name: 'NA Room', url: SITE_ORIGIN + '/v2/how-it-works' },
 		},
 	]);
+
+	// ── Share / distribution actions ──────────────────────────────────────────
+	// Both URLs carry only the public city slug (checked against the same
+	// registry `cities` array the board itself loads) plus a fixed UTM set —
+	// see $lib/shareLinks.js. null when the city is not a known, enabled one
+	// (e.g. mid-load, or a garbage slug), which hides the share row entirely.
+	let shareBoardUrl = $derived(buildBoardShareUrl(city, cities, 'copy_link'));
+	let nativeShareUrl = $derived(buildBoardShareUrl(city, cities, 'native_share'));
+	let shareText = $derived(t('v2.board.share.native_text', { city: cityLabel }));
+
+	let shareBoardMsg = $state('');
+	let sendMsg = $state('');
+	let shareBoardMsgTimer;
+	let sendMsgTimer;
+
+	async function copyToClipboard(text) {
+		if (navigator.clipboard?.writeText) {
+			try {
+				await navigator.clipboard.writeText(text);
+				return true;
+			} catch {}
+		}
+		// Fallback for browsers/contexts without the Clipboard API: a hidden,
+		// off-screen textarea + the legacy execCommand('copy'). Never throws
+		// past this function — a failure here just returns false.
+		try {
+			const ta = document.createElement('textarea');
+			ta.value = text;
+			ta.style.position = 'fixed';
+			ta.style.top = '0';
+			ta.style.left = '-9999px';
+			ta.style.opacity = '0';
+			document.body.appendChild(ta);
+			ta.focus();
+			ta.select();
+			const ok = document.execCommand('copy');
+			document.body.removeChild(ta);
+			return ok;
+		} catch {
+			return false;
+		}
+	}
+
+	async function handleShareBoard() {
+		if (!shareBoardUrl) return;
+		const ok = await copyToClipboard(shareBoardUrl);
+		shareBoardMsg = ok ? t('v2.board.share.link_copied') : t('v2.board.share.copy_error');
+		clearTimeout(shareBoardMsgTimer);
+		shareBoardMsgTimer = setTimeout(() => { shareBoardMsg = ''; }, 2500);
+	}
+
+	async function handleSendToSomeone() {
+		if (!nativeShareUrl) return;
+		if (typeof navigator.share === 'function') {
+			try {
+				await navigator.share({
+					title: t('v2.seo.board.title', { city: cityLabel }),
+					text: shareText,
+					url: nativeShareUrl,
+				});
+				return; // the OS share sheet is itself the confirmation
+			} catch (e) {
+				if (e?.name === 'AbortError') return; // user cancelled — not an error
+				// any other failure falls through to the clipboard fallback below
+			}
+		}
+		const ok = await copyToClipboard(`${shareText} ${nativeShareUrl}`);
+		sendMsg = ok ? t('v2.board.share.message_copied') : t('v2.board.share.copy_error');
+		clearTimeout(sendMsgTimer);
+		sendMsgTimer = setTimeout(() => { sendMsg = ''; }, 2500);
+	}
 
 	function urgencyColor(u) {
 		if (u === 'urgent')   return 'var(--urgent)';
@@ -139,6 +211,17 @@
 			>{c.label}</a>
 		{/each}
 	</div>
+
+	{#if isKnownCity(city, cities)}
+		<div class="share-row">
+			<button type="button" class="share-btn" onclick={handleShareBoard}>
+				{shareBoardMsg || t('v2.board.share.share_board')}
+			</button>
+			<button type="button" class="share-btn" onclick={handleSendToSomeone}>
+				{sendMsg || t('v2.board.share.send_to_someone')}
+			</button>
+		</div>
+	{/if}
 
 	{#if loading}
 		<div class="status-msg">{t('v2.loading')}</div>
@@ -284,6 +367,20 @@
 	}
 	.tab:hover { background: var(--bg-card); color: var(--text); }
 	.tab.active { background: var(--bg-card); color: var(--text); }
+
+	.share-row {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 16px;
+		padding-bottom: 16px;
+	}
+	.share-btn {
+		color: var(--text-dim);
+		font-size: 13px;
+		white-space: nowrap;
+		transition: color 0.15s;
+	}
+	.share-btn:hover { color: var(--text); }
 
 	.status-msg {
 		text-align: center;

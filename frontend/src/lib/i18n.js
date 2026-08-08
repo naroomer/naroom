@@ -633,6 +633,14 @@ en: {
 	// ── V2 board empty state (H2.5) ───────────────────────────────────────────
 	'v2.board.empty_state': 'No active requests in this city right now.',
 	'v2.board.empty_cta':   'Create the first one',
+
+	// ── V2 board share/distribution actions ───────────────────────────────────
+	'v2.board.share.share_board':     'Share board',
+	'v2.board.share.send_to_someone': 'Send to someone',
+	'v2.board.share.link_copied':     'Link copied',
+	'v2.board.share.message_copied':  'Message copied',
+	'v2.board.share.native_text':     'NA Room — an anonymous peer-support board for cannabis concerns in {city}.',
+	'v2.board.share.copy_error':      "Couldn't copy the link",
 },
 
 // ═══════════════════════════════════════ RUSSIAN ════════════════════════════
@@ -1216,6 +1224,14 @@ ru: {
 	// ── V2 board empty state (H2.5) ───────────────────────────────────────────
 	'v2.board.empty_state': 'В этом городе сейчас нет активных объявлений.',
 	'v2.board.empty_cta':   'Создайте первое',
+
+	// ── V2 board share/distribution actions ───────────────────────────────────
+	'v2.board.share.share_board':     'Поделиться доской',
+	'v2.board.share.send_to_someone': 'Отправить человеку',
+	'v2.board.share.link_copied':     'Ссылка скопирована',
+	'v2.board.share.message_copied':  'Сообщение скопировано',
+	'v2.board.share.native_text':     'NA Room — анонимная площадка взаимной поддержки при проблемах с каннабисом в городе {city}.',
+	'v2.board.share.copy_error':      'Не удалось скопировать ссылку',
 },
 
 // ═══════════════════════════════════════ SPANISH ════════════════════════════
@@ -1793,6 +1809,14 @@ es: {
 	// ── V2 board empty state (H2.5) ───────────────────────────────────────────
 	'v2.board.empty_state': 'No hay solicitudes activas en esta ciudad ahora mismo.',
 	'v2.board.empty_cta':   'Crea la primera',
+
+	// ── V2 board share/distribution actions ───────────────────────────────────
+	'v2.board.share.share_board':     'Compartir tablero',
+	'v2.board.share.send_to_someone': 'Enviar a alguien',
+	'v2.board.share.link_copied':     'Enlace copiado',
+	'v2.board.share.message_copied':  'Mensaje copiado',
+	'v2.board.share.native_text':     'NA Room — un tablero anónimo de apoyo entre personas sobre el consumo de cannabis en {city}.',
+	'v2.board.share.copy_error':      'No se pudo copiar el enlace',
 },
 
 // ═══════════════════════════════════════ GEORGIAN ═══════════════════════════
@@ -2371,6 +2395,14 @@ ka: {
 	// ── V2 board empty state (H2.5) ───────────────────────────────────────────
 	'v2.board.empty_state': 'ამ ქალაქში ახლა აქტიური განცხადებები არ არის.',
 	'v2.board.empty_cta':   'შექმენით პირველი',
+
+	// ── V2 board share/distribution actions ───────────────────────────────────
+	'v2.board.share.share_board':     'დაფის გაზიარება',
+	'v2.board.share.send_to_someone': 'გაუგზავნეთ ვინმეს',
+	'v2.board.share.link_copied':     'ბმული დაკოპირდა',
+	'v2.board.share.message_copied':  'შეტყობინება დაკოპირდა',
+	'v2.board.share.native_text':     'NA Room — ანონიმური ურთიერთდახმარების დაფა კანაფთან დაკავშირებული საკითხებისთვის {city}-ში.',
+	'v2.board.share.copy_error':      'ვერ მოხერხდა ბმულის კოპირება',
 },
 
 };
